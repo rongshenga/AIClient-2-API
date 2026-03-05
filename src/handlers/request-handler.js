@@ -52,6 +52,16 @@ export function createRequestHandler(config, providerPoolManager) {
         const requestId = `${clientIp}:${generateRequestId()}`;
         logger.setRequestContext(requestId);
 
+        let contextCleared = false;
+        const clearLoggerContext = () => {
+            if (contextCleared) return;
+            contextCleared = true;
+            logger.clearRequestContext(requestId);
+        };
+        // 无论走哪条分支，只要响应结束就清理请求上下文
+        res.once('finish', clearLoggerContext);
+        res.once('close', clearLoggerContext);
+
         // Deep copy the config for each request to allow dynamic modification
         const currentConfig = deepmerge({}, config);
         
@@ -261,7 +271,7 @@ export function createRequestHandler(config, providerPoolManager) {
             handleError(res, error, currentConfig.MODEL_PROVIDER);
         } finally {
             // Clear request context after request is complete
-            logger.clearRequestContext(requestId);
+            clearLoggerContext();
         }
     };
 }

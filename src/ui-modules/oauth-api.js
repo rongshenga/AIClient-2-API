@@ -8,6 +8,7 @@ import {
     handleKiroOAuth,
     handleIFlowOAuth,
     handleCodexOAuth,
+    handleCodexOAuthCancel,
     batchImportKiroRefreshTokensStream,
     importAwsCredentials
 } from '../auth/oauth-handlers.js';
@@ -82,6 +83,45 @@ export async function handleGenerateAuthUrl(req, res, currentConfig, providerTyp
             error: {
                 message: `Failed to generate auth URL: ${error.message}`
             }
+        }));
+        return true;
+    }
+}
+
+/**
+ * 取消 OAuth 授权流程
+ */
+export async function handleCancelAuth(req, res, providerType) {
+    try {
+        let options = {};
+        try {
+            options = await getRequestBody(req);
+        } catch {
+            // 无请求体时使用默认参数
+        }
+
+        if (providerType !== 'openai-codex-oauth') {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: false,
+                error: `Provider ${providerType} does not support cancel-auth API`
+            }));
+            return true;
+        }
+
+        const result = await handleCodexOAuthCancel({
+            sessionId: options.sessionId
+        });
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+        return true;
+    } catch (error) {
+        logger.error(`[UI API] Failed to cancel auth for ${providerType}:`, error);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: false,
+            error: `Failed to cancel auth: ${error.message}`
         }));
         return true;
     }

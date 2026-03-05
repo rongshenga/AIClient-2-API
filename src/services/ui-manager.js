@@ -224,6 +224,13 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
         return await oauthApi.handleGenerateAuthUrl(req, res, currentConfig, providerType);
     }
 
+    // Cancel OAuth authorization flow for providers
+    const cancelAuthMatch = pathParam.match(/^\/api\/providers\/([^\/]+)\/cancel-auth$/);
+    if (method === 'POST' && cancelAuthMatch) {
+        const providerType = decodeURIComponent(cancelAuthMatch[1]);
+        return await oauthApi.handleCancelAuth(req, res, providerType);
+    }
+
     // Handle manual OAuth callback
     if (method === 'POST' && pathParam === '/api/oauth/manual-callback') {
         return await oauthApi.handleManualOAuthCallback(req, res);

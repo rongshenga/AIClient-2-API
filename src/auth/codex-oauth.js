@@ -59,6 +59,59 @@ async function closeActiveServer(provider, port = null) {
 }
 
 /**
+ * 安全关闭指定 server，并从 activeServers 中移除映射
+ * @param {http.Server|null} server
+ * @param {string} provider
+ */
+async function closeServerSafely(server, provider = 'openai-codex-oauth') {
+    if (!server) return;
+
+    await new Promise((resolve) => {
+        try {
+            // 已关闭或未监听时，直接继续
+            if (!server.listening) {
+                resolve();
+                return;
+            }
+            server.close(() => resolve());
+        } catch {
+            resolve();
+        }
+    });
+
+    const active = activeServers.get(provider);
+    if (active && active.server === server) {
+        activeServers.delete(provider);
+    }
+}
+
+/**
+ * 清理 Codex OAuth 会话（定时器 + 回调服务器 + 会话映射）
+ * @param {string} sessionId
+ * @param {string} reason
+ * @returns {Promise<boolean>}
+ */
+async function cleanupCodexSession(sessionId, reason = '') {
+    if (!global.codexOAuthSessions || !global.codexOAuthSessions.has(sessionId)) {
+        return false;
+    }
+
+    const session = global.codexOAuthSessions.get(sessionId);
+    if (session?.pollTimer) {
+        clearInterval(session.pollTimer);
+        session.pollTimer = null;
+    }
+
+    await closeServerSafely(session?.server, 'openai-codex-oauth');
+    global.codexOAuthSessions.delete(sessionId);
+
+    if (reason) {
+        logger.info(`[Codex Auth] Session cleaned: ${sessionId} (${reason})`);
+    }
+    return true;
+}
+
+/**
  * Codex OAuth 认证类
  * 实现 OAuth2 + PKCE 流程
  */
@@ -172,9 +225,9 @@ class CodexAuth {
         logger.info(`${CODEX_OAUTH_CONFIG.logPrefix} Email: ${credentials.email}`);
         logger.info(`${CODEX_OAUTH_CONFIG.logPrefix} Account ID: ${credentials.account_id}`);
 
-        // 关闭服务器
+        // 关闭服务器并清理活动映射
         if (this.server) {
-            this.server.close();
+            await closeServerSafely(this.server, 'openai-codex-oauth');
             this.server = null;
         }
 
@@ -640,14 +693,9 @@ export async function handleCodexOAuth(currentConfig, options = {}) {
         // 清理所有旧的会话和服务器
         if (global.codexOAuthSessions && global.codexOAuthSessions.size > 0) {
             logger.info('[Codex Auth] Cleaning up old OAuth sessions...');
-            for (const [sessionId, session] of global.codexOAuthSessions.entries()) {
+            for (const sessionId of Array.from(global.codexOAuthSessions.keys())) {
                 try {
-                    // 清理定时器
-                    if (session.pollTimer) {
-                        clearInterval(session.pollTimer);
-                    }
-                    // 不在这里显式关闭 server，由 startCallbackServer 中的 closeActiveServer 处理
-                    global.codexOAuthSessions.delete(sessionId);
+                    await cleanupCodexSession(sessionId, 'replaced by new authorization');
                 } catch (error) {
                     logger.warn(`[Codex Auth] Failed to clean up session ${sessionId}:`, error.message);
                 }
@@ -693,14 +741,13 @@ export async function handleCodexOAuth(currentConfig, options = {}) {
             }
             
             if (pollCount >= maxPollCount && !isCompleted) {
-                clearInterval(pollTimer);
+                isCompleted = true;
                 const totalSeconds = (maxPollCount * pollInterval) / 1000;
                 logger.info(`[Codex Auth] Polling timeout (${totalSeconds}s), releasing session for next authorization`);
-                
-                // 清理会话
-                if (global.codexOAuthSessions.has(sessionId)) {
-                    global.codexOAuthSessions.delete(sessionId);
-                }
+                // 轮询超时时需要同时关闭回调端口，避免继续占用
+                cleanupCodexSession(sessionId, 'polling timeout').catch((error) => {
+                    logger.warn(`[Codex Auth] Failed to cleanup timeout session ${sessionId}:`, error.message);
+                });
             }
         }, pollInterval);
         
@@ -710,24 +757,18 @@ export async function handleCodexOAuth(currentConfig, options = {}) {
         // 监听回调服务器的 auth-success 事件，自动完成 OAuth 流程
         server.once('auth-success', async (result) => {
             isCompleted = true;
-            if (pollTimer) {
-                clearInterval(pollTimer);
-            }
             
             try {
                 logger.info('[Codex Auth] Received auth callback, completing OAuth flow...');
                 
                 const session = global.codexOAuthSessions.get(sessionId);
                 if (!session) {
-                    logger.error('[Codex Auth] Session not found');
+                    logger.warn('[Codex Auth] Session not found (possibly canceled), ignore callback');
                     return;
                 }
 
                 // 完成 OAuth 流程
                 const credentials = await auth.completeOAuthFlow(result.code, result.state, session.state, session.pkce);
-
-                // 清理会话
-                global.codexOAuthSessions.delete(sessionId);
 
                 // 广播认证成功事件
                 broadcastEvent('oauth_success', {
@@ -755,18 +796,17 @@ export async function handleCodexOAuth(currentConfig, options = {}) {
                     error: error.message,
                     timestamp: new Date().toISOString()
                 });
+            } finally {
+                await cleanupCodexSession(sessionId, 'callback completed');
             }
         });
 
         // 监听 auth-error 事件
-        server.once('auth-error', (error) => {
+        server.once('auth-error', async (error) => {
             isCompleted = true;
-            if (pollTimer) {
-                clearInterval(pollTimer);
-            }
             
             logger.error('[Codex Auth] Auth error:', error.message);
-            global.codexOAuthSessions.delete(sessionId);
+            await cleanupCodexSession(sessionId, 'callback error');
             
             broadcastEvent('oauth_error', {
                 provider: 'openai-codex-oauth',
@@ -814,12 +854,49 @@ export async function handleCodexOAuth(currentConfig, options = {}) {
 }
 
 /**
+ * 取消 Codex OAuth 授权流程
+ * @param {Object} options
+ * @param {string} [options.sessionId] - 可选，仅取消指定会话
+ * @returns {Promise<Object>}
+ */
+export async function handleCodexOAuthCancel(options = {}) {
+    const { sessionId } = options;
+    let canceledCount = 0;
+
+    if (global.codexOAuthSessions && global.codexOAuthSessions.size > 0) {
+        const targetSessionIds = sessionId
+            ? [sessionId]
+            : Array.from(global.codexOAuthSessions.keys());
+
+        for (const id of targetSessionIds) {
+            try {
+                const canceled = await cleanupCodexSession(id, 'manual cancel');
+                if (canceled) canceledCount++;
+            } catch (error) {
+                logger.warn(`[Codex Auth] Failed to cancel session ${id}:`, error.message);
+            }
+        }
+    }
+
+    // 兜底关闭活动回调服务器（会话可能已过期但端口仍占用）
+    await closeActiveServer('openai-codex-oauth', CODEX_OAUTH_CONFIG.port);
+
+    logger.info(`[Codex Auth] OAuth canceled, closed session count: ${canceledCount}`);
+    return {
+        success: true,
+        provider: 'openai-codex-oauth',
+        canceled: canceledCount
+    };
+}
+
+/**
  * 处理 Codex OAuth 回调
  * @param {string} code - 授权码
  * @param {string} state - 状态参数
  * @returns {Promise<Object>} 返回认证结果
  */
 export async function handleCodexOAuthCallback(code, state) {
+    let callbackSuccess = false;
     try {
         if (!global.codexOAuthSessions || !global.codexOAuthSessions.has(state)) {
             throw new Error('Invalid or expired OAuth session');
@@ -832,9 +909,6 @@ export async function handleCodexOAuthCallback(code, state) {
 
         // 完成 OAuth 流程
         const result = await auth.completeOAuthFlow(code, state, expectedState, pkce);
-
-        // 清理会话
-        global.codexOAuthSessions.delete(state);
 
         // 广播认证成功事件（与 gemini 格式一致）
         broadcastEvent('oauth_success', {
@@ -853,6 +927,7 @@ export async function handleCodexOAuthCallback(code, state) {
         });
 
         logger.info('[Codex Auth] OAuth callback processed successfully');
+        callbackSuccess = true;
 
         return {
             success: true,
@@ -877,5 +952,12 @@ export async function handleCodexOAuthCallback(code, state) {
             success: false,
             error: error.message
         };
+    } finally {
+        // 无论成功失败都要清理轮询定时器与监听端口
+        try {
+            await cleanupCodexSession(state, callbackSuccess ? 'manual callback success' : 'manual callback finished');
+        } catch (cleanupError) {
+            logger.warn('[Codex Auth] Failed to cleanup callback session:', cleanupError.message);
+        }
     }
 }

@@ -2167,6 +2167,9 @@ function showAuthModal(authUrl, authInfo) {
     // 获取需要开放的端口号（从 authInfo 或当前页面 URL）
     const requiredPort = authInfo.callbackPort || authInfo.port || window.location.port || '3000';
     const isDeviceFlow = authInfo.provider === 'openai-qwen-oauth' || (authInfo.provider === 'claude-kiro-oauth' && authInfo.authMethod === 'builder-id');
+    let authCompleted = false;
+    let isClosing = false;
+    let oauthSuccessListener = null;
 
     let instructionsHtml = '';
     if (authInfo.provider === 'openai-qwen-oauth') {
@@ -2308,13 +2311,45 @@ function showAuthModal(authUrl, authInfo) {
     `;
     
     document.body.appendChild(modal);
+
+    // 关闭授权弹窗时，同步通知后端取消仍在等待的 OAuth 会话
+    async function cancelPendingAuth() {
+        if (authInfo.provider !== 'openai-codex-oauth') {
+            return;
+        }
+
+        try {
+            await window.apiClient.post(`/providers/${encodeURIComponent(authInfo.provider)}/cancel-auth`, {
+                sessionId: authInfo.sessionId
+            });
+            console.log('[OAuth] Pending auth session canceled');
+        } catch (error) {
+            console.error('[OAuth] Failed to cancel pending auth session:', error);
+        }
+    }
+
+    async function closeAuthModal({ cancelPending = true } = {}) {
+        if (isClosing) return;
+        isClosing = true;
+
+        if (oauthSuccessListener) {
+            window.removeEventListener('oauth_success_event', oauthSuccessListener);
+            oauthSuccessListener = null;
+        }
+
+        modal.remove();
+
+        if (cancelPending && !authCompleted) {
+            await cancelPendingAuth();
+        }
+    }
     
     // 关闭按钮事件
     const closeBtn = modal.querySelector('.modal-close');
     const cancelBtn = modal.querySelector('.modal-cancel');
     [closeBtn, cancelBtn].forEach(btn => {
         btn.addEventListener('click', () => {
-            modal.remove();
+            void closeAuthModal();
         });
     });
     
@@ -2324,7 +2359,7 @@ function showAuthModal(authUrl, authInfo) {
         regenerateBtn.onclick = async () => {
             const newPort = modal.querySelector('.auth-port-input').value;
             if (newPort && newPort !== requiredPort) {
-                modal.remove();
+                await closeAuthModal();
                 // 构造重新请求的参数
                 const options = { ...authInfo, port: newPort };
                 // 移除不需要传递回后端的字段
@@ -2343,7 +2378,7 @@ function showAuthModal(authUrl, authInfo) {
         regenerateBuilderIdBtn.onclick = async () => {
             const builderIdStartUrl = modal.querySelector('.builder-id-start-url-input').value.trim();
             const region = modal.querySelector('.builder-id-region-input').value.trim();
-            modal.remove();
+            await closeAuthModal();
             // 构造重新请求的参数
             const options = {
                 ...authInfo,
@@ -2385,17 +2420,18 @@ function showAuthModal(authUrl, authInfo) {
         
         // 监听 OAuth 成功事件，自动关闭窗口和模态框
         const handleOAuthSuccess = () => {
+            authCompleted = true;
             if (authWindow && !authWindow.closed) {
                 authWindow.close();
             }
-            modal.remove();
-            window.removeEventListener('oauth_success_event', handleOAuthSuccess);
+            void closeAuthModal({ cancelPending: false });
             
             // 授权成功后刷新配置和提供商列表
             loadProviders();
             loadConfigList();
         };
-        window.addEventListener('oauth_success_event', handleOAuthSuccess);
+        oauthSuccessListener = handleOAuthSuccess;
+        window.addEventListener('oauth_success_event', oauthSuccessListener);
         
         if (authWindow) {
             showToast(t('common.info'), t('oauth.window.opened'), 'info');
