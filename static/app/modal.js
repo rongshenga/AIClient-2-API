@@ -62,6 +62,11 @@ function showProviderManagerModal(data) {
                         <button class="btn btn-success" onclick="window.showAddProviderForm('${providerType}')">
                             <i class="fas fa-plus"></i> <span data-i18n="modal.provider.add">添加新提供商</span>
                         </button>
+                        ${providerType === 'grok-custom' ? `
+                        <button class="btn btn-primary" onclick="window.showGrokBatchImportModal('${providerType}')">
+                            <i class="fas fa-file-import"></i> <span data-i18n="modal.provider.grokBatchImport">${t('modal.provider.grokBatchImport')}</span>
+                        </button>
+                        ` : ''}
                         <button class="btn btn-warning" onclick="window.resetAllProvidersHealth('${providerType}')" data-i18n="modal.provider.resetHealth" title="将所有节点的健康状态重置为健康">
                             <i class="fas fa-heartbeat"></i> 重置为健康
                         </button>
@@ -1135,6 +1140,208 @@ function showAddProviderForm(providerType) {
 }
 
 /**
+ * 显示 Grok SSO Token 批量导入对话框
+ * @param {string} providerType - 提供商类型
+ */
+function showGrokBatchImportModal(providerType = 'grok-custom') {
+    const existingModal = document.querySelector('.grok-batch-import-modal');
+    if (existingModal) {
+        existingModal.remove();
+    }
+
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay grok-batch-import-modal';
+    modal.style.display = 'flex';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width: 760px;">
+            <div class="modal-header">
+                <h3><i class="fas fa-file-import"></i> ${t('modal.provider.grokBatchImportTitle')}</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div style="margin-bottom: 16px; padding: 12px; border-radius: 8px; background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af;">
+                    <i class="fas fa-info-circle"></i> ${t('modal.provider.grokBatchImportDesc')}
+                </div>
+
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 8px; font-weight: 600;">${t('modal.provider.grokBatchImportTokensLabel')}</label>
+                    <textarea id="grokBatchTokens" rows="8" style="width: 100%; padding: 12px; border: 1px solid #d1d5db; border-radius: 8px; font-family: monospace; font-size: 13px; resize: vertical;" placeholder="${t('modal.provider.grokBatchImportTokensPlaceholder')}"></textarea>
+                </div>
+                <div style="margin-top: 8px; font-size: 12px; color: #64748b;">
+                    ${t('modal.provider.grokBatchImportCount')} <strong id="grokBatchTokenCount">0</strong>
+                </div>
+
+                <div class="form-grid" style="margin-top: 16px;">
+                    <div class="form-group">
+                        <label>${t('modal.provider.grokBatchImportCustomPrefix')}</label>
+                        <input type="text" id="grokBatchCustomPrefix" placeholder="${t('modal.provider.grokBatchImportCustomPrefixPlaceholder')}">
+                    </div>
+                    <div class="form-group">
+                        <label>${t('modal.provider.checkModelName')} <span class="optional-mark">${t('config.optional')}</span></label>
+                        <input type="text" id="grokBatchCheckModelName" placeholder="例如: grok-4">
+                    </div>
+                </div>
+
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label>${t('modal.provider.healthCheckLabel')}</label>
+                        <select id="grokBatchCheckHealth">
+                            <option value="false">${t('modal.provider.disabled')}</option>
+                            <option value="true">${t('modal.provider.enabled')}</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>${t('modal.provider.field.grokBaseUrl')} <span class="optional-mark">${t('config.optional')}</span></label>
+                        <input type="text" id="grokBatchBaseUrl" placeholder="https://grok.com" value="https://grok.com">
+                    </div>
+                </div>
+
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label>${t('modal.provider.field.cfClearance')} <span class="optional-mark">${t('config.optional')}</span></label>
+                        <input type="text" id="grokBatchCfClearance" placeholder="cf_clearance cookie value">
+                    </div>
+                    <div class="form-group">
+                        <label>${t('modal.provider.field.userAgent')} <span class="optional-mark">${t('config.optional')}</span></label>
+                        <input type="text" id="grokBatchUserAgent" placeholder="Mozilla/5.0 ...">
+                    </div>
+                </div>
+
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label>${t('modal.provider.concurrencyLimit')} <span class="optional-mark">${t('config.optional')}</span></label>
+                        <input type="number" id="grokBatchConcurrencyLimit" value="0" min="0">
+                    </div>
+                    <div class="form-group">
+                        <label>${t('modal.provider.queueLimit')} <span class="optional-mark">${t('config.optional')}</span></label>
+                        <input type="number" id="grokBatchQueueLimit" value="0" min="0">
+                    </div>
+                </div>
+
+                <div id="grokBatchResult" style="display: none; margin-top: 16px; padding: 12px; border-radius: 8px;"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-cancel">${t('modal.provider.cancel')}</button>
+                <button class="btn btn-primary" id="grokBatchSubmit">
+                    <i class="fas fa-upload"></i> ${t('modal.provider.grokBatchImportStart')}
+                </button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    const closeBtn = modal.querySelector('.modal-close');
+    const cancelBtn = modal.querySelector('.modal-cancel');
+    const submitBtn = modal.querySelector('#grokBatchSubmit');
+    const textarea = modal.querySelector('#grokBatchTokens');
+    const tokenCountEl = modal.querySelector('#grokBatchTokenCount');
+    const resultEl = modal.querySelector('#grokBatchResult');
+
+    const normalizeToken = (token) => {
+        const trimmed = token.trim();
+        return trimmed.startsWith('sso=') ? trimmed.slice(4).trim() : trimmed;
+    };
+
+    const getTokens = () => {
+        return textarea.value
+            .split(/\r?\n/)
+            .map(line => normalizeToken(line))
+            .filter(Boolean);
+    };
+
+    const updateTokenCount = () => {
+        tokenCountEl.textContent = String(getTokens().length);
+    };
+
+    textarea.addEventListener('input', updateTokenCount);
+    updateTokenCount();
+
+    [closeBtn, cancelBtn].forEach(btn => {
+        btn.addEventListener('click', () => {
+            modal.remove();
+        });
+    });
+
+    submitBtn.addEventListener('click', async () => {
+        const tokens = getTokens();
+        if (tokens.length === 0) {
+            showToast(t('common.warning'), t('modal.provider.grokBatchImportNoTokens'), 'warning');
+            return;
+        }
+
+        const commonConfig = {
+            customNamePrefix: modal.querySelector('#grokBatchCustomPrefix')?.value?.trim() || '',
+            checkModelName: modal.querySelector('#grokBatchCheckModelName')?.value?.trim() || '',
+            checkHealth: modal.querySelector('#grokBatchCheckHealth')?.value === 'true',
+            GROK_BASE_URL: modal.querySelector('#grokBatchBaseUrl')?.value?.trim() || 'https://grok.com',
+            GROK_CF_CLEARANCE: modal.querySelector('#grokBatchCfClearance')?.value?.trim() || '',
+            GROK_USER_AGENT: modal.querySelector('#grokBatchUserAgent')?.value?.trim() || '',
+            concurrencyLimit: parseInt(modal.querySelector('#grokBatchConcurrencyLimit')?.value || '0', 10),
+            queueLimit: parseInt(modal.querySelector('#grokBatchQueueLimit')?.value || '0', 10)
+        };
+
+        textarea.disabled = true;
+        submitBtn.disabled = true;
+        cancelBtn.disabled = true;
+        submitBtn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> ${t('modal.provider.grokBatchImporting')}`;
+
+        try {
+            const response = await window.apiClient.post('/grok/batch-import-tokens', {
+                ssoTokens: tokens,
+                commonConfig
+            });
+
+            const successCount = response.successCount || 0;
+            const failedCount = response.failedCount || 0;
+
+            if (successCount > 0) {
+                await window.apiClient.post('/reload-config');
+                await refreshProviderConfig(providerType);
+            }
+
+            resultEl.style.display = 'block';
+            const failedDetails = (response.details || []).filter(item => !item.success);
+            const failedText = failedDetails
+                .slice(0, 8)
+                .map(item => `#${item.index}: ${item.error}`)
+                .join('<br>');
+
+            if (successCount > 0 && failedCount === 0) {
+                resultEl.style.cssText = 'display:block; margin-top:16px; padding:12px; border-radius:8px; background:#f0fdf4; border:1px solid #bbf7d0; color:#166534;';
+                resultEl.innerHTML = `<i class="fas fa-check-circle"></i> ${t('modal.provider.grokBatchImportSuccess', { count: successCount })}`;
+                showToast(t('common.success'), t('modal.provider.grokBatchImportSuccess', { count: successCount }), 'success');
+            } else if (successCount > 0 && failedCount > 0) {
+                resultEl.style.cssText = 'display:block; margin-top:16px; padding:12px; border-radius:8px; background:#fffbeb; border:1px solid #fde68a; color:#92400e;';
+                resultEl.innerHTML = `
+                    <i class="fas fa-exclamation-triangle"></i> ${t('modal.provider.grokBatchImportPartial', { success: successCount, failed: failedCount })}
+                    ${failedText ? `<div style="margin-top:8px; font-size:12px; line-height:1.6;">${failedText}</div>` : ''}
+                `;
+                showToast(t('common.warning'), t('modal.provider.grokBatchImportPartial', { success: successCount, failed: failedCount }), 'warning');
+            } else {
+                resultEl.style.cssText = 'display:block; margin-top:16px; padding:12px; border-radius:8px; background:#fef2f2; border:1px solid #fecaca; color:#991b1b;';
+                resultEl.innerHTML = `
+                    <i class="fas fa-times-circle"></i> ${t('modal.provider.grokBatchImportFailed', { count: failedCount })}
+                    ${failedText ? `<div style="margin-top:8px; font-size:12px; line-height:1.6;">${failedText}</div>` : ''}
+                `;
+                showToast(t('common.error'), t('modal.provider.grokBatchImportFailed', { count: failedCount }), 'error');
+            }
+        } catch (error) {
+            console.error('Grok 批量导入失败:', error);
+            resultEl.style.display = 'block';
+            resultEl.style.cssText = 'display:block; margin-top:16px; padding:12px; border-radius:8px; background:#fef2f2; border:1px solid #fecaca; color:#991b1b;';
+            resultEl.innerHTML = `<i class="fas fa-times-circle"></i> ${t('modal.provider.grokBatchImportFailed', { count: 0 })}: ${error.message}`;
+            showToast(t('common.error'), t('modal.provider.grokBatchImportFailed', { count: 0 }) + `: ${error.message}`, 'error');
+        } finally {
+            textarea.disabled = false;
+            submitBtn.disabled = false;
+            cancelBtn.disabled = false;
+            submitBtn.innerHTML = `<i class="fas fa-upload"></i> ${t('modal.provider.grokBatchImportStart')}`;
+        }
+    });
+}
+
+/**
  * 添加动态配置字段
  * @param {HTMLElement} form - 表单元素
  * @param {string} providerType - 提供商类型
@@ -1617,6 +1824,7 @@ export {
     performHealthCheck,
     deleteUnhealthyProviders,
     refreshUnhealthyUuids,
+    showGrokBatchImportModal,
     loadModelsForProviderType,
     renderNotSupportedModelsSelector,
     goToProviderPage,
@@ -1637,5 +1845,6 @@ window.resetAllProvidersHealth = resetAllProvidersHealth;
 window.performHealthCheck = performHealthCheck;
 window.deleteUnhealthyProviders = deleteUnhealthyProviders;
 window.refreshUnhealthyUuids = refreshUnhealthyUuids;
+window.showGrokBatchImportModal = showGrokBatchImportModal;
 window.goToProviderPage = goToProviderPage;
 window.refreshProviderUuid = refreshProviderUuid;

@@ -177,6 +177,200 @@ export async function handleAddProvider(req, res, currentConfig, providerPoolMan
 }
 
 /**
+ * 规范化 Grok SSO Token
+ * @param {string} token - 原始 token
+ * @returns {string} 规范化后的 token
+ */
+function normalizeGrokSsoToken(token) {
+    if (!token || typeof token !== 'string') {
+        return '';
+    }
+    const trimmed = token.trim();
+    if (!trimmed) {
+        return '';
+    }
+    return trimmed.startsWith('sso=') ? trimmed.slice(4).trim() : trimmed;
+}
+
+/**
+ * 批量导入 Grok SSO Token
+ * 支持统一公共配置，仅 token 不同
+ */
+export async function handleBatchImportGrokTokens(req, res, currentConfig, providerPoolManager) {
+    try {
+        const body = await getRequestBody(req);
+        const { ssoTokens, commonConfig = {} } = body || {};
+
+        if (!Array.isArray(ssoTokens) || ssoTokens.length === 0) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: false,
+                error: 'ssoTokens array is required and must not be empty'
+            }));
+            return true;
+        }
+
+        const normalizedTokens = ssoTokens
+            .map(normalizeGrokSsoToken)
+            .filter(Boolean);
+
+        if (normalizedTokens.length === 0) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: false,
+                error: 'No valid SSO tokens found after normalization'
+            }));
+            return true;
+        }
+
+        const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
+        let providerPools = {};
+
+        if (existsSync(filePath)) {
+            try {
+                const fileContent = readFileSync(filePath, 'utf-8');
+                providerPools = JSON.parse(fileContent);
+            } catch (readError) {
+                logger.warn('[UI API] Failed to read existing provider pools for Grok batch import:', readError.message);
+            }
+        }
+
+        if (!providerPools['grok-custom']) {
+            providerPools['grok-custom'] = [];
+        }
+
+        const existingProviders = providerPools['grok-custom'];
+        const existingTokenSet = new Set(
+            existingProviders
+                .map(provider => normalizeGrokSsoToken(provider.GROK_COOKIE_TOKEN))
+                .filter(Boolean)
+        );
+
+        const parseLimit = (value) => {
+            const parsed = parseInt(value, 10);
+            return Number.isFinite(parsed) ? parsed : 0;
+        };
+
+        const sharedConfig = {
+            customNamePrefix: (commonConfig.customNamePrefix || '').toString().trim(),
+            checkModelName: (commonConfig.checkModelName || '').toString().trim(),
+            checkHealth: commonConfig.checkHealth === true,
+            concurrencyLimit: parseLimit(commonConfig.concurrencyLimit),
+            queueLimit: parseLimit(commonConfig.queueLimit),
+            GROK_CF_CLEARANCE: (commonConfig.GROK_CF_CLEARANCE || '').toString().trim(),
+            GROK_USER_AGENT: (commonConfig.GROK_USER_AGENT || '').toString().trim(),
+            GROK_BASE_URL: (commonConfig.GROK_BASE_URL || '').toString().trim() || 'https://grok.com'
+        };
+
+        const details = [];
+        const addedProviders = [];
+        let successCount = 0;
+        let failedCount = 0;
+
+        for (let i = 0; i < normalizedTokens.length; i++) {
+            const token = normalizedTokens[i];
+
+            if (!token) {
+                failedCount++;
+                details.push({
+                    index: i + 1,
+                    success: false,
+                    error: 'empty_token'
+                });
+                continue;
+            }
+
+            if (existingTokenSet.has(token)) {
+                failedCount++;
+                details.push({
+                    index: i + 1,
+                    success: false,
+                    error: 'duplicate_token'
+                });
+                continue;
+            }
+
+            const providerConfig = {
+                uuid: generateUUID(),
+                customName: sharedConfig.customNamePrefix ? `${sharedConfig.customNamePrefix}-${i + 1}` : '',
+                checkModelName: sharedConfig.checkModelName,
+                checkHealth: sharedConfig.checkHealth,
+                concurrencyLimit: sharedConfig.concurrencyLimit,
+                queueLimit: sharedConfig.queueLimit,
+                GROK_COOKIE_TOKEN: token,
+                GROK_CF_CLEARANCE: sharedConfig.GROK_CF_CLEARANCE,
+                GROK_USER_AGENT: sharedConfig.GROK_USER_AGENT,
+                GROK_BASE_URL: sharedConfig.GROK_BASE_URL,
+                isHealthy: true,
+                isDisabled: false,
+                lastUsed: null,
+                usageCount: 0,
+                errorCount: 0,
+                lastErrorTime: null
+            };
+
+            existingProviders.push(providerConfig);
+            existingTokenSet.add(token);
+            addedProviders.push(providerConfig);
+            successCount++;
+            details.push({
+                index: i + 1,
+                success: true,
+                uuid: providerConfig.uuid
+            });
+        }
+
+        if (successCount > 0) {
+            writeFileSync(filePath, JSON.stringify(providerPools, null, 2), 'utf-8');
+
+            if (providerPoolManager) {
+                providerPoolManager.providerPools = providerPools;
+                providerPoolManager.initializeProviderStatus();
+            }
+
+            broadcastEvent('config_update', {
+                action: 'grok_batch_import',
+                filePath,
+                providerType: 'grok-custom',
+                successCount,
+                failedCount,
+                timestamp: new Date().toISOString()
+            });
+
+            for (const providerConfig of addedProviders) {
+                broadcastEvent('provider_update', {
+                    action: 'add',
+                    providerType: 'grok-custom',
+                    providerConfig,
+                    timestamp: new Date().toISOString()
+                });
+            }
+        }
+
+        logger.info(`[UI API] Grok batch import completed: ${successCount} success, ${failedCount} failed`);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: successCount > 0,
+            providerType: 'grok-custom',
+            total: normalizedTokens.length,
+            successCount,
+            failedCount,
+            details
+        }));
+        return true;
+    } catch (error) {
+        logger.error('[UI API] Grok batch import error:', error);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: false,
+            error: error.message
+        }));
+        return true;
+    }
+}
+
+/**
  * 更新特定提供商配置
  */
 export async function handleUpdateProvider(req, res, currentConfig, providerPoolManager, providerType, providerUuid) {
