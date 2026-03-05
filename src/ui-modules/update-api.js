@@ -13,13 +13,13 @@ const execAsync = promisify(exec);
  * 获取更新检查使用的代理配置
  * @returns {Object|null} 代理配置对象或 null
  */
-function getUpdateProxyConfig() {
+function getUpdateProxyConfig(silent = false) {
     if (!CONFIG || !CONFIG.PROXY_URL) {
         return null;
     }
     
     const proxyConfig = parseProxyUrl(CONFIG.PROXY_URL);
-    if (proxyConfig) {
+    if (proxyConfig && !silent) {
         logger.info(`[Update] Using ${proxyConfig.proxyType} proxy for update check: ${CONFIG.PROXY_URL}`);
     }
     return proxyConfig;
@@ -31,8 +31,9 @@ function getUpdateProxyConfig() {
  * @param {Object} options - fetch 选项
  * @returns {Promise<Response>}
  */
-async function fetchWithProxy(url, options = {}) {
-    const proxyConfig = getUpdateProxyConfig();
+async function fetchWithProxy(url, options = {}, extra = {}) {
+    const { silent = false } = extra;
+    const proxyConfig = getUpdateProxyConfig(silent);
     
     if (proxyConfig) {
         // 使用 undici 的 fetch 支持代理
@@ -99,19 +100,24 @@ function compareVersions(v1, v2) {
  * 通过 GitHub API 获取最新版本
  * @returns {Promise<string|null>} 最新版本号或 null
  */
-async function getLatestVersionFromGitHub() {
+async function getLatestVersionFromGitHub(options = {}) {
+    const { silent = false } = options;
     const GITHUB_REPO = 'justlovemaki/AIClient-2-API';
     const apiUrl = `https://gh-proxy.org/https://api.github.com/repos/${GITHUB_REPO}/tags`;
     
     try {
-        logger.info('[Update] Fetching latest version from GitHub API...');
+        if (silent) {
+            logger.debug('[Update] Fetching latest version from GitHub API...');
+        } else {
+            logger.info('[Update] Fetching latest version from GitHub API...');
+        }
         const response = await fetchWithProxy(apiUrl, {
             headers: {
                 'Accept': 'application/vnd.github.v3+json',
                 'User-Agent': 'AIClient2API-UpdateChecker'
             },
             timeout: 10000
-        });
+        }, { silent });
         
         if (!response.ok) {
             throw new Error(`GitHub API returned ${response.status}: ${response.statusText}`);
@@ -149,7 +155,8 @@ async function getLatestVersionFromGitHub() {
  * 2. Docker/非 Git 模式：通过 GitHub API 获取最新版本
  * @returns {Promise<Object>} 更新信息
  */
-export async function checkForUpdates() {
+export async function checkForUpdates(options = {}) {
+    const { silent = false } = options;
     const versionFilePath = path.join(process.cwd(), 'VERSION');
     
     // 读取本地版本
@@ -169,7 +176,11 @@ export async function checkForUpdates() {
         isGitRepo = true;
     } catch (error) {
         isGitRepo = false;
-        logger.info('[Update] Not in a Git repository, will use GitHub API to check for updates');
+        if (silent) {
+            logger.debug('[Update] Not in a Git repository, will use GitHub API to check for updates');
+        } else {
+            logger.info('[Update] Not in a Git repository, will use GitHub API to check for updates');
+        }
     }
     
     let latestTag = null;
@@ -181,12 +192,16 @@ export async function checkForUpdates() {
         
         // 获取远程 tags
         try {
-            logger.info('[Update] Fetching remote tags...');
+            if (silent) {
+                logger.debug('[Update] Fetching remote tags...');
+            } else {
+                logger.info('[Update] Fetching remote tags...');
+            }
             await execAsync('git fetch --tags');
         } catch (error) {
             logger.warn('[Update] Failed to fetch tags via git, falling back to GitHub API:', error.message);
             // 如果 git fetch 失败，回退到 GitHub API
-            latestTag = await getLatestVersionFromGitHub();
+            latestTag = await getLatestVersionFromGitHub({ silent });
             updateMethod = 'github_api';
         }
         
@@ -216,7 +231,7 @@ export async function checkForUpdates() {
                     }
                 } catch (e) {
                     logger.warn('[Update] Failed to get latest tag via git, falling back to GitHub API:', e.message);
-                    latestTag = await getLatestVersionFromGitHub();
+                    latestTag = await getLatestVersionFromGitHub({ silent });
                     updateMethod = 'github_api';
                 }
             }
@@ -224,7 +239,7 @@ export async function checkForUpdates() {
     } else {
         // 非 Git 仓库模式（如 Docker 容器）：使用 GitHub API
         updateMethod = 'github_api';
-        latestTag = await getLatestVersionFromGitHub();
+        latestTag = await getLatestVersionFromGitHub({ silent });
     }
     
     if (!latestTag) {
@@ -241,7 +256,11 @@ export async function checkForUpdates() {
     const comparison = compareVersions(latestTag, localVersion);
     const hasUpdate = comparison > 0;
     
-    logger.info(`[Update] Local version: ${localVersion}, Latest version: ${latestTag}, Has update: ${hasUpdate}, Method: ${updateMethod}`);
+    if (silent) {
+        logger.debug(`[Update] Local version: ${localVersion}, Latest version: ${latestTag}, Has update: ${hasUpdate}, Method: ${updateMethod}`);
+    } else {
+        logger.info(`[Update] Local version: ${localVersion}, Latest version: ${latestTag}, Has update: ${hasUpdate}, Method: ${updateMethod}`);
+    }
     
     return {
         hasUpdate,
@@ -531,7 +550,9 @@ async function copyRecursive(src, dest) {
  */
 export async function handleCheckUpdate(req, res) {
     try {
-        const updateInfo = await checkForUpdates();
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const silent = url.searchParams.get('silent') === 'true';
+        const updateInfo = await checkForUpdates({ silent });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(updateInfo));
         return true;

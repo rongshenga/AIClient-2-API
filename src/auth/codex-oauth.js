@@ -737,7 +737,14 @@ export async function handleCodexOAuth(currentConfig, options = {}) {
         pollTimer = setInterval(() => {
             pollCount++;
             if (pollCount <= maxPollCount && !isCompleted) {
-                logger.info(`[Codex Auth] Waiting for callback... (${pollCount}/${maxPollCount})`);
+                // 仅关键进度输出 info，其余降级为 debug，避免日志刷屏
+                const isKeyProgress = pollCount === 1 || pollCount % 10 === 0 || pollCount === maxPollCount;
+                const progressMessage = `[Codex Auth] Waiting for callback... (${pollCount}/${maxPollCount})`;
+                if (isKeyProgress) {
+                    logger.info(progressMessage);
+                } else {
+                    logger.debug(progressMessage);
+                }
             }
             
             if (pollCount >= maxPollCount && !isCompleted) {

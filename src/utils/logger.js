@@ -139,7 +139,9 @@ class Logger {
                 }
             }
             if (cleaned > 0) {
-                this.log('warn', [`[Logger] Cleaned ${cleaned} stale request context(s) (TTL: ${this.contextTTL}ms)`]);
+                // 仅在极端清理量时告警，常规清理降级为 debug，避免日志刷屏
+                const level = cleaned >= 500 ? 'warn' : 'debug';
+                this.log(level, [`[Logger] Cleaned ${cleaned} stale request context(s) (TTL: ${this.contextTTL}ms)`]);
             }
             // 当 Map 为空时停止定时器
             if (this.requestContext.size === 0) {

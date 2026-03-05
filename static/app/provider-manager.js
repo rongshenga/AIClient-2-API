@@ -695,19 +695,58 @@ function showGeminiBatchImportModal(providerType) {
                         <span data-i18n="oauth.gemini.importInstructions">${t('oauth.gemini.importInstructions')}</span>
                     </p>
                 </div>
-                <div class="form-group">
-                    <label for="batchGeminiTokens" style="display: block; margin-bottom: 8px; font-weight: 600; color: #374151;">
-                        <span data-i18n="oauth.gemini.tokensLabel">${t('oauth.gemini.tokensLabel')}</span>
-                    </label>
-                    <textarea 
-                        id="batchGeminiTokens" 
-                        rows="10" 
-                        style="width: 100%; padding: 12px; border: 1px solid #d1d5db; border-radius: 8px; font-family: monospace; font-size: 13px; resize: vertical;"
-                        placeholder='${t('oauth.gemini.tokensPlaceholder')}'
-                        data-i18n-placeholder="oauth.gemini.tokensPlaceholder"
-                    ></textarea>
+                <div class="input-mode-toggle" style="display: flex; gap: 8px; margin-bottom: 16px;">
+                    <button class="mode-btn active" data-mode="json" style="flex: 1; padding: 10px 16px; border: 2px solid #4285f4; border-radius: 8px; background: #eff6ff; color: #1e40af; font-weight: 600; cursor: pointer; transition: all 0.2s;">
+                        <i class="fas fa-code"></i>
+                        <span data-i18n="oauth.gemini.modeJson">${t('oauth.gemini.modeJson')}</span>
+                    </button>
+                    <button class="mode-btn" data-mode="folder" style="flex: 1; padding: 10px 16px; border: 2px solid #d1d5db; border-radius: 8px; background: white; color: #6b7280; font-weight: 600; cursor: pointer; transition: all 0.2s;">
+                        <i class="fas fa-folder-open"></i>
+                        <span data-i18n="oauth.gemini.modeFolder">${t('oauth.gemini.modeFolder')}</span>
+                    </button>
                 </div>
-                <div class="form-group" style="margin-top: 12px; margin-bottom: 16px;">
+                <div class="json-mode-section" id="geminiJsonModeSection">
+                    <div class="form-group">
+                        <label for="batchGeminiTokens" style="display: block; margin-bottom: 8px; font-weight: 600; color: #374151;">
+                            <span data-i18n="oauth.gemini.tokensLabel">${t('oauth.gemini.tokensLabel')}</span>
+                        </label>
+                        <textarea
+                            id="batchGeminiTokens"
+                            rows="10"
+                            style="width: 100%; padding: 12px; border: 1px solid #d1d5db; border-radius: 8px; font-family: monospace; font-size: 13px; resize: vertical;"
+                            placeholder='${t('oauth.gemini.tokensPlaceholder')}'
+                            data-i18n-placeholder="oauth.gemini.tokensPlaceholder"
+                        ></textarea>
+                    </div>
+                </div>
+                <div class="folder-mode-section" id="geminiFolderModeSection" style="display: none;">
+                    <div class="form-group" style="margin-bottom: 16px;">
+                        <label style="display: block; margin-bottom: 8px; font-weight: 600; color: #374151;">
+                            <span data-i18n="oauth.gemini.uploadFolder">${t('oauth.gemini.uploadFolder')}</span>
+                        </label>
+                        <div class="gemini-folder-upload-area" style="border: 2px dashed #d1d5db; border-radius: 8px; padding: 24px; text-align: center; cursor: pointer; transition: all 0.2s;">
+                            <input type="file" id="geminiFolderInput" webkitdirectory directory multiple accept=".json,application/json" style="display: none;">
+                            <i class="fas fa-folder-open" style="font-size: 36px; color: #9ca3af; margin-bottom: 8px;"></i>
+                            <p style="margin: 0; color: #6b7280;" data-i18n="oauth.gemini.folderDragDrop">${t('oauth.gemini.folderDragDrop')}</p>
+                            <p style="margin: 4px 0 0 0; font-size: 12px; color: #9ca3af;" data-i18n="oauth.gemini.folderClickUpload">${t('oauth.gemini.folderClickUpload')}</p>
+                        </div>
+                        <p style="margin: 8px 0 0 0; font-size: 12px; color: #6b7280;">
+                            <i class="fas fa-lightbulb" style="color: #f59e0b;"></i>
+                            <span data-i18n="oauth.gemini.folderHint">${t('oauth.gemini.folderHint')}</span>
+                        </p>
+                    </div>
+                    <div class="gemini-files-list" id="geminiFilesList" style="display: none; margin-bottom: 16px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <label style="font-weight: 600; color: #374151;" data-i18n="oauth.gemini.selectedFiles">${t('oauth.gemini.selectedFiles')}</label>
+                            <button id="geminiClearFilesBtn" style="background: none; border: none; color: #ef4444; cursor: pointer; font-size: 12px; padding: 4px 8px; border-radius: 4px; transition: all 0.2s;">
+                                <i class="fas fa-trash-alt"></i>
+                                <span data-i18n="oauth.gemini.clearFiles">${t('oauth.gemini.clearFiles')}</span>
+                            </button>
+                        </div>
+                        <div id="geminiFilesContainer" style="background: #f9fafb; border-radius: 8px; padding: 12px; max-height: 180px; overflow-y: auto;"></div>
+                    </div>
+                </div>
+                <div class="form-group" style="margin-top: 8px; margin-bottom: 16px;">
                     <details style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px;">
                         <summary style="padding: 12px; cursor: pointer; font-weight: 600; color: #374151; user-select: none;">
                             <i class="fas fa-code" style="color: #4285f4; margin-right: 8px;"></i>
@@ -722,6 +761,19 @@ function showGeminiBatchImportModal(providerType) {
   "scope": "https://www.googleapis.com/auth/cloud-platform",
   "token_type": "Bearer",
   "expiry_date": 1738590000000
+}</pre>
+                            </div>
+                            <div style="color: #10b981; font-family: monospace; font-size: 12px; margin-top: 16px;">
+                                <div style="color: #9ca3af; margin-bottom: 8px;">// gemini-cli-oauth 账号文件示例：</div>
+                                <pre style="margin: 0; white-space: pre; overflow-x: auto;">{
+  "type": "gemini",
+  "email": "user@example.com",
+  "token": {
+    "access_token": "ya29.a0A...",
+    "refresh_token": "1//0...",
+    "expiry": "2026-01-27T21:26:40.407713071+08:00"
+  },
+  "project_id": "my-project-id"
 }</pre>
                             </div>
                             <div style="color: #10b981; font-family: monospace; font-size: 12px; margin-top: 16px;">
@@ -769,7 +821,15 @@ function showGeminiBatchImportModal(providerType) {
     
     document.body.appendChild(modal);
     
+    const modeBtns = Array.from(modal.querySelectorAll('.mode-btn'));
+    const jsonModeSection = modal.querySelector('#geminiJsonModeSection');
+    const folderModeSection = modal.querySelector('#geminiFolderModeSection');
     const textarea = modal.querySelector('#batchGeminiTokens');
+    const folderUploadArea = modal.querySelector('.gemini-folder-upload-area');
+    const folderInput = modal.querySelector('#geminiFolderInput');
+    const filesListDiv = modal.querySelector('#geminiFilesList');
+    const filesContainer = modal.querySelector('#geminiFilesContainer');
+    const clearFilesBtn = modal.querySelector('#geminiClearFilesBtn');
     const statsDiv = modal.querySelector('#geminiBatchStats');
     const tokenCountValue = modal.querySelector('#geminiTokenCountValue');
     const progressDiv = modal.querySelector('#geminiBatchProgress');
@@ -779,26 +839,221 @@ function showGeminiBatchImportModal(providerType) {
     const closeBtn = modal.querySelector('.modal-close');
     const cancelBtn = modal.querySelector('.modal-cancel');
     
+    let currentMode = 'json';
+    let folderTokens = [];
+    let selectedFiles = [];
+    
+    const escapeHtml = (value) => String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    
+    const parseTokenPayload = (data) => {
+        if (Array.isArray(data)) {
+            return data.filter(item => item && typeof item === 'object' && !Array.isArray(item));
+        }
+        if (data && typeof data === 'object') {
+            return [data];
+        }
+        return [];
+    };
+    
+    const updateStats = (count) => {
+        if (count > 0) {
+            statsDiv.style.display = 'block';
+            tokenCountValue.textContent = count;
+        } else {
+            statsDiv.style.display = 'none';
+        }
+    };
+    
+    const renderSelectedFiles = () => {
+        if (selectedFiles.length === 0) {
+            filesListDiv.style.display = 'none';
+            filesContainer.innerHTML = '';
+            return;
+        }
+        
+        filesListDiv.style.display = 'block';
+        filesContainer.innerHTML = selectedFiles.map(file => `
+            <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; border-radius: 6px; background: white; margin-bottom: 6px;">
+                <span style="font-size: 12px; color: #374151; word-break: break-all;">${escapeHtml(file.path)}</span>
+                <span style="font-size: 12px; color: #6b7280; white-space: nowrap; margin-left: 12px;">${t('oauth.gemini.fileTokenCount', { count: file.tokenCount })}</span>
+            </div>
+        `).join('');
+    };
+    
+    const parseTokensFromTextarea = () => {
+        const value = textarea.value.trim();
+        if (!value) {
+            return [];
+        }
+        const parsed = JSON.parse(value);
+        const parsedTokens = parseTokenPayload(parsed);
+        if (parsedTokens.length === 0) {
+            throw new Error(t('oauth.gemini.fileNoValidObjects'));
+        }
+        return parsedTokens;
+    };
+    
+    const parseFolderFiles = async (fileList) => {
+        const files = Array.from(fileList || []).filter(file => file.name.toLowerCase().endsWith('.json'));
+        
+        if (files.length === 0) {
+            folderTokens = [];
+            selectedFiles = [];
+            renderSelectedFiles();
+            if (currentMode === 'folder') {
+                updateStats(0);
+            }
+            showToast(t('common.warning'), t('oauth.gemini.folderNoJson'), 'warning');
+            return;
+        }
+        
+        const parsedTokens = [];
+        const parsedFiles = [];
+        const parseErrors = [];
+        
+        for (const file of files) {
+            try {
+                const fileContent = await file.text();
+                const data = JSON.parse(fileContent);
+                const tokensInFile = parseTokenPayload(data);
+                
+                if (tokensInFile.length === 0) {
+                    throw new Error(t('oauth.gemini.fileNoValidObjects'));
+                }
+                
+                parsedTokens.push(...tokensInFile);
+                parsedFiles.push({
+                    path: file.webkitRelativePath || file.name,
+                    tokenCount: tokensInFile.length
+                });
+            } catch (error) {
+                parseErrors.push({
+                    filename: file.name,
+                    message: error.message
+                });
+            }
+        }
+        
+        folderTokens = parsedTokens;
+        selectedFiles = parsedFiles;
+        renderSelectedFiles();
+        
+        if (currentMode === 'folder') {
+            updateStats(folderTokens.length);
+        }
+        
+        if (parseErrors.length > 0) {
+            const firstError = parseErrors[0];
+            const extraCount = parseErrors.length > 1 ? ` (+${parseErrors.length - 1})` : '';
+            showToast(
+                t('common.error'),
+                `${t('oauth.gemini.fileParseError', { filename: firstError.filename })}: ${firstError.message}${extraCount}`,
+                'error'
+            );
+        }
+    };
+    
+    const setMode = (mode) => {
+        currentMode = mode;
+        
+        modeBtns.forEach(btn => {
+            const isActive = btn.dataset.mode === mode;
+            btn.classList.toggle('active', isActive);
+            if (isActive) {
+                btn.style.borderColor = '#4285f4';
+                btn.style.background = '#eff6ff';
+                btn.style.color = '#1e40af';
+            } else {
+                btn.style.borderColor = '#d1d5db';
+                btn.style.background = 'white';
+                btn.style.color = '#6b7280';
+            }
+        });
+        
+        const isJsonMode = mode === 'json';
+        jsonModeSection.style.display = isJsonMode ? 'block' : 'none';
+        folderModeSection.style.display = isJsonMode ? 'none' : 'block';
+        
+        if (isJsonMode) {
+            try {
+                const parsedTokens = parseTokensFromTextarea();
+                updateStats(parsedTokens.length);
+            } catch (e) {
+                updateStats(0);
+            }
+        } else {
+            updateStats(folderTokens.length);
+        }
+    };
+    
     // 实时统计 token 数量
     textarea.addEventListener('input', () => {
+        if (currentMode !== 'json') {
+            return;
+        }
         try {
-            const val = textarea.value.trim();
-            if (!val) {
-                statsDiv.style.display = 'none';
-                return;
-            }
-            const data = JSON.parse(val);
-            const tokens = Array.isArray(data) ? data : [data];
-            statsDiv.style.display = 'block';
-            tokenCountValue.textContent = tokens.length;
+            const parsedTokens = parseTokensFromTextarea();
+            updateStats(parsedTokens.length);
         } catch (e) {
-            statsDiv.style.display = 'none';
+            updateStats(0);
+        }
+    });
+    
+    modeBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            setMode(btn.dataset.mode);
+        });
+    });
+    
+    folderUploadArea.addEventListener('click', () => {
+        folderInput.click();
+    });
+    
+    folderInput.addEventListener('change', async () => {
+        await parseFolderFiles(folderInput.files);
+    });
+    
+    folderUploadArea.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        folderUploadArea.style.borderColor = '#4285f4';
+        folderUploadArea.style.background = '#eff6ff';
+    });
+    
+    folderUploadArea.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        folderUploadArea.style.borderColor = '#d1d5db';
+        folderUploadArea.style.background = 'transparent';
+    });
+    
+    folderUploadArea.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        folderUploadArea.style.borderColor = '#d1d5db';
+        folderUploadArea.style.background = 'transparent';
+        await parseFolderFiles(e.dataTransfer.files);
+    });
+    
+    clearFilesBtn.addEventListener('click', () => {
+        folderTokens = [];
+        selectedFiles = [];
+        folderInput.value = '';
+        renderSelectedFiles();
+        
+        if (currentMode === 'folder') {
+            updateStats(0);
         }
     });
     
     // 关闭按钮事件
     [closeBtn, cancelBtn].forEach(btn => {
         btn.addEventListener('click', () => {
+            if (cancelBtn.disabled) {
+                return;
+            }
             modal.remove();
         });
     });
@@ -807,9 +1062,11 @@ function showGeminiBatchImportModal(providerType) {
     submitBtn.addEventListener('click', async () => {
         let tokens = [];
         try {
-            const val = textarea.value.trim();
-            const data = JSON.parse(val);
-            tokens = Array.isArray(data) ? data : [data];
+            if (currentMode === 'folder') {
+                tokens = [...folderTokens];
+            } else {
+                tokens = parseTokensFromTextarea();
+            }
         } catch (e) {
             showToast(t('common.error'), t('oauth.gemini.noTokens'), 'error');
             return;
@@ -822,6 +1079,13 @@ function showGeminiBatchImportModal(providerType) {
         
         // 禁用输入和按钮
         textarea.disabled = true;
+        folderInput.disabled = true;
+        clearFilesBtn.disabled = true;
+        modeBtns.forEach(btn => {
+            btn.disabled = true;
+            btn.style.opacity = '0.6';
+            btn.style.cursor = 'not-allowed';
+        });
         submitBtn.disabled = true;
         cancelBtn.disabled = true;
         progressDiv.style.display = 'block';
@@ -957,6 +1221,13 @@ function showGeminiBatchImportModal(providerType) {
             
             if (!importSuccess) {
                 textarea.disabled = false;
+                folderInput.disabled = false;
+                clearFilesBtn.disabled = false;
+                modeBtns.forEach(btn => {
+                    btn.disabled = false;
+                    btn.style.opacity = '1';
+                    btn.style.cursor = 'pointer';
+                });
                 submitBtn.disabled = false;
                 submitBtn.innerHTML = `<i class="fas fa-upload"></i> <span data-i18n="oauth.gemini.startImport">${t('oauth.gemini.startImport')}</span>`;
             } else {
@@ -964,6 +1235,8 @@ function showGeminiBatchImportModal(providerType) {
             }
         }
     });
+    
+    setMode('json');
 }
 
 /**
@@ -2622,7 +2895,8 @@ async function checkUpdate(silent = false) {
             if (checkBtnText) checkBtnText.textContent = t('dashboard.update.checking');
         }
 
-        const data = await window.apiClient.get('/check-update');
+        const checkUpdatePath = silent ? '/check-update?silent=true' : '/check-update';
+        const data = await window.apiClient.get(checkUpdatePath);
 
         if (data.hasUpdate) {
             if (updateBtn) updateBtn.style.display = 'inline-flex';

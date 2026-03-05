@@ -8,6 +8,11 @@ import logger from './logger.js';
 import { HttpProxyAgent } from 'http-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 
+// 记录每个 provider 最近一次打印过的代理签名，避免高频重复日志
+const proxyLogSignatureByProvider = new Map();
+// 按代理 URL 缓存解析结果，避免重复创建 agent
+const proxyConfigCacheByUrl = new Map();
+
 /**
  * 解析代理URL并返回相应的代理配置
  * @param {string} proxyUrl - 代理URL，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080
@@ -23,6 +28,11 @@ export function parseProxyUrl(proxyUrl) {
         return null;
     }
 
+    const cachedProxyConfig = proxyConfigCacheByUrl.get(trimmedUrl);
+    if (cachedProxyConfig) {
+        return cachedProxyConfig;
+    }
+
     try {
         const url = new URL(trimmedUrl);
         const protocol = url.protocol.toLowerCase();
@@ -30,18 +40,22 @@ export function parseProxyUrl(proxyUrl) {
         if (protocol === 'socks5:' || protocol === 'socks4:' || protocol === 'socks:') {
             // SOCKS 代理
             const socksAgent = new SocksProxyAgent(trimmedUrl);
-            return {
+            const proxyConfig = {
                 httpAgent: socksAgent,
                 httpsAgent: socksAgent,
                 proxyType: 'socks'
             };
+            proxyConfigCacheByUrl.set(trimmedUrl, proxyConfig);
+            return proxyConfig;
         } else if (protocol === 'http:' || protocol === 'https:') {
             // HTTP/HTTPS 代理
-            return {
+            const proxyConfig = {
                 httpAgent: new HttpProxyAgent(trimmedUrl),
                 httpsAgent: new HttpsProxyAgent(trimmedUrl),
                 proxyType: 'http'
             };
+            proxyConfigCacheByUrl.set(trimmedUrl, proxyConfig);
+            return proxyConfig;
         } else {
             logger.warn(`[Proxy] Unsupported proxy protocol: ${protocol}`);
             return null;
@@ -79,12 +93,19 @@ export function isProxyEnabledForProvider(config, providerType) {
  */
 export function getProxyConfigForProvider(config, providerType) {
     if (!isProxyEnabledForProvider(config, providerType)) {
+        proxyLogSignatureByProvider.delete(providerType);
         return null;
     }
 
-    const proxyConfig = parseProxyUrl(config.PROXY_URL);
+    const normalizedProxyUrl = typeof config.PROXY_URL === 'string' ? config.PROXY_URL.trim() : config.PROXY_URL;
+    const proxyConfig = parseProxyUrl(normalizedProxyUrl);
     if (proxyConfig) {
-        logger.info(`[Proxy] Using ${proxyConfig.proxyType} proxy for ${providerType}: ${config.PROXY_URL}`);
+        const nextSignature = `${proxyConfig.proxyType}|${normalizedProxyUrl}`;
+        const prevSignature = proxyLogSignatureByProvider.get(providerType);
+        if (prevSignature !== nextSignature) {
+            logger.info(`[Proxy] Using ${proxyConfig.proxyType} proxy for ${providerType}: ${normalizedProxyUrl}`);
+            proxyLogSignatureByProvider.set(providerType, nextSignature);
+        }
     }
     return proxyConfig;
 }

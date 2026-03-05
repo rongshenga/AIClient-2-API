@@ -293,6 +293,51 @@ export async function handleGeminiAntigravityOAuth(currentConfig, options = {}) 
 }
 
 /**
+ * 标准化导入的 Gemini Token
+ * 支持：
+ * 1. 直接 token 对象（包含 access_token/refresh_token）
+ * 2. 包装对象（token 字段内包含 access_token/refresh_token）
+ * @param {Object} rawToken - 原始导入对象
+ * @returns {Object} 可直接写入 oauth_creds.json 的 token 对象
+ */
+function normalizeImportedGeminiToken(rawToken) {
+    if (!rawToken || typeof rawToken !== 'object' || Array.isArray(rawToken)) {
+        throw new Error('Token 必须是 JSON 对象');
+    }
+
+    const hasNestedToken = rawToken.token && typeof rawToken.token === 'object' && !Array.isArray(rawToken.token);
+    const normalizedToken = hasNestedToken ? rawToken.token : rawToken;
+
+    if (!normalizedToken.access_token || !normalizedToken.refresh_token) {
+        throw new Error('Token 缺少必需字段 (access_token 或 refresh_token)');
+    }
+
+    const tokenToSave = { ...normalizedToken };
+
+    // 兼容 scopes 数组格式，转换为 scope 字符串
+    if (!tokenToSave.scope && tokenToSave.scopes) {
+        tokenToSave.scope = Array.isArray(tokenToSave.scopes)
+            ? tokenToSave.scopes.join(' ')
+            : tokenToSave.scopes;
+    }
+
+    // 兼容 RFC3339 字符串过期时间，补齐 google-auth-library 常用的 expiry_date
+    if (!tokenToSave.expiry_date && tokenToSave.expiry) {
+        const rawExpiry = String(tokenToSave.expiry);
+        let parsedExpiry = Date.parse(rawExpiry);
+        if (Number.isNaN(parsedExpiry)) {
+            const trimmedExpiry = rawExpiry.replace(/(\.\d{3})\d+/, '$1');
+            parsedExpiry = Date.parse(trimmedExpiry);
+        }
+        if (!Number.isNaN(parsedExpiry)) {
+            tokenToSave.expiry_date = parsedExpiry;
+        }
+    }
+
+    return tokenToSave;
+}
+
+/**
  * 检查 Gemini 凭据是否已存在（基于 refresh_token）
  * @param {string} providerType - 提供商类型
  * @param {string} refreshToken - 要检查的 refreshToken
@@ -317,8 +362,9 @@ export async function checkGeminiCredentialsDuplicate(providerType, refreshToken
                     const fullPath = path.join(targetDir, file);
                     const content = await fs.promises.readFile(fullPath, 'utf8');
                     const credentials = JSON.parse(content);
+                    const existingRefreshToken = credentials.refresh_token || credentials.token?.refresh_token;
                     
-                    if (credentials.refresh_token === refreshToken) {
+                    if (existingRefreshToken === refreshToken) {
                         const relativePath = path.relative(process.cwd(), fullPath);
                         return {
                             isDuplicate: true,
@@ -359,7 +405,6 @@ export async function batchImportGeminiTokensStream(providerType, tokens, onProg
     };
     
     for (let i = 0; i < tokens.length; i++) {
-        const token = tokens[i];
         const progressData = {
             index: i + 1,
             total: tokens.length,
@@ -367,10 +412,7 @@ export async function batchImportGeminiTokensStream(providerType, tokens, onProg
         };
         
         try {
-            // 验证 token 是否包含必需字段 (通常是 access_token 和 refresh_token)
-            if (!token.access_token || !token.refresh_token) {
-                throw new Error('Token 缺少必需字段 (access_token 或 refresh_token)');
-            }
+            const token = normalizeImportedGeminiToken(tokens[i]);
 
             // 检查重复
             if (!skipDuplicateCheck) {
