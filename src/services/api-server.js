@@ -116,6 +116,7 @@ import { getTLSSidecar } from '../utils/tls-sidecar.js';
 import 'dotenv/config'; // Import dotenv and configure it
 import '../converters/register-converters.js'; // 注册所有转换器
 import { getProviderPoolManager } from './service-manager.js';
+import { closeRuntimeStorage } from '../storage/runtime-storage-registry.js';
 import { isRetryableNetworkError } from '../utils/common.js';
 
 // 检测是否作为子进程运行
@@ -123,6 +124,36 @@ const IS_WORKER_PROCESS = process.env.IS_WORKER_PROCESS === 'true';
 
 // 存储服务器实例，用于优雅关闭
 let serverInstance = null;
+let shutdownPromise = null;
+let shutdownFinalized = false;
+
+async function finalizeRuntimeShutdown(exitCode) {
+    if (shutdownFinalized) {
+        return;
+    }
+
+    shutdownFinalized = true;
+
+    try {
+        const poolManager = getProviderPoolManager();
+        if (poolManager && typeof poolManager.flushRuntimeState === 'function') {
+            await poolManager.flushRuntimeState({
+                reason: 'shutdown',
+                requestedBy: 'api-server'
+            });
+        }
+    } catch (error) {
+        logger.error('[Server] Failed to flush provider runtime state before exit:', error.message);
+    }
+
+    try {
+        await closeRuntimeStorage();
+    } catch (error) {
+        logger.error('[Server] Failed to close runtime storage during shutdown:', error.message);
+    }
+
+    process.exit(exitCode);
+}
 
 /**
  * 发送消息给主进程
@@ -177,27 +208,41 @@ function setupWorkerCommunication() {
  * 优雅关闭服务器
  */
 async function gracefulShutdown() {
-    logger.info('[Server] Initiating graceful shutdown...');
-
-    // 停止 TLS sidecar
-    try {
-        await getTLSSidecar().stop();
-    } catch { /* ignore */ }
-
-    if (serverInstance) {
-        serverInstance.close(() => {
-            logger.info('[Server] HTTP server closed');
-            process.exit(0);
-        });
-
-        // 设置超时，防止无限等待
-        setTimeout(() => {
-            logger.info('[Server] Shutdown timeout, forcing exit...');
-            process.exit(1);
-        }, 10000);
-    } else {
-        process.exit(0);
+    if (shutdownPromise) {
+        return await shutdownPromise;
     }
+
+    shutdownPromise = (async () => {
+        logger.info('[Server] Initiating graceful shutdown...');
+
+        // 停止 TLS sidecar
+        try {
+            await getTLSSidecar().stop();
+        } catch { /* ignore */ }
+
+        if (serverInstance) {
+            serverInstance.close(() => {
+                logger.info('[Server] HTTP server closed');
+                finalizeRuntimeShutdown(0).catch((error) => {
+                    logger.error('[Server] Failed during shutdown finalization:', error.message);
+                    process.exit(1);
+                });
+            });
+
+            // 设置超时，防止无限等待
+            setTimeout(() => {
+                logger.info('[Server] Shutdown timeout, forcing exit...');
+                finalizeRuntimeShutdown(1).catch(() => {
+                    process.exit(1);
+                });
+            }, 10000);
+            return;
+        }
+
+        await finalizeRuntimeShutdown(0);
+    })();
+
+    return await shutdownPromise;
 }
 
 /**

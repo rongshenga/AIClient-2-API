@@ -16,6 +16,7 @@
 - 补充 `ProviderPoolManager` 运行时字段的字段级归属清单，明确哪些字段只保留在内存热状态层，哪些字段进入 `provider_runtime_state`，以及哪些字段应转入 `provider_registrations` / `provider_group_state` 等其他表。
 - 将 `provider_pools.json` 明确为第一阶段必须迁移对象，并拆分为 Provider 注册记录、凭据绑定/索引记录、运行时状态记录、内联敏感字段记录和兼容投影视图，覆盖启动加载、Reload、自动关联、Web UI CRUD、健康检查、UUID 刷新、用量查询等现有调用链。
 - 将以下数据纳入数据库迁移范围：Provider 池持久化状态、凭据目录索引与去重元数据、使用缓存、`api-potluck` 相关用户与 Key 数据。
+- 新增现有 `configs/` 存量运行时数据迁移计划：先生成清单与只读快照，再按 `provider_pools.json`、凭据目录索引、`usage-cache.json`、`token-store.json`、`api-potluck` 数据的顺序做基线回填，校验通过后再切换数据库为权威源。
 - 保留 `configs/` 目录的导入/导出能力，用于初始化、兼容旧流程、人工备份和应急恢复。
 - 通过统一的存储抽象替代零散的 `writeFile` / `rename` / 目录扫描逻辑，避免同一份状态被多个模块以不同方式写入。
 - 采用分阶段迁移：优先迁移高频运行时状态；凭据原文是否完全进入数据库作为后续阶段决策，不在第一阶段强制完成。
@@ -65,5 +66,6 @@
 - Operational impact:
   - 需要定义数据库选型、初始化和备份策略
   - 需要规划文件存储向数据库的迁移窗口
+  - 需要在切换前为现有 `configs/` 存量数据生成 snapshot manifest、checksum 清单与异常文件报告，并明确 `provider_pools.json.*.tmp` 等残留文件的处理策略
   - 需要为 Web UI 和现有导入流程保留兼容层
   - 需要提供 `provider_pools.json` 的兼容投影导出与差异校验，避免双轨期间读写语义漂移

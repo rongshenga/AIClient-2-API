@@ -6,8 +6,9 @@
 
 import { promises as fs } from 'fs';
 import logger from '../../utils/logger.js';
-import { existsSync, readFileSync, writeFileSync, watch } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, watch } from 'fs';
 import path from 'path';
+import { getRuntimeStorage } from '../../storage/runtime-storage-registry.js';
 
 // 配置文件路径
 const USER_DATA_FILE = path.join(process.cwd(), 'configs', 'api-potluck-data.json');
@@ -27,6 +28,114 @@ let isWriting = false;
 let persistTimer = null;
 let fileWatcher = null;
 let currentPersistInterval = DEFAULT_CONFIG.persistInterval;
+
+
+function createEmptyUserDataStore() {
+    return { config: {}, users: {} };
+}
+
+function normalizeUserDataStore(store) {
+    const normalized = createEmptyUserDataStore();
+    if (store && typeof store === 'object') {
+        normalized.config = store.config && typeof store.config === 'object' ? { ...store.config } : {};
+        normalized.users = store.users && typeof store.users === 'object' ? { ...store.users } : {};
+    }
+
+    for (const [apiKey, userData] of Object.entries(normalized.users)) {
+        normalized.users[apiKey] = {
+            ...userData,
+            credentials: Array.isArray(userData?.credentials) ? userData.credentials : [],
+            credentialBonuses: Array.isArray(userData?.credentialBonuses) ? userData.credentialBonuses : [],
+            createdAt: userData?.createdAt || new Date().toISOString()
+        };
+    }
+
+    return normalized;
+}
+
+function getPotluckUserStorage() {
+    const runtimeStorage = getRuntimeStorage();
+    if (!runtimeStorage
+        || typeof runtimeStorage.loadPotluckUserData !== 'function'
+        || typeof runtimeStorage.savePotluckUserData !== 'function') {
+        return null;
+    }
+    return runtimeStorage;
+}
+
+function ensurePersistTimer() {
+    if (!persistTimer) {
+        persistTimer = setInterval(persistIfDirty, currentPersistInterval);
+        if (typeof persistTimer.unref === 'function') {
+            persistTimer.unref();
+        }
+    }
+}
+
+function loadUserDataFromFileSync() {
+    try {
+        if (existsSync(USER_DATA_FILE)) {
+            const content = readFileSync(USER_DATA_FILE, 'utf8');
+            return normalizeUserDataStore(JSON.parse(content));
+        }
+
+        const emptyStore = createEmptyUserDataStore();
+        userDataStore = emptyStore;
+        syncWriteToFile();
+        return emptyStore;
+    } catch (error) {
+        logger.error('[API Potluck UserData] Failed to load user data:', error.message);
+        return createEmptyUserDataStore();
+    }
+}
+
+export async function initializeUserDataManager(forceReload = false) {
+    if (userDataStore !== null && !forceReload) {
+        ensurePersistTimer();
+        if (getPotluckUserStorage()?.kind === 'file' || !getPotluckUserStorage()) {
+            startFileWatcher();
+        } else {
+            stopFileWatcher();
+        }
+        return userDataStore;
+    }
+
+    const runtimeStorage = getPotluckUserStorage();
+    if (runtimeStorage) {
+        try {
+            userDataStore = normalizeUserDataStore(await runtimeStorage.loadPotluckUserData());
+        } catch (error) {
+            logger.error('[API Potluck UserData] Failed to load user data from runtime storage:', error.message);
+            userDataStore = loadUserDataFromFileSync();
+        }
+    } else {
+        userDataStore = loadUserDataFromFileSync();
+    }
+
+    const config = userDataStore.config || {};
+    currentPersistInterval = config.persistInterval ?? DEFAULT_CONFIG.persistInterval;
+    ensurePersistTimer();
+
+    if (runtimeStorage && runtimeStorage.kind !== 'file') {
+        stopFileWatcher();
+    } else {
+        startFileWatcher();
+    }
+
+    return userDataStore;
+}
+
+export async function resetUserDataManagerForTests() {
+    stopFileWatcher();
+    if (persistTimer) {
+        clearInterval(persistTimer);
+        persistTimer = null;
+    }
+    userDataStore = null;
+    isDirty = false;
+    isWriting = false;
+    currentPersistInterval = DEFAULT_CONFIG.persistInterval;
+}
 
 // ============ 简易 Mutex 实现 ============
 class SimpleMutex {
@@ -141,6 +250,9 @@ function updatePersistTimer(newInterval) {
     if (persistTimer) {
         clearInterval(persistTimer);
         persistTimer = setInterval(persistIfDirty, currentPersistInterval);
+        if (typeof persistTimer.unref === 'function') {
+            persistTimer.unref();
+        }
         logger.info(`[API Potluck UserData] Persist interval updated to ${currentPersistInterval}ms`);
     }
 }
@@ -163,36 +275,15 @@ export async function updateBonusConfig(newConfig) {
  * 初始化：从文件加载数据到内存
  */
 function ensureLoaded() {
-    if (userDataStore !== null) return;
-    try {
-        if (existsSync(USER_DATA_FILE)) {
-            const content = readFileSync(USER_DATA_FILE, 'utf8');
-            userDataStore = JSON.parse(content);
-            // 兼容旧数据：确保 config 和 users 存在
-            if (!userDataStore.config) {
-                userDataStore.config = {};
-            }
-            if (!userDataStore.users) {
-                userDataStore.users = {};
-            }
-        } else {
-            userDataStore = { config: {}, users: {} };
-            syncWriteToFile();
-        }
-    } catch (error) {
-        logger.error('[API Potluck UserData] Failed to load user data:', error.message);
-        userDataStore = { config: {}, users: {} };
+    if (userDataStore !== null) {
+        ensurePersistTimer();
+        return;
     }
-    
-    // 获取配置的持久化间隔
+
+    userDataStore = loadUserDataFromFileSync();
     const config = userDataStore.config || {};
     currentPersistInterval = config.persistInterval ?? DEFAULT_CONFIG.persistInterval;
-    
-    // 启动定期持久化
-    if (!persistTimer) {
-        persistTimer = setInterval(persistIfDirty, currentPersistInterval);
-    }
-    // 启动文件监听（热更新）
+    ensurePersistTimer();
     startFileWatcher();
 }
 
@@ -203,7 +294,7 @@ function syncWriteToFile() {
     try {
         const dir = path.dirname(USER_DATA_FILE);
         if (!existsSync(dir)) {
-            require('fs').mkdirSync(dir, { recursive: true });
+            mkdirSync(dir, { recursive: true });
         }
         writeFileSync(USER_DATA_FILE, JSON.stringify(userDataStore, null, 2), 'utf8');
     } catch (error) {
@@ -218,13 +309,18 @@ async function persistIfDirty() {
     if (!isDirty || isWriting || userDataStore === null) return;
     isWriting = true;
     try {
-        const dir = path.dirname(USER_DATA_FILE);
-        if (!existsSync(dir)) {
-            await fs.mkdir(dir, { recursive: true });
+        const runtimeStorage = getPotluckUserStorage();
+        if (runtimeStorage) {
+            await runtimeStorage.savePotluckUserData(normalizeUserDataStore(userDataStore));
+        } else {
+            const dir = path.dirname(USER_DATA_FILE);
+            if (!existsSync(dir)) {
+                await fs.mkdir(dir, { recursive: true });
+            }
+            const tempFile = USER_DATA_FILE + '.tmp';
+            await fs.writeFile(tempFile, JSON.stringify(userDataStore, null, 2), 'utf8');
+            await fs.rename(tempFile, USER_DATA_FILE);
         }
-        const tempFile = USER_DATA_FILE + '.tmp';
-        await fs.writeFile(tempFile, JSON.stringify(userDataStore, null, 2), 'utf8');
-        await fs.rename(tempFile, USER_DATA_FILE);
         isDirty = false;
     } catch (error) {
         logger.error('[API Potluck UserData] Persist failed:', error.message);
@@ -245,7 +341,8 @@ function markDirty() {
  */
 let lastReloadTime = 0;
 function startFileWatcher() {
-    if (fileWatcher) return;
+    const runtimeStorage = getPotluckUserStorage();
+    if ((runtimeStorage && runtimeStorage.kind !== 'file') || fileWatcher) return;
     
     try {
         fileWatcher = watch(USER_DATA_FILE, { persistent: false }, (eventType) => {

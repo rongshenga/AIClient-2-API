@@ -91,6 +91,7 @@
   - [📋 核心功能](#-核心功能)
 - [🔐 授权配置指南](#-授权配置指南)
 - [📁 授权文件存储路径](#-授权文件存储路径)
+- [🗄️ Runtime Storage 迁移运维](./docs/runtime-storage-migration.md)
 - [⚙️ 高级配置](#高级配置)
 - [❓ 常见问题](#-常见问题)
 - [📄 开源许可](#-开源许可)
@@ -180,6 +181,16 @@ docker compose up -d
 ```
 
 > **💡 提示**：脚本会自动安装依赖并启动服务器。如果遇到任何问题，脚本会提供清晰的错误信息和解决建议。
+
+#### 5. Runtime Storage 迁移运维
+
+如果你正在执行数据库化迁移，别再靠脑补流程瞎冲了，直接看现成运维文档：`docs/runtime-storage-migration.md`。
+
+- 统一 CLI：`npm run runtime-storage:admin -- <command>`
+- 核心命令：`migrate`、`verify`、`export-legacy`、`rollback`、`list-runs`、`show-run`
+- 默认数据库：`configs/runtime/runtime-storage.sqlite`
+- 默认迁移制品目录：`configs/runtime/migrations/<runId>/`
+- 推荐流程：先 `migrate` 预演，再 `migrate --execute`，最后 `verify --fail-on-diff`
 
 ---
 

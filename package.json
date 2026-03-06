@@ -30,6 +30,8 @@
     "start": "node src/core/master.js",
     "start:standalone": "node src/services/api-server.js",
     "start:dev": "node src/core/master.js --dev",
+    "runtime-storage:admin": "node src/scripts/runtime-storage-admin.js",
+    "runtime-storage:benchmark": "node src/scripts/runtime-storage-admin.js benchmark",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",

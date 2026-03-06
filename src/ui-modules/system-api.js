@@ -1,7 +1,32 @@
 import { existsSync, readFileSync, createReadStream } from 'fs';
 import logger from '../utils/logger.js';
 import path from 'path';
+import { CONFIG } from '../core/config-manager.js';
+import { getRuntimeStorageInfo } from '../storage/runtime-storage-registry.js';
 import { getCpuUsagePercent } from './system-monitor.js';
+
+function summarizeProviderPools(providerPools = {}) {
+    let providerTypeCount = 0;
+    let providerCount = 0;
+
+    for (const providers of Object.values(providerPools || {})) {
+        if (!Array.isArray(providers)) {
+            continue;
+        }
+
+        providerTypeCount += 1;
+        providerCount += providers.length;
+    }
+
+    return {
+        providerTypeCount,
+        providerCount
+    };
+}
+
+function getRuntimeStorageSnapshot() {
+    return getRuntimeStorageInfo() || CONFIG?.RUNTIME_STORAGE_INFO || null;
+}
 
 /**
  * 获取系统信息
@@ -41,7 +66,9 @@ export async function handleGetSystem(req, res) {
         serverTime: new Date().toLocaleString(),
         memoryUsage: `${Math.round(memUsage.heapUsed / 1024 / 1024)} MB / ${Math.round(memUsage.heapTotal / 1024 / 1024)} MB`,
         cpuUsage: cpuUsage,
-        uptime: process.uptime()
+        uptime: process.uptime(),
+        runtimeStorage: getRuntimeStorageSnapshot(),
+        providerSummary: summarizeProviderPools(CONFIG?.providerPools || {})
     }));
     return true;
 }

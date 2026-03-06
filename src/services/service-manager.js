@@ -5,15 +5,13 @@ import deepmerge from 'deepmerge';
 import * as fs from 'fs';
 import { promises as pfs } from 'fs';
 import * as path from 'path';
-import {
-    PROVIDER_MAPPINGS,
-    createProviderConfig,
-    addToUsedPaths,
-    isPathUsed,
-    getFileName,
-    formatSystemPath
-} from '../utils/provider-utils.js';
+import { PROVIDER_MAPPINGS } from '../utils/provider-utils.js';
 import { MODEL_PROVIDER } from '../utils/common.js';
+import {
+    getRuntimeStorage,
+    linkCredentialFilesWithRuntimeStorage,
+    loadProviderPoolsCompatSnapshot
+} from '../storage/runtime-storage-registry.js';
 
 // 存储 ProviderPoolManager 实例
 let providerPoolManager = null;
@@ -26,351 +24,149 @@ let providerPoolManager = null;
  * @param {string} options.credPath - 当前凭证的路径（当 onlyCurrentCred 为 true 时必需）
  * @returns {Promise<Object>} 更新后的 providerPools 对象
  */
-export async function autoLinkProviderConfigs(config, options = {}) {
-    // 确保 providerPools 对象存在
-    if (!config.providerPools) {
-        config.providerPools = {};
-    }
-    
-    let totalNewProviders = 0;
-    const allNewProviders = {};
-    
-    // 如果只关联当前凭证
-    if (options.onlyCurrentCred && options.credPath) {
-        const result = await linkSingleCredential(config, options.credPath);
-        if (result) {
-            totalNewProviders = 1;
-            allNewProviders[result.displayName] = [result.provider];
-        }
-    } else if (Array.isArray(options.credPaths) && options.credPaths.length > 0) {
-        const batchResult = await linkBatchCredentials(config, options.credPaths);
-        totalNewProviders = batchResult.totalNewProviders;
-        Object.assign(allNewProviders, batchResult.allNewProviders);
-    } else {
-        // 遍历所有提供商映射
-        for (const mapping of PROVIDER_MAPPINGS) {
-            const configsPath = path.join(process.cwd(), 'configs', mapping.dirName);
-            const { providerType, credPathKey, defaultCheckModel, displayName, needsProjectId } = mapping;
-            
-            // 确保提供商类型数组存在
-            if (!config.providerPools[providerType]) {
-                config.providerPools[providerType] = [];
-            }
-            
-            // 检查目录是否存在
-            if (!fs.existsSync(configsPath)) {
-                continue;
-            }
-            
-            // 获取已关联的配置文件路径集合
-            const linkedPaths = new Set();
-            for (const provider of config.providerPools[providerType]) {
-                if (provider[credPathKey]) {
-                    // 使用公共方法添加路径的所有变体格式
-                    addToUsedPaths(linkedPaths, provider[credPathKey]);
-                }
-            }
-            
-            // 递归扫描目录
-            const newProviders = [];
-            await scanProviderDirectory(configsPath, linkedPaths, newProviders, {
-                credPathKey,
-                defaultCheckModel,
-                needsProjectId
-            });
-            
-            // 如果有新的配置文件需要关联
-            if (newProviders.length > 0) {
-                config.providerPools[providerType].push(...newProviders);
-                totalNewProviders += newProviders.length;
-                allNewProviders[displayName] = newProviders;
-            }
-        }
-    }
-    
-    // 如果有新的配置文件需要关联，保存更新后的 provider_pools.json
-    if (totalNewProviders > 0) {
-        const filePath = config.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
-        try {
-            await pfs.writeFile(filePath, JSON.stringify(config.providerPools, null, 2), 'utf8');
-            logger.info(`[Auto-Link] Added ${totalNewProviders} new config(s) to provider pools:`);
-            for (const [displayName, providers] of Object.entries(allNewProviders)) {
-                logger.info(`  ${displayName}: ${providers.length} config(s)`);
-                providers.forEach(p => {
-                    // 获取凭据路径键（支持 _CREDS_FILE_PATH 和 _TOKEN_FILE_PATH 两种格式）
-                    const credKey = Object.keys(p).find(k =>
-                        k.endsWith('_CREDS_FILE_PATH') || k.endsWith('_TOKEN_FILE_PATH')
-                    );
-                    if (credKey) {
-                        logger.info(`    - ${p[credKey]}`);
-                    }
-                });
-            }
-        } catch (error) {
-            logger.error(`[Auto-Link] Failed to save provider_pools.json: ${error.message}`);
-        }
-    } else {
-        logger.info('[Auto-Link] No new configs to link');
-    }
-    
-    // Update provider pool manager if available
-    if (providerPoolManager) {
-        providerPoolManager.providerPools = config.providerPools;
-        providerPoolManager.initializeProviderStatus();
-    }
-    return config.providerPools;
+function getProviderPoolsBaseDir(config = {}) {
+    const providerPoolsFilePath = config?.PROVIDER_POOLS_FILE_PATH || path.join(process.cwd(), 'configs', 'provider_pools.json');
+    return path.dirname(providerPoolsFilePath);
 }
 
-/**
- * 批量关联凭据文件到对应提供商（单次保存）
- * @param {Object} config - 服务器配置对象
- * @param {string[]} credPaths - 凭据文件路径列表（相对或绝对路径）
- * @returns {Promise<{totalNewProviders: number, allNewProviders: Object}>}
- */
-async function linkBatchCredentials(config, credPaths) {
-    const allNewProviders = {};
-    let totalNewProviders = 0;
+function dedupeCredentialPaths(paths = []) {
+    const seenPaths = new Set();
+    const normalizedPaths = [];
 
-    const groupedByProvider = new Map();
-    const projectDir = process.cwd();
-
-    // 预处理并按 providerType 分组，避免后续重复判断目录归属
-    for (const rawPath of credPaths) {
-        try {
-            const absolutePath = path.isAbsolute(rawPath) ? rawPath : path.join(projectDir, rawPath);
-
-            if (!fs.existsSync(absolutePath)) {
-                continue;
-            }
-
-            if (path.extname(absolutePath).toLowerCase() !== '.json') {
-                continue;
-            }
-
-            const relativePath = path.relative(projectDir, absolutePath);
-            let matchedMapping = null;
-            for (const mapping of PROVIDER_MAPPINGS) {
-                const providerRoot = path.join(projectDir, 'configs', mapping.dirName);
-                const resolvedRoot = path.resolve(providerRoot);
-                const resolvedFile = path.resolve(absolutePath);
-                if (resolvedFile === resolvedRoot || resolvedFile.startsWith(resolvedRoot + path.sep)) {
-                    matchedMapping = mapping;
-                    break;
-                }
-            }
-
-            if (!matchedMapping) {
-                continue;
-            }
-
-            if (!groupedByProvider.has(matchedMapping.providerType)) {
-                groupedByProvider.set(matchedMapping.providerType, {
-                    mapping: matchedMapping,
-                    paths: []
-                });
-            }
-            groupedByProvider.get(matchedMapping.providerType).paths.push(relativePath);
-        } catch (error) {
-            logger.warn(`[Auto-Link] Skip invalid credential path ${rawPath}: ${error.message}`);
+    for (const rawPath of Array.isArray(paths) ? paths : []) {
+        if (typeof rawPath !== 'string' || !rawPath.trim()) {
+            continue;
         }
+
+        const normalizedPath = rawPath.trim();
+        const dedupeKey = path.isAbsolute(normalizedPath)
+            ? path.normalize(normalizedPath)
+            : normalizedPath.replace(/\\/g, '/');
+        if (seenPaths.has(dedupeKey)) {
+            continue;
+        }
+
+        seenPaths.add(dedupeKey);
+        normalizedPaths.push(normalizedPath);
     }
 
-    // 按 providerType 批量关联，避免每条都重复构建 linkedPaths
-    for (const [, group] of groupedByProvider) {
-        const { mapping, paths } = group;
-        const { providerType, credPathKey, defaultCheckModel, displayName, needsProjectId, urlKeys } = mapping;
-
-        if (!config.providerPools[providerType]) {
-            config.providerPools[providerType] = [];
-        }
-
-        const linkedPaths = new Set();
-        for (const provider of config.providerPools[providerType]) {
-            if (provider[credPathKey]) {
-                addToUsedPaths(linkedPaths, provider[credPathKey]);
-            }
-        }
-
-        const newProviders = [];
-        for (const relativePath of paths) {
-            const normalizedRelativePath = relativePath.replace(/\\/g, '/');
-            const prefixedPath = normalizedRelativePath.startsWith('./')
-                ? normalizedRelativePath
-                : `./${normalizedRelativePath}`;
-
-            if (linkedPaths.has(normalizedRelativePath) || linkedPaths.has(prefixedPath)) {
-                continue;
-            }
-
-            const formattedCredPath = formatSystemPath(relativePath);
-            const newProvider = createProviderConfig({
-                credPathKey,
-                credPath: formattedCredPath,
-                defaultCheckModel,
-                needsProjectId,
-                urlKeys
-            });
-
-            config.providerPools[providerType].push(newProvider);
-            newProviders.push(newProvider);
-            addToUsedPaths(linkedPaths, formattedCredPath);
-        }
-
-        if (newProviders.length > 0) {
-            totalNewProviders += newProviders.length;
-            allNewProviders[displayName] = (allNewProviders[displayName] || []).concat(newProviders);
-        }
-    }
-
-    return {
-        totalNewProviders,
-        allNewProviders
-    };
+    return normalizedPaths;
 }
 
-/**
- * 关联单个凭证文件到对应的提供商
- * @param {Object} config - 服务器配置对象
- * @param {string} credPath - 凭证文件路径（相对或绝对路径）
- * @returns {Promise<Object|null>} 返回关联结果或 null
- */
-async function linkSingleCredential(config, credPath) {
+async function collectCredentialCandidatePaths(dirPath, result = [], depth = 0) {
     try {
-        // 规范化路径
-        const absolutePath = path.isAbsolute(credPath) ? credPath : path.join(process.cwd(), credPath);
-        const relativePath = path.relative(process.cwd(), absolutePath);
-        
-        // 检查文件是否存在
-        if (!fs.existsSync(absolutePath)) {
-            logger.warn(`[Auto-Link] Credential file not found: ${relativePath}`);
-            return null;
-        }
-        
-        // 检查文件扩展名
-        const ext = path.extname(absolutePath).toLowerCase();
-        if (ext !== '.json') {
-            logger.warn(`[Auto-Link] Only JSON files are supported: ${relativePath}`);
-            return null;
-        }
-        
-        // 根据文件路径确定提供商类型
-        let matchedMapping = null;
-        for (const mapping of PROVIDER_MAPPINGS) {
-            const configsPath = path.join(process.cwd(), 'configs', mapping.dirName);
-            // 检查文件是否在该提供商的配置目录下
-            if (absolutePath.startsWith(configsPath)) {
-                matchedMapping = mapping;
-                break;
-            }
-        }
-        
-        if (!matchedMapping) {
-            logger.warn(`[Auto-Link] Could not determine provider type for: ${relativePath}`);
-            return null;
-        }
-        
-        const { providerType, credPathKey, defaultCheckModel, displayName, needsProjectId } = matchedMapping;
-        
-        // 确保提供商类型数组存在
-        if (!config.providerPools[providerType]) {
-            config.providerPools[providerType] = [];
-        }
-        
-        // 检查是否已关联
-        const linkedPaths = new Set();
-        for (const provider of config.providerPools[providerType]) {
-            if (provider[credPathKey]) {
-                addToUsedPaths(linkedPaths, provider[credPathKey]);
-            }
-        }
-        
-        const fileName = getFileName(absolutePath);
-        const isLinked = isPathUsed(relativePath, fileName, linkedPaths);
-        
-        if (isLinked) {
-            logger.info(`[Auto-Link] Credential already linked: ${relativePath}`);
-            return null;
-        }
-        
-        // 创建新的提供商配置
-        const newProvider = createProviderConfig({
-            credPathKey,
-            credPath: formatSystemPath(relativePath),
-            defaultCheckModel,
-            needsProjectId
-        });
-        
-        // 添加到配置
-        config.providerPools[providerType].push(newProvider);
-        
-        logger.info(`[Auto-Link] Successfully linked credential: ${relativePath} to ${displayName}`);
-        
-        return {
-            provider: newProvider,
-            displayName,
-            providerType
-        };
-    } catch (error) {
-        logger.error(`[Auto-Link] Failed to link credential ${credPath}: ${error.message}`);
-        return null;
-    }
-}
+        const entries = await pfs.readdir(dirPath, { withFileTypes: true });
 
-/**
- * 递归扫描提供商配置目录
- * @param {string} dirPath - 目录路径
- * @param {Set} linkedPaths - 已关联的路径集合
- * @param {Array} newProviders - 新提供商配置数组
- * @param {Object} options - 配置选项
- * @param {string} options.credPathKey - 凭据路径键名
- * @param {string} options.defaultCheckModel - 默认检测模型
- * @param {boolean} options.needsProjectId - 是否需要 PROJECT_ID
- */
-async function scanProviderDirectory(dirPath, linkedPaths, newProviders, options) {
-    const { credPathKey, defaultCheckModel, needsProjectId } = options;
-    
-    try {
-        const files = await pfs.readdir(dirPath, { withFileTypes: true });
-        
-        for (const file of files) {
-            const fullPath = path.join(dirPath, file.name);
-            
-            if (file.isFile()) {
-                const ext = path.extname(file.name).toLowerCase();
-                // 只处理 JSON 文件
-                if (ext === '.json') {
-                    const relativePath = path.relative(process.cwd(), fullPath);
-                    const fileName = getFileName(fullPath);
-                    
-                    // 使用与 ui-manager.js 相同的 isPathUsed 函数检查是否已关联
-                    const isLinked = isPathUsed(relativePath, fileName, linkedPaths);
-                    
-                    if (!isLinked) {
-                        // 使用公共方法创建新的提供商配置
-                        const newProvider = createProviderConfig({
-                            credPathKey,
-                            credPath: formatSystemPath(relativePath),
-                            defaultCheckModel,
-                            needsProjectId
-                        });
-                        
-                        newProviders.push(newProvider);
-                    }
+        for (const entry of entries) {
+            const fullPath = path.join(dirPath, entry.name);
+            if (entry.isFile()) {
+                if (path.extname(entry.name).toLowerCase() !== '.json') {
+                    continue;
                 }
-            } else if (file.isDirectory()) {
-                // 递归扫描子目录（限制深度为 3 层）
-                const relativePath = path.relative(process.cwd(), fullPath);
-                const depth = relativePath.split(path.sep).length;
-                if (depth < 5) { // configs/{provider}/subfolder/subsubfolder
-                    await scanProviderDirectory(fullPath, linkedPaths, newProviders, options);
-                }
+
+                result.push(path.relative(process.cwd(), fullPath).replace(/\\/g, '/'));
+                continue;
             }
+
+            if (!entry.isDirectory() || depth >= 2) {
+                continue;
+            }
+
+            await collectCredentialCandidatePaths(fullPath, result, depth + 1);
         }
     } catch (error) {
         logger.warn(`[Auto-Link] Failed to scan directory ${dirPath}: ${error.message}`);
     }
+
+    return result;
 }
 
+async function buildAutoLinkCredentialPaths(config, options = {}) {
+    if (options.onlyCurrentCred && options.credPath) {
+        return dedupeCredentialPaths([options.credPath]);
+    }
+
+    if (Array.isArray(options.credPaths) && options.credPaths.length > 0) {
+        return dedupeCredentialPaths(options.credPaths);
+    }
+
+    const providerPoolsBaseDir = getProviderPoolsBaseDir(config);
+    const discoveredPaths = [];
+
+    for (const mapping of PROVIDER_MAPPINGS) {
+        const configsPath = path.join(providerPoolsBaseDir, mapping.dirName);
+        if (!fs.existsSync(configsPath)) {
+            continue;
+        }
+
+        await collectCredentialCandidatePaths(configsPath, discoveredPaths);
+    }
+
+    return dedupeCredentialPaths(discoveredPaths);
+}
+
+function syncProviderPoolsSnapshot(config, providerPools = {}) {
+    const normalizedProviderPools = providerPools && typeof providerPools === 'object'
+        ? providerPools
+        : {};
+
+    if (config) {
+        config.providerPools = normalizedProviderPools;
+    }
+
+    if (providerPoolManager) {
+        providerPoolManager.providerPools = normalizedProviderPools;
+        providerPoolManager.initializeProviderStatus();
+    }
+
+    return normalizedProviderPools;
+}
+
+function logAutoLinkSummary(totalNewProviders, allNewProviders = {}) {
+    if (totalNewProviders <= 0) {
+        logger.info('[Auto-Link] No new configs to link');
+        return;
+    }
+
+    logger.info(`[Auto-Link] Added ${totalNewProviders} new config(s) through runtime storage:`);
+    for (const [displayName, providers] of Object.entries(allNewProviders)) {
+        logger.info(`  ${displayName}: ${providers.length} config(s)`);
+        for (const provider of providers) {
+            const credentialPath = Object.entries(provider || {}).find(([key]) => {
+                return key.endsWith('_CREDS_FILE_PATH') || key.endsWith('_TOKEN_FILE_PATH') || key.endsWith('_FILE_PATH');
+            })?.[1];
+
+            if (credentialPath) {
+                logger.info(`    - ${credentialPath}`);
+            }
+        }
+    }
+}
+
+export async function autoLinkProviderConfigs(config, options = {}) {
+    const candidatePaths = await buildAutoLinkCredentialPaths(config, options);
+
+    let providerPools = config?.providerPools || {};
+    let totalNewProviders = 0;
+    let allNewProviders = {};
+
+    if (candidatePaths.length > 0) {
+        const linkResult = await linkCredentialFilesWithRuntimeStorage(config, candidatePaths, {
+            sourceKind: options.sourceKind || 'service_manager_auto_link',
+            providerPools: config?.providerPools || {}
+        });
+
+        providerPools = linkResult?.providerPools || await loadProviderPoolsCompatSnapshot(config);
+        totalNewProviders = Number(linkResult?.totalNewProviders || 0);
+        allNewProviders = linkResult?.allNewProviders || {};
+    } else if (config?.RUNTIME_STORAGE_INFO?.backend === 'db') {
+        providerPools = await loadProviderPoolsCompatSnapshot(config);
+    }
+
+    const normalizedProviderPools = syncProviderPoolsSnapshot(config, providerPools);
+    logAutoLinkSummary(totalNewProviders, allNewProviders);
+    return normalizedProviderPools;
+}
 // 注意：isValidOAuthCredentials 已移至 provider-utils.js 公共模块
 
 /**
@@ -383,6 +179,7 @@ export async function initApiService(config, isReady = false) {
     if (config.providerPools && Object.keys(config.providerPools).length > 0) {
         providerPoolManager = new ProviderPoolManager(config.providerPools, {
             globalConfig: config,
+            runtimeStorage: config?.runtimeStorage || getRuntimeStorage() || null,
             maxErrorCount: config.MAX_ERROR_COUNT ?? 3,
             providerFallbackChain: config.providerFallbackChain || {},
         });
@@ -699,13 +496,17 @@ export function markProviderUnhealthy(provider, providerInfo) {
  */
 export async function getProviderStatus(config, options = {}) {
     let providerPools = {};
-    const filePath = config.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
+
     try {
-        if (providerPoolManager && providerPoolManager.providerPools) {
+        if (config?.RUNTIME_STORAGE_INFO?.backend !== 'db' && providerPoolManager && providerPoolManager.providerPools) {
             providerPools = providerPoolManager.providerPools;
-        } else if (filePath && fs.existsSync(filePath)) {
-            const poolsData = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-            providerPools = poolsData;
+        } else {
+            providerPools = await loadProviderPoolsCompatSnapshot(config);
+            if (Object.keys(providerPools).length === 0 && providerPoolManager?.providerPools) {
+                providerPools = providerPoolManager.providerPools;
+            } else if (Object.keys(providerPools).length === 0 && config?.providerPools) {
+                providerPools = config.providerPools;
+            }
         }
     } catch (error) {
         logger.warn('[API Service] Failed to load provider pools:', error.message);

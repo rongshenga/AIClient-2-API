@@ -6,6 +6,7 @@ import { readUsageCache, writeUsageCache, readProviderUsageCache, updateProvider
 import { broadcastEvent } from './event-broadcast.js';
 import path from 'path';
 import { randomUUID } from 'crypto';
+import { getRuntimeStorage } from '../storage/runtime-storage-registry.js';
 
 const supportedProviders = ['claude-kiro-oauth', 'gemini-cli-oauth', 'gemini-antigravity', 'openai-codex-oauth', 'grok-custom'];
 const DEFAULT_USAGE_QUERY_CONCURRENCY_PER_PROVIDER = 8;
@@ -21,6 +22,42 @@ const USAGE_TASK_DEFAULT_POLL_INTERVAL_MS = 1200;
 const DEFAULT_USAGE_CACHE_FLUSH_STEP = 1000;
 const DEFAULT_USAGE_CACHE_FLUSH_INTERVAL_MS = 5000;
 const usageRefreshTasks = new Map();
+
+
+function getUsageTaskStorage() {
+    const runtimeStorage = getRuntimeStorage();
+    if (!runtimeStorage || typeof runtimeStorage.saveUsageRefreshTask !== 'function') {
+        return null;
+    }
+    return runtimeStorage;
+}
+
+async function persistUsageRefreshTask(task) {
+    const runtimeStorage = getUsageTaskStorage();
+    if (!runtimeStorage || !task?.id) {
+        return;
+    }
+
+    try {
+        await runtimeStorage.saveUsageRefreshTask(task);
+    } catch (error) {
+        logger.warn('[Usage API] Failed to persist usage refresh task:', error.message);
+    }
+}
+
+async function loadPersistedUsageRefreshTask(taskId) {
+    const runtimeStorage = getUsageTaskStorage();
+    if (!runtimeStorage || typeof runtimeStorage.loadUsageRefreshTask !== 'function') {
+        return null;
+    }
+
+    try {
+        return await runtimeStorage.loadUsageRefreshTask(taskId);
+    } catch (error) {
+        logger.warn('[Usage API] Failed to load persisted usage refresh task:', error.message);
+        return null;
+    }
+}
 
 /**
  * 将输入解析为正整数
@@ -230,6 +267,7 @@ function createUsageRefreshTask(input = {}) {
 
     usageRefreshTasks.set(task.id, task);
     pruneUsageRefreshTasks();
+    void persistUsageRefreshTask(task);
     return task;
 }
 
@@ -921,6 +959,7 @@ function startProviderUsageRefreshTask(currentConfig, providerPoolManager, provi
                         processedProviders: progress.processedInstances >= progress.totalInstances ? 1 : 0,
                         currentProvider: providerType
                     };
+                    void persistUsageRefreshTask(task);
                 }
             });
 
@@ -942,12 +981,14 @@ function startProviderUsageRefreshTask(currentConfig, providerPoolManager, provi
                 successCount: usageResults.successCount || 0,
                 errorCount: usageResults.errorCount || 0
             };
+            await persistUsageRefreshTask(task);
             broadcastUsageRefreshTaskUpdate(task);
         } catch (error) {
             task.status = 'failed';
             task.finishedAt = new Date().toISOString();
             task.error = error.message || String(error);
             logger.error(`[Usage API] Provider refresh task failed (${providerType}):`, error);
+            await persistUsageRefreshTask(task);
             broadcastUsageRefreshTaskUpdate(task);
         } finally {
             pruneUsageRefreshTasks();
@@ -1021,6 +1062,7 @@ function startAllProvidersUsageRefreshTask(currentConfig, providerPoolManager, o
                                 totalGroups: progress.totalGroups,
                                 percent: Number(providerProgressPercent.toFixed(2))
                             };
+                            void persistUsageRefreshTask(task);
                         }
                     });
                 } catch (providerError) {
@@ -1055,6 +1097,7 @@ function startAllProvidersUsageRefreshTask(currentConfig, providerPoolManager, o
                     totalGroups: task.progress.totalGroups || 0,
                     percent: calcProgressPercent(completedProviders, providerCount)
                 };
+                await persistUsageRefreshTask(task);
             }
 
             allResults.timestamp = new Date().toISOString();
@@ -1079,12 +1122,14 @@ function startAllProvidersUsageRefreshTask(currentConfig, providerPoolManager, o
                 successCount: completedSuccessCount,
                 errorCount: completedErrorCount
             };
+            await persistUsageRefreshTask(task);
             broadcastUsageRefreshTaskUpdate(task);
         } catch (error) {
             task.status = 'failed';
             task.finishedAt = new Date().toISOString();
             task.error = error.message || String(error);
             logger.error('[Usage API] Full refresh task failed:', error);
+            await persistUsageRefreshTask(task);
             broadcastUsageRefreshTaskUpdate(task);
         } finally {
             pruneUsageRefreshTasks();
@@ -1269,7 +1314,13 @@ export async function handleGetProviderUsage(req, res, currentConfig, providerPo
 export async function handleGetUsageRefreshTask(req, res, taskId) {
     try {
         pruneUsageRefreshTasks();
-        const task = usageRefreshTasks.get(taskId);
+        let task = usageRefreshTasks.get(taskId);
+        if (!task) {
+            task = await loadPersistedUsageRefreshTask(taskId);
+            if (task) {
+                usageRefreshTasks.set(task.id, task);
+            }
+        }
 
         if (!task) {
             res.writeHead(404, { 'Content-Type': 'application/json' });

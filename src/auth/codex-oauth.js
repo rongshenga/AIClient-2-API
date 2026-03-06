@@ -10,6 +10,7 @@ import { broadcastEvent } from '../services/ui-manager.js';
 import { autoLinkProviderConfigs } from '../services/service-manager.js';
 import { CONFIG } from '../core/config-manager.js';
 import { getProxyConfigForProvider } from '../utils/proxy-utils.js';
+import { getRuntimeStorage } from '../storage/runtime-storage-registry.js';
 
 /**
  * Codex OAuth 配置
@@ -995,6 +996,28 @@ function getSafeEmailForFilename(email, index) {
 async function buildCodexDuplicateIndex(targetDir) {
     const refreshTokenIndex = new Map();
     const identityIndex = new Map();
+
+    const runtimeStorage = getRuntimeStorage();
+    if (runtimeStorage?.listCredentialAssets) {
+        try {
+            const assets = await runtimeStorage.listCredentialAssets('openai-codex-oauth');
+            if (Array.isArray(assets) && assets.length > 0) {
+                for (const asset of assets) {
+                    const sourcePath = String(asset.source_path || '').replace(/\\/g, '/');
+                    if (asset.dedupe_key && String(asset.dedupe_key).startsWith('refresh:')) {
+                        refreshTokenIndex.set(String(asset.dedupe_key).slice('refresh:'.length), sourcePath);
+                    }
+                    if (asset.identity_key) {
+                        identityIndex.set(String(asset.identity_key), sourcePath);
+                    }
+                }
+
+                return { refreshTokenIndex, identityIndex };
+            }
+        } catch (error) {
+            logger.warn(`${CODEX_OAUTH_CONFIG.logPrefix} Runtime credential inventory lookup failed: ${error.message}`);
+        }
+    }
 
     if (!fs.existsSync(targetDir)) {
         return { refreshTokenIndex, identityIndex };

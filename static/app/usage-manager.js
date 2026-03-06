@@ -145,6 +145,8 @@ function shouldShowUsage(providerType) {
 /**
  * 初始化用量管理功能
  */
+export { setUsageLoadingText, buildUsageTaskProgressText, shouldShowUsage };
+
 export function initUsageManager() {
     const refreshBtn = document.getElementById('refreshUsageBtn');
     if (refreshBtn) {

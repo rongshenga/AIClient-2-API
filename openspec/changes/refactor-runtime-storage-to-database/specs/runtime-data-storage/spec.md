@@ -17,6 +17,16 @@ The system SHALL support a database-backed runtime storage backend as the author
 - **THEN** the system SHALL allow those hot-path updates to be buffered or aggregated in memory before flushing durable state to the database backend
 - **AND** the system SHALL not require a synchronous durable database write for every request-path state mutation
 
+#### Scenario: Concurrent durable writes remain consistent
+- **WHEN** provider mutations, runtime flushes, usage updates, or plugin/session writes reach the database backend concurrently
+- **THEN** the system SHALL preserve transactional consistency for committed state and avoid torn snapshots across the affected logical domains
+- **AND** retries or overlapping write batches SHALL remain idempotent at the durable record level
+
+#### Scenario: Crash recovery preserves last durable boundary
+- **WHEN** the process crashes or exits unexpectedly before pending in-memory updates are fully flushed
+- **THEN** the system SHALL recover from the last committed durable state without corrupting the runtime database
+- **AND** any lost updates SHALL be limited to the documented unflushed window rather than producing partially committed provider/runtime records
+
 ### Requirement: Provider pool decomposition and stable identity
 The system SHALL decompose legacy `provider_pools.json` records into separately managed provider registry, secret, credential binding, and runtime state records while preserving a legacy-compatible projection.
 
@@ -70,6 +80,24 @@ The system SHALL preserve compatibility with existing `configs/`-based import, e
 - **WHEN** operators or legacy tooling need a `provider_pools.json`-compatible backup view
 - **THEN** the system SHALL provide an explicit export path that materializes the compatibility projection from database-backed storage
 - **AND** the system SHALL not require runtime writes to continuously rewrite the legacy JSON file
+
+### Requirement: Existing config data backfill workflow
+The system SHALL provide an explicit, staged migration workflow for pre-existing runtime datasets under `configs/` before switching the database backend to authoritative mode.
+
+#### Scenario: Existing runtime datasets are inventoried before import
+- **WHEN** an instance already contains runtime data under `configs/` and operators prepare to enable database-backed runtime storage
+- **THEN** the system SHALL generate a migration inventory and snapshot manifest covering `provider_pools.json`, credential directories, `usage-cache.json`, `token-store.json`, `api-potluck-data.json`, and `api-potluck-keys.json`
+- **AND** the manifest SHALL record checksums, item counts, and anomalies for later validation and rollback
+
+#### Scenario: Existing runtime datasets are backfilled before cutover
+- **WHEN** database-backed runtime storage is enabled for an instance with existing runtime files
+- **THEN** the system SHALL backfill supported runtime datasets from the legacy files into their corresponding database tables before switching the authoritative read path to database mode
+- **AND** the backfill SHALL be resumable and idempotent per migration run
+
+#### Scenario: Partial-write artifacts do not silently become source data
+- **WHEN** migration encounters partial-write artifacts, orphan temp files, or parse failures such as `provider_pools.json.*.tmp`
+- **THEN** the system SHALL record them as anomalies in the migration report instead of silently treating them as authoritative input
+- **AND** the system SHALL block final cutover until the anomaly handling policy is satisfied
 
 ### Requirement: Credential inventory deduplication
 The system SHALL maintain a deduplicated credential inventory for imported or managed provider credentials.

@@ -1300,6 +1300,7 @@ export {
     closeConfigModal,
     copyConfigContent,
     reloadConfig,
+    downloadAllConfigs,
     deleteUnboundConfigs,
     updateProviderFilterOptions
 };

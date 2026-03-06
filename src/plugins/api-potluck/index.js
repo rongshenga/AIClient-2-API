@@ -21,7 +21,8 @@ import {
     incrementUsage,
     getStats,
     KEY_PREFIX,
-    setConfigGetter
+    setConfigGetter,
+    initializeKeyManager
 } from './key-manager.js';
 
 import {
@@ -30,7 +31,7 @@ import {
     sendPotluckError
 } from './middleware.js';
 
-import { consumeBonus, getConfig } from './user-data-manager.js';
+import { consumeBonus, getConfig, initializeUserDataManager, stopFileWatcher } from './user-data-manager.js';
 import logger from '../../utils/logger.js';
 
 import { handlePotluckApiRoutes, handlePotluckUserApiRoutes, startHealthCheckScheduler, stopHealthCheckScheduler } from './api-routes.js';
@@ -55,9 +56,9 @@ const apiPotluckPlugin = {
      */
     async init(config) {
         logger.info('[API Potluck Plugin] Initializing...');
-        // 注入配置获取函数
+        await initializeUserDataManager(true);
         setConfigGetter(getConfig);
-        // 启动定时健康检查
+        await initializeKeyManager(true);
         startHealthCheckScheduler();
     },
 
@@ -66,8 +67,8 @@ const apiPotluckPlugin = {
      */
     async destroy() {
         logger.info('[API Potluck Plugin] Destroying...');
-        // 停止定时健康检查
         stopHealthCheckScheduler();
+        stopFileWatcher();
     },
 
     /**

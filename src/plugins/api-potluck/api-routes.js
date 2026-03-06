@@ -40,6 +40,7 @@ import multer from 'multer';
 import { batchImportKiroRefreshTokensStream, importAwsCredentials } from '../../auth/oauth-handlers.js';
 import { autoLinkProviderConfigs, getProviderPoolManager } from '../../services/service-manager.js';
 import { CONFIG } from '../../core/config-manager.js';
+import { verifyToken } from '../../ui-modules/auth.js';
 
 /**
  * 解析请求体
@@ -84,34 +85,11 @@ async function checkAdminAuth(req) {
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
         return false;
     }
-    
-    // 动态导入 ui-manager 中的 token 验证逻辑
+
     try {
-        const { existsSync, readFileSync } = await import('fs');
-        const { promises: fs } = await import('fs');
-        const path = await import('path');
-        
-        const TOKEN_STORE_FILE = path.join(process.cwd(), 'configs', 'token-store.json');
-        
-        if (!existsSync(TOKEN_STORE_FILE)) {
-            return false;
-        }
-        
-        const content = readFileSync(TOKEN_STORE_FILE, 'utf8');
-        const tokenStore = JSON.parse(content);
         const token = authHeader.substring(7);
-        const tokenInfo = tokenStore.tokens[token];
-        
-        if (!tokenInfo) {
-            return false;
-        }
-        
-        // 检查是否过期
-        if (Date.now() > tokenInfo.expiryTime) {
-            return false;
-        }
-        
-        return true;
+        const tokenInfo = await verifyToken(token);
+        return tokenInfo !== null;
     } catch (error) {
         logger.error('[API Potluck] Auth check error:', error.message);
         return false;
@@ -780,12 +758,12 @@ async function handleUserUpload(req, res, apiKey) {
                 const healthResult = await syncCredentialHealthFromPool(apiKey, credential);
                 
                 // 触发自动绑定
-                try {
-                    await autoLinkProviderConfigs(CONFIG);
-                } catch (linkError) {
-                    logger.warn('[API Potluck User] Auto-link failed:', linkError.message);
-                }
-                
+                await autoLinkProviderConfigs(CONFIG, {
+                    onlyCurrentCred: true,
+                    credPath: relativePath,
+                    sourceKind: 'api_potluck_upload'
+                });
+
                 logger.info(`[API Potluck User] File uploaded, linked and health checked: ${relativePath} (provider: ${providerType}, health: ${healthResult.message})`);
                 
                 sendJson(res, 200, {

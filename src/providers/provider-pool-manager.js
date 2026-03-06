@@ -1,5 +1,4 @@
 import * as fs from 'fs';
-import path from 'path';
 import { getServiceAdapter, getRegisteredProviders } from './adapter.js';
 import logger from '../utils/logger.js';
 import { MODEL_PROVIDER, getProtocolPrefix } from '../utils/common.js';
@@ -7,12 +6,20 @@ import { getProviderModels } from './provider-models.js';
 import { broadcastEvent } from '../ui-modules/event-broadcast.js';
 import { convertData } from '../convert/convert.js';
 import { ENDPOINT_TYPE } from '../utils/common.js';
+import { buildStableProviderId } from '../storage/provider-storage-mapper.js';
 
 /**
  * Manages a pool of API service providers, handling their health and selection.
  */
 export class ProviderPoolManager {
     static MAX_REFRESH_ATTEMPTS = 5;
+    static DEFAULT_RUNTIME_FLUSH_DEBOUNCE_MS = 1000;
+    static DEFAULT_RUNTIME_FLUSH_DIRTY_THRESHOLD = 64;
+    static DEFAULT_RUNTIME_FLUSH_BATCH_SIZE = 200;
+    static DEFAULT_RUNTIME_FLUSH_RETRY_DELAY_MS = 3000;
+    static DEFAULT_LARGE_POOL_THRESHOLD = 100000;
+    static DEFAULT_COMPAT_EXPORT_PAGE_SIZE = 1000;
+    static DEFAULT_STARTUP_RESTORE_PAGE_SIZE = 2000;
 
     // 默认健康检查模型配置
     // 键名必须与 MODEL_PROVIDER 常量值一致
@@ -32,6 +39,7 @@ export class ProviderPoolManager {
     constructor(providerPools, options = {}) {
         this.providerPools = providerPools;
         this.globalConfig = options.globalConfig || {}; // 存储全局配置
+        this.runtimeStorage = options.runtimeStorage || options.globalConfig?.runtimeStorage || null;
         this.providerStatus = {}; // Tracks health and usage for each provider instance
         this.roundRobinIndex = {}; // Tracks the current index for round-robin selection for each provider type
         // 使用 ?? 运算符确保 0 也能被正确设置，而不是被 || 替换为默认值
@@ -42,9 +50,40 @@ export class ProviderPoolManager {
         this.logLevel = (options.logLevel || options.globalConfig?.LOG_LEVEL || 'info').toLowerCase(); // 'debug', 'info', 'warn', 'error'
         
         // 添加防抖机制，避免频繁的文件 I/O 操作
-        this.saveDebounceTime = options.saveDebounceTime || 1000; // 默认1秒防抖
+        const configuredFlushDebounceMs = options.saveDebounceTime ?? this.globalConfig?.RUNTIME_STORAGE_PROVIDER_FLUSH_DEBOUNCE_MS;
+        this.saveDebounceTime = this._normalizePositiveInt(
+            configuredFlushDebounceMs,
+            ProviderPoolManager.DEFAULT_RUNTIME_FLUSH_DEBOUNCE_MS
+        );
+        this.runtimeFlushDirtyThreshold = this._normalizePositiveInt(
+            this.globalConfig?.RUNTIME_STORAGE_PROVIDER_FLUSH_DIRTY_THRESHOLD,
+            ProviderPoolManager.DEFAULT_RUNTIME_FLUSH_DIRTY_THRESHOLD
+        );
+        this.runtimeFlushBatchSize = this._normalizePositiveInt(
+            this.globalConfig?.RUNTIME_STORAGE_PROVIDER_FLUSH_BATCH_SIZE,
+            ProviderPoolManager.DEFAULT_RUNTIME_FLUSH_BATCH_SIZE
+        );
+        this.runtimeFlushRetryDelayMs = this._normalizePositiveInt(
+            this.globalConfig?.RUNTIME_STORAGE_PROVIDER_FLUSH_RETRY_DELAY_MS,
+            Math.max(this.saveDebounceTime, ProviderPoolManager.DEFAULT_RUNTIME_FLUSH_RETRY_DELAY_MS)
+        );
+        this.runtimeLargePoolThreshold = this._normalizePositiveInt(
+            this.globalConfig?.RUNTIME_STORAGE_LARGE_POOL_THRESHOLD,
+            ProviderPoolManager.DEFAULT_LARGE_POOL_THRESHOLD
+        );
+        this.runtimeCompatExportPageSize = this._normalizePositiveInt(
+            this.globalConfig?.RUNTIME_STORAGE_COMPAT_EXPORT_PAGE_SIZE,
+            ProviderPoolManager.DEFAULT_COMPAT_EXPORT_PAGE_SIZE
+        );
+        this.runtimeStartupRestorePageSize = this._normalizePositiveInt(
+            this.globalConfig?.RUNTIME_STORAGE_STARTUP_RESTORE_PAGE_SIZE,
+            ProviderPoolManager.DEFAULT_STARTUP_RESTORE_PAGE_SIZE
+        );
         this.saveTimer = null;
-        this.pendingSaves = new Set(); // 记录待保存的 providerType
+        this.pendingSaves = new Map(); // 记录待持久化的 provider
+        this.pendingRoutingUuidUpdates = new Map(); // 记录待持久化的 routing uuid 变更
+        this.flushInFlight = null;
+        this.lastFlushSummary = null;
         
         // Fallback 链配置
         this.fallbackChain = options.globalConfig?.providerFallbackChain || {};
@@ -132,6 +171,113 @@ export class ProviderPoolManager {
             return fallback;
         }
         return Math.max(0, Math.min(1, parsed));
+    }
+
+    _getPendingRuntimeMutationCount() {
+        return this.pendingSaves.size + this.pendingRoutingUuidUpdates.size;
+    }
+
+    getHotStatePolicy() {
+        const durableRuntimeFields = [
+            'isHealthy',
+            'isDisabled',
+            'usageCount',
+            'errorCount',
+            'lastUsed',
+            'lastHealthCheckTime',
+            'lastHealthCheckModel',
+            'lastErrorTime',
+            'lastErrorMessage',
+            'scheduledRecoveryTime',
+            'refreshCount'
+        ];
+        const memoryOnlyFields = [
+            'needsRefresh',
+            'activeCount',
+            'waitingCount',
+            'roundRobinIndex',
+            '_selectionLocks',
+            '_isSelecting',
+            '_selectionSequence',
+            '_minSelectionSeqByType',
+            'refreshingUuids',
+            'refreshQueues',
+            'refreshBufferQueues',
+            'refreshBufferTimers',
+            'activeProviderRefreshes',
+            'globalRefreshWaiters',
+            'pendingSaves',
+            'pendingRoutingUuidUpdates',
+            'saveTimer',
+            'providerIndexByType',
+            'providerIndexGlobal',
+            '_groupCursor'
+        ];
+        const conditionalDurableFields = this.persistSelectionState
+            ? ['_lastSelectionSeq']
+            : [];
+
+        return {
+            durableRuntimeFields,
+            conditionalDurableFields,
+            memoryOnlyFields,
+            flushPolicy: {
+                debounceMs: this.saveDebounceTime,
+                dirtyThreshold: this.runtimeFlushDirtyThreshold,
+                batchSize: this.runtimeFlushBatchSize,
+                retryDelayMs: this.runtimeFlushRetryDelayMs,
+                flushOnReload: true,
+                flushOnShutdown: true,
+                flushOnErrorRetry: true,
+                persistSelectionState: this.persistSelectionState
+            },
+            performanceTargets: {
+                largePoolThreshold: this.runtimeLargePoolThreshold,
+                compatExportPageSize: this.runtimeCompatExportPageSize,
+                startupRestorePageSize: this.runtimeStartupRestorePageSize,
+                startupPreloadMaxPerProvider: Number.isFinite(Number.parseInt(this.globalConfig?.STARTUP_PRELOAD_MAX_PER_PROVIDER, 10))
+                    ? Math.max(0, Number.parseInt(this.globalConfig?.STARTUP_PRELOAD_MAX_PER_PROVIDER, 10))
+                    : 20,
+                startupPreloadMaxTotal: Number.isFinite(Number.parseInt(this.globalConfig?.STARTUP_PRELOAD_MAX_TOTAL, 10))
+                    ? Math.max(0, Number.parseInt(this.globalConfig?.STARTUP_PRELOAD_MAX_TOTAL, 10))
+                    : 200
+            },
+            crashRecovery: {
+                durableBoundary: 'only_successful_flush_batches_are_durable',
+                mayLoseWithinWindow: [
+                    'usageCount',
+                    'lastUsed',
+                    'errorCount',
+                    'lastErrorTime',
+                    'lastErrorMessage',
+                    'lastHealthCheckTime',
+                    'lastHealthCheckModel',
+                    'refreshCount',
+                    ...(this.persistSelectionState ? ['_lastSelectionSeq'] : [])
+                ],
+                memoryOnlyAlwaysLost: memoryOnlyFields.slice()
+            },
+            pendingMutations: {
+                providerCount: this.pendingSaves.size,
+                routingUpdateCount: this.pendingRoutingUuidUpdates.size,
+                total: this._getPendingRuntimeMutationCount()
+            },
+            lastFlushSummary: this.lastFlushSummary || null
+        };
+    }
+
+    async flushRuntimeState(options = {}) {
+        if (options.forceAll === true) {
+            for (const providerType of Object.keys(this.providerStatus || {})) {
+                this._queueProviderRuntimeSave(providerType);
+            }
+        }
+
+        return await this._flushPendingSaves({
+            reason: options.reason || (options.forceAll ? 'force_all' : 'manual'),
+            requestedBy: options.requestedBy || null,
+            forceAll: options.forceAll === true
+        });
     }
 
     /**
@@ -832,6 +978,164 @@ export class ProviderPoolManager {
     }
 
     /**
+     * 为 provider 配置附加隐藏的稳定 ID，避免污染兼容快照
+     * @private
+     */
+    _attachProviderId(providerConfig, providerId) {
+        if (!providerConfig || !providerId) {
+            return providerId;
+        }
+
+        Object.defineProperty(providerConfig, '__providerId', {
+            value: providerId,
+            enumerable: false,
+            configurable: true,
+            writable: true
+        });
+
+        return providerId;
+    }
+
+    /**
+     * 解析 provider 的稳定 ID
+     * @private
+     */
+    _resolveProviderId(providerType, providerConfig = {}) {
+        const existingProviderId = providerConfig?.__providerId;
+        if (typeof existingProviderId === 'string' && existingProviderId) {
+            return existingProviderId;
+        }
+
+        const providerId = buildStableProviderId(providerType, providerConfig || {});
+        this._attachProviderId(providerConfig, providerId);
+        return providerId;
+    }
+
+    /**
+     * 构建待持久化的 runtime state 记录
+     * @private
+     */
+    _buildRuntimeStateRecord(provider) {
+        if (!provider?.config) {
+            return null;
+        }
+
+        const providerId = provider.providerId || this._resolveProviderId(provider.type, provider.config);
+
+        return {
+            providerId,
+            providerType: provider.type,
+            routingUuid: provider.config.uuid,
+            persistSelectionState: this.persistSelectionState,
+            runtimeState: {
+                isHealthy: provider.config.isHealthy !== undefined ? Boolean(provider.config.isHealthy) : true,
+                isDisabled: provider.config.isDisabled !== undefined ? Boolean(provider.config.isDisabled) : false,
+                usageCount: Number.isFinite(provider.config.usageCount) ? provider.config.usageCount : 0,
+                errorCount: Number.isFinite(provider.config.errorCount) ? provider.config.errorCount : 0,
+                lastUsed: provider.config.lastUsed || null,
+                lastHealthCheckTime: provider.config.lastHealthCheckTime || null,
+                lastHealthCheckModel: provider.config.lastHealthCheckModel || null,
+                lastErrorTime: provider.config.lastErrorTime || null,
+                lastErrorMessage: provider.config.lastErrorMessage || null,
+                scheduledRecoveryTime: provider.config.scheduledRecoveryTime || null,
+                refreshCount: Number.isFinite(provider.config.refreshCount) ? provider.config.refreshCount : 0,
+                lastSelectionSeq: this.persistSelectionState
+                    ? (provider.config._lastSelectionSeq ?? null)
+                    : null
+            }
+        };
+    }
+
+    /**
+     * 将 provider 运行时状态加入待 flush 集合
+     * @private
+     */
+    _queueProviderRuntimeSave(providerType, uuid) {
+        if (!providerType) {
+            return;
+        }
+
+        if (!uuid) {
+            const providers = this.providerStatus[providerType] || [];
+            for (const provider of providers) {
+                this._queueProviderRuntimeSave(providerType, provider.uuid);
+            }
+            return;
+        }
+
+        const provider = this._findProvider(providerType, uuid);
+        if (!provider) {
+            this._log('warn', `Attempted to queue runtime save for unknown provider: ${providerType}/${uuid}`);
+            return;
+        }
+
+        const providerId = provider.providerId || this._resolveProviderId(providerType, provider.config);
+        const saveKey = `${providerType}::${providerId}`;
+
+        this.pendingSaves.set(saveKey, {
+            providerType,
+            uuid: provider.config.uuid,
+            providerId
+        });
+    }
+
+    /**
+     * 记录 routing uuid 变更，flush 时统一落库
+     * @private
+     */
+    _queueRoutingUuidUpdate(providerType, provider, oldUuid, newUuid) {
+        if (!provider || !oldUuid || !newUuid || oldUuid === newUuid) {
+            return;
+        }
+
+        const providerId = provider.providerId || this._resolveProviderId(providerType, provider.config);
+        this.pendingRoutingUuidUpdates.set(providerId, {
+            providerId,
+            providerType,
+            oldRoutingUuid: oldUuid,
+            newRoutingUuid: newUuid
+        });
+    }
+
+    /**
+     * 安排一次异步 flush
+     * @private
+     */
+    _schedulePendingFlush(options = {}) {
+        const pendingMutationCount = this._getPendingRuntimeMutationCount();
+        if (pendingMutationCount === 0) {
+            return;
+        }
+
+        if (this.flushInFlight) {
+            return;
+        }
+
+        const thresholdReached = pendingMutationCount >= this.runtimeFlushDirtyThreshold;
+        const requestedDelayMs = Number.isFinite(options.delayMs)
+            ? Math.max(0, options.delayMs)
+            : null;
+        const delayMs = options.immediate === true || thresholdReached
+            ? 0
+            : (requestedDelayMs ?? this.saveDebounceTime);
+        const flushReason = options.reason || (thresholdReached ? 'dirty_threshold' : 'debounce');
+
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+        }
+
+        this.saveTimer = setTimeout(() => {
+            this._flushPendingSaves({
+                reason: flushReason,
+                thresholdReached,
+                requestedBy: options.requestedBy || null
+            }).catch((error) => {
+                this._log('error', `Failed to flush pending runtime state: ${this._formatErrorForLog(error)}`);
+            });
+        }, delayMs);
+    }
+
+    /**
      * 从 providerStatus 构建可持久化的号池快照
      * @private
      */
@@ -981,6 +1285,9 @@ export class ProviderPoolManager {
         for (const providerType in this.providerPools) {
             const oldStatus = this.providerStatus[providerType] || [];
             const oldStatusMap = new Map(oldStatus.map(item => [item.uuid, item]));
+            const oldStatusByProviderId = new Map(
+                oldStatus.map((item) => [item.providerId || this._resolveProviderId(providerType, item.config), item])
+            );
             this.providerStatus[providerType] = [];
             this.providerIndexByType[providerType] = new Map();
             this.roundRobinIndex[providerType] = 0; // Initialize round-robin index for each type
@@ -994,8 +1301,9 @@ export class ProviderPoolManager {
             let minSeq = Number.POSITIVE_INFINITY;
 
             this.providerPools[providerType].forEach((providerConfig) => {
+                const providerId = this._resolveProviderId(providerType, providerConfig);
                 // 尝试从旧状态中恢复活跃请求计数和队列，避免重载配置时重置并发限制
-                const existing = oldStatusMap.get(providerConfig.uuid);
+                const existing = oldStatusByProviderId.get(providerId) || oldStatusMap.get(providerConfig.uuid);
 
                 // Ensure initial health and usage stats are present in the config
                 providerConfig.isHealthy = providerConfig.isHealthy !== undefined ? providerConfig.isHealthy : true;
@@ -1022,6 +1330,7 @@ export class ProviderPoolManager {
                 providerConfig.customName = providerConfig.customName || null;
 
                 const providerEntry = {
+                    providerId,
                     config: providerConfig,
                     uuid: providerConfig.uuid, // Still keep uuid at the top level for easy access
                     type: providerType, // 保存 providerType 引用
@@ -1261,9 +1570,9 @@ export class ProviderPoolManager {
 
         if (!options.skipUsageCount) {
             selected.config.usageCount++;
-            this._debouncedSave(providerType);
+            this._debouncedSave(providerType, selected.config.uuid);
         } else if (this.persistSelectionState) {
-            this._debouncedSave(providerType);
+            this._debouncedSave(providerType, selected.config.uuid);
         }
 
         // 分组场景下根据策略轮转游标
@@ -1717,8 +2026,6 @@ export class ProviderPoolManager {
             
             // 推入异步刷新队列
             this._enqueueRefresh(providerType, provider, true);
-            
-            this._debouncedSave(providerType);
         }
     }
 
@@ -1768,7 +2075,7 @@ export class ProviderPoolManager {
                 this._log('warn', `Marked provider as unhealthy: ${providerConfig.uuid} for type ${providerType}. Total errors: ${provider.config.errorCount}`);
             } 
 
-            this._debouncedSave(providerType);
+            this._debouncedSave(providerType, provider.config.uuid);
         }
     }
 
@@ -1804,7 +2111,7 @@ export class ProviderPoolManager {
 
             this._log('warn', `Immediately marked provider as unhealthy: ${providerConfig.uuid} for type ${providerType}. Reason: ${errorMessage || 'Authentication error'}`);
            
-            this._debouncedSave(providerType);
+            this._debouncedSave(providerType, provider.config.uuid);
         }
     }
 
@@ -1842,7 +2149,7 @@ export class ProviderPoolManager {
                 this._log('warn', `Marked provider as unhealthy: ${providerConfig.uuid} for type ${providerType}. Reason: ${errorMessage || 'Quota exhausted'}`);
             }
 
-            this._debouncedSave(providerType);
+            this._debouncedSave(providerType, provider.config.uuid);
         }
     }
 
@@ -1893,7 +2200,7 @@ export class ProviderPoolManager {
             const logLevel = wasHealthy ? 'debug' : 'info';
             this._log(logLevel, `Marked provider as healthy: ${provider.config.uuid} for type ${providerType}${resetUsageCount ? ' (usage count reset)' : ''}`);
             
-            this._debouncedSave(providerType);
+            this._debouncedSave(providerType, provider.config.uuid);
         }
     }
 
@@ -1930,7 +2237,7 @@ export class ProviderPoolManager {
             const logLevel = wasHealthy ? 'debug' : 'info';
             this._log(logLevel, `Reset refresh status and marked healthy for provider ${uuid} (${providerType})`);
 
-            this._debouncedSave(providerType);
+            this._debouncedSave(providerType, provider.config.uuid);
         }
     }
 
@@ -1953,7 +2260,7 @@ export class ProviderPoolManager {
             this._minSelectionSeqByType[providerType] = 0;
             this._log('debug', `Reset provider counters: ${provider.config.uuid} for type ${providerType}`);
             
-            this._debouncedSave(providerType);
+            this._debouncedSave(providerType, provider.config.uuid);
         }
     }
 
@@ -1972,7 +2279,7 @@ export class ProviderPoolManager {
         if (provider) {
             provider.config.isDisabled = true;
             this._log('info', `Disabled provider: ${providerConfig.uuid} for type ${providerType}`);
-            this._debouncedSave(providerType);
+            this._debouncedSave(providerType, provider.config.uuid);
         }
     }
 
@@ -1991,7 +2298,7 @@ export class ProviderPoolManager {
         if (provider) {
             provider.config.isDisabled = false;
             this._log('info', `Enabled provider: ${providerConfig.uuid} for type ${providerType}`);
-            this._debouncedSave(providerType);
+            this._debouncedSave(providerType, provider.config.uuid);
         }
     }
 
@@ -2038,9 +2345,11 @@ export class ProviderPoolManager {
                     originalProvider.uuid = newUuid;
                 }
             }
+
+            this._queueRoutingUuidUpdate(providerType, provider, oldUuid, newUuid);
             
             this._log('info', `Refreshed provider UUID: ${oldUuid} -> ${newUuid} for type ${providerType}`);
-            this._debouncedSave(providerType);
+            this._debouncedSave(providerType, newUuid);
             
             return newUuid;
         }
@@ -2077,7 +2386,7 @@ export class ProviderPoolManager {
                         config.scheduledRecoveryTime = null; // 清除恢复时间
                         
                         // 保存更改
-                        this._debouncedSave(type);
+                        this._debouncedSave(type, config.uuid);
                     }
                 }
             }
@@ -2315,104 +2624,149 @@ export class ProviderPoolManager {
      * 延迟保存操作，避免频繁的文件 I/O
      * @private
      */
-    _debouncedSave(providerType) {
-        // 将待保存的 providerType 添加到集合中
-        this.pendingSaves.add(providerType);
-        
-        // 清除之前的定时器
-        if (this.saveTimer) {
-            clearTimeout(this.saveTimer);
-        }
-        
-        // 设置新的定时器
-        this.saveTimer = setTimeout(() => {
-            this._flushPendingSaves();
-        }, this.saveDebounceTime);
+    _debouncedSave(providerType, uuid = null) {
+        this._queueProviderRuntimeSave(providerType, uuid);
+        this._schedulePendingFlush();
     }
     
     /**
      * 批量保存所有待保存的 providerType（优化为单次文件写入）
      * @private
      */
-    async _flushPendingSaves() {
-        const typesToSave = Array.from(this.pendingSaves);
-        if (typesToSave.length === 0) return;
-        
-        this.pendingSaves.clear();
-        this.saveTimer = null;
-        
-        try {
-            const filePath = this.globalConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
-            const fileDir = path.dirname(filePath);
-            await fs.promises.mkdir(fileDir, { recursive: true });
-            let currentPools = {};
-            let loadedFromFile = false;
-            
-            // 读取文件时短重试，避免并发写入瞬间读到半文件
-            const maxReadAttempts = 3;
-            for (let attempt = 1; attempt <= maxReadAttempts; attempt++) {
-                try {
-                    const fileContent = await fs.promises.readFile(filePath, 'utf8');
-                    currentPools = JSON.parse(fileContent);
-                    loadedFromFile = true;
-                    break;
-                } catch (readError) {
-                    if (readError.code === 'ENOENT') {
-                        loadedFromFile = true;
-                        this._log('info', 'configs/provider_pools.json does not exist, creating new file.');
-                        break;
-                    }
-
-                    const isSyntaxError = readError instanceof SyntaxError;
-                    const canRetry = isSyntaxError && attempt < maxReadAttempts;
-                    if (canRetry) {
-                        await new Promise(resolve => setTimeout(resolve, attempt * 80));
-                        continue;
-                    }
-
-                    if (isSyntaxError) {
-                        this._log(
-                            'warn',
-                            `provider_pools.json parse failed, fallback to in-memory snapshot: ${this._formatErrorForLog(readError)}`
-                        );
-                        currentPools = this._buildPoolsSnapshotFromStatus();
-                        loadedFromFile = true;
-                        break;
-                    }
-
-                    throw readError;
-                }
-            }
-
-            if (!loadedFromFile) {
-                currentPools = this._buildPoolsSnapshotFromStatus();
-            }
-
-            const statusSnapshot = this._buildPoolsSnapshotFromStatus();
-
-            // 更新所有待保存的 providerType
-            for (const providerType of typesToSave) {
-                if (this.providerStatus[providerType]) {
-                    currentPools[providerType] = statusSnapshot[providerType] || [];
-                } else {
-                    this._log('warn', `Attempted to save unknown providerType: ${providerType}`);
-                }
-            }
-            
-            // 使用临时文件 + 原子替换，避免写入中断导致 JSON 半文件
-            const tempFilePath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-            await fs.promises.writeFile(tempFilePath, JSON.stringify(currentPools, null, 2), 'utf8');
-            await fs.promises.rename(tempFilePath, filePath);
-            const typeLogPreviewCount = 8;
-            const previewTypes = typesToSave.slice(0, typeLogPreviewCount).join(', ');
-            const omittedTypeCount = Math.max(0, typesToSave.length - typeLogPreviewCount);
-            const typeSummary = omittedTypeCount > 0
-                ? `${previewTypes} ...( +${omittedTypeCount} more )`
-                : previewTypes;
-            this._log('info', `configs/provider_pools.json updated successfully for types: ${typeSummary}`);
-        } catch (error) {
-            this._log('error', `Failed to write provider_pools.json: ${this._formatErrorForLog(error)}`);
+    async _flushPendingSaves(options = {}) {
+        if (this.flushInFlight) {
+            return await this.flushInFlight;
         }
+
+        if (options.forceAll === true) {
+            for (const providerType of Object.keys(this.providerStatus || {})) {
+                this._queueProviderRuntimeSave(providerType);
+            }
+        }
+
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+            this.saveTimer = null;
+        }
+
+        const pendingSaveEntries = Array.from(this.pendingSaves.values());
+        const pendingRoutingUpdates = Array.from(this.pendingRoutingUuidUpdates.values());
+        if (pendingSaveEntries.length === 0 && pendingRoutingUpdates.length === 0) {
+            return {
+                flushedCount: 0,
+                routingUpdateCount: 0,
+                batchCount: 0,
+                flushReason: options.reason || 'idle'
+            };
+        }
+
+        this.pendingSaves.clear();
+        this.pendingRoutingUuidUpdates.clear();
+
+        this.flushInFlight = (async () => {
+            let nextRetryDelayMs = null;
+            const flushReason = options.reason || 'scheduled';
+
+            try {
+                if (!this.runtimeStorage
+                    || typeof this.runtimeStorage.flushProviderRuntimeState !== 'function'
+                    || typeof this.runtimeStorage.updateProviderRoutingUuid !== 'function') {
+                    throw new Error('RuntimeStorage flush interface is unavailable');
+                }
+
+                for (const routingUpdate of pendingRoutingUpdates) {
+                    await this.runtimeStorage.updateProviderRoutingUuid(routingUpdate);
+                }
+
+                const runtimeRecords = pendingSaveEntries
+                    .map((entry) => {
+                        const providers = this.providerStatus[entry.providerType] || [];
+                        const provider = this._findProvider(entry.providerType, entry.uuid)
+                            || providers.find((item) => item.providerId === entry.providerId);
+                        if (!provider) {
+                            this._log('warn', `Skip runtime flush for missing provider: ${entry.providerType}/${entry.uuid}`);
+                            return null;
+                        }
+                        return this._buildRuntimeStateRecord(provider);
+                    })
+                    .filter(Boolean);
+
+                const totalBatches = runtimeRecords.length > 0
+                    ? Math.ceil(runtimeRecords.length / this.runtimeFlushBatchSize)
+                    : 0;
+
+                for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+                    const batchStart = batchIndex * this.runtimeFlushBatchSize;
+                    const batchRecords = runtimeRecords.slice(batchStart, batchStart + this.runtimeFlushBatchSize);
+                    await this.runtimeStorage.flushProviderRuntimeState(batchRecords, {
+                        persistSelectionState: this.persistSelectionState,
+                        flushReason,
+                        batchIndex,
+                        totalBatches,
+                        batchSize: this.runtimeFlushBatchSize,
+                        crashRecoveryBoundary: 'unflushed_window_only'
+                    });
+                }
+
+                const previewCount = 8;
+                const runtimeTypes = Array.from(new Set(runtimeRecords.map((item) => item.providerType)));
+                const previewTypes = runtimeTypes
+                    .slice(0, previewCount)
+                    .join(', ');
+                const omittedTypeCount = Math.max(0, runtimeTypes.length - previewCount);
+                const typeSummary = omittedTypeCount > 0
+                    ? `${previewTypes} ...( +${omittedTypeCount} more )`
+                    : previewTypes;
+                this.lastFlushSummary = {
+                    status: 'success',
+                    occurredAt: new Date().toISOString(),
+                    flushReason,
+                    providerCount: runtimeRecords.length,
+                    routingUpdateCount: pendingRoutingUpdates.length,
+                    batchCount: totalBatches,
+                    pendingMutationCount: pendingSaveEntries.length + pendingRoutingUpdates.length,
+                    thresholdReached: options.thresholdReached === true
+                };
+                this._log('info', `Runtime state flushed successfully for types: ${typeSummary || 'none'} (reason=${flushReason}, batches=${totalBatches})`);
+
+                return {
+                    flushedCount: runtimeRecords.length,
+                    routingUpdateCount: pendingRoutingUpdates.length,
+                    batchCount: totalBatches,
+                    flushReason
+                };
+            } catch (error) {
+                nextRetryDelayMs = this.runtimeFlushRetryDelayMs;
+                for (const entry of pendingSaveEntries) {
+                    this.pendingSaves.set(`${entry.providerType}::${entry.providerId}`, entry);
+                }
+                for (const routingUpdate of pendingRoutingUpdates) {
+                    this.pendingRoutingUuidUpdates.set(routingUpdate.providerId, routingUpdate);
+                }
+                this.lastFlushSummary = {
+                    status: 'failed',
+                    occurredAt: new Date().toISOString(),
+                    flushReason,
+                    providerCount: pendingSaveEntries.length,
+                    routingUpdateCount: pendingRoutingUpdates.length,
+                    batchCount: 0,
+                    retryDelayMs: nextRetryDelayMs,
+                    error: this._formatErrorForLog(error)
+                };
+                this._log('error', `Failed to flush runtime state: ${this._formatErrorForLog(error)}`);
+                throw error;
+            } finally {
+                this.flushInFlight = null;
+                if ((this.pendingSaves.size > 0 || this.pendingRoutingUuidUpdates.size > 0) && !this.saveTimer) {
+                    this._schedulePendingFlush({
+                        delayMs: nextRetryDelayMs,
+                        reason: nextRetryDelayMs ? 'error_retry' : 'follow_up'
+                    });
+                }
+            }
+        })();
+
+        return await this.flushInFlight;
     }
 
 }

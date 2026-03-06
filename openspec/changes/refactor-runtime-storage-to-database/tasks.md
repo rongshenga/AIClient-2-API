@@ -1,38 +1,245 @@
 ## 1. Proposal
 
-- [ ] 1.1 完成本地持久化位置、数据流转和迁移边界盘点
-- [ ] 1.2 明确数据库托管范围与非目标
-- [ ] 1.3 确认数据库选型与部署约束
-- [ ] 1.4 确认凭据原文入库策略与安全边界
-- [ ] 1.5 明确 `provider_pools.json` 的字段拆分、主键策略和兼容视图
-- [ ] 1.6 输出 `ProviderPoolManager` 字段级归属清单，明确内存热状态、`provider_runtime_state` 与其他表之间的边界
+- [x] 1.1 完成本地持久化位置、数据流转和迁移边界盘点
+  - [x] 1.1.a 盘点 `configs/`、`logs/`、`.update_temp/`、`configs/temp/` 下所有与运行时读写相关的文件、目录和临时产物
+  - [x] 1.1.b 为每个数据集标注当前权威来源、主要读方、主要写方、更新频率与现有写入语义
+  - [x] 1.1.c 为每个数据集标注其分类：`bootstrap file`、`in-memory hot state`、`runtime durable data`、`temp file`、`log`
+  - [x] 1.1.d 标出存在多写方、写入语义冲突、目录扫描依赖或 `.tmp` 残留风险的数据集
+  - [x] 1.1.e 在 `design.md` 中补齐本地持久化 inventory、迁移优先级和运行分层说明
+- [x] 1.2 明确数据库托管范围与非目标
+  - [x] 1.2.a 冻结第一阶段必须迁移的数据：`provider_pools.json`、凭据索引/去重元数据、`usage-cache.json`、`token-store.json`、`api-potluck-data.json`、`api-potluck-keys.json`
+  - [x] 1.2.b 冻结明确不迁移的数据：`configs/config.json`、`configs/plugins.json`、提示词文件、日志目录、上传暂存目录、更新临时目录
+  - [x] 1.2.c 明确第二阶段议题仅包括“凭据原文是否完整入库 / 是否接入更强 secret backend”，避免第一阶段无限膨胀
+  - [x] 1.2.d 将任务边界映射到 `parallel-outline.md` 的 CLI-1 ~ CLI-8，标注依赖关系和禁止越界点
+  - [x] 1.2.e 明确 `usage` / `session` / `api-potluck` 全部并入统一 `RuntimeStorage` 主逻辑域，不另起存储体系
+  - [x] 1.2.f 明确 Potluck 兼容字段先通过 `meta_json` / 兼容层承载，不越界重做 credential inventory 语义
+- [x] 1.3 确认数据库选型与部署约束
+  - [x] 1.3.a 确认第一阶段默认数据库实现、数据库文件位置与初始化方式
+  - [x] 1.3.b 明确单机部署、无额外 npm 依赖、无数据库模式兼容与未来外部数据库扩展边界
+  - [x] 1.3.c 明确 schema 初始化、版本表、升级顺序、失败回滚与幂等建表规则
+  - [x] 1.3.d 冻结运行模式与 feature flag 范围，至少覆盖 `RUNTIME_STORAGE_BACKEND`、`RUNTIME_STORAGE_DUAL_WRITE`、`PERSIST_SELECTION_STATE`
+  - [x] 1.3.e 明确备份、恢复、导出和回滚时对数据库文件与兼容快照的约束
+- [x] 1.4 确认凭据原文入库策略与安全边界
+  - [x] 1.4.a 明确 `provider_pools.json` 内联 secret 必须在第一阶段迁移到独立 secret 记录，而不是继续混在兼容快照里
+  - [x] 1.4.b 明确 `configs/<provider>/` 下文件型凭据第一阶段只迁移索引、去重元数据和绑定关系，原文文件暂时保留兼容层
+  - [x] 1.4.c 明确 secret 字段的保护模式、导出脱敏边界、日志禁写边界与故障排查边界
+  - [x] 1.4.d 明确目录扫描只负责发现候选 credential 文件，不再充当 credential 权威源
+  - [x] 1.4.e 明确异常或无法解析的 credential 文件进入迁移异常报告，而不是默默并入权威模型
+- [x] 1.5 明确 `provider_pools.json` 的字段拆分、主键策略和兼容视图
+  - [x] 1.5.a 明确 Provider 池 `registration / runtime / staticConfig` 字段拆分规则
+  - [x] 1.5.b 明确 `provider_id`、`routing_uuid` 与 legacy `providerType + uuid` 的兼容主键策略
+  - [x] 1.5.c 明确 API / 快照 / 导出视角下的 legacy shape 与兼容视图规则
+  - [x] 1.5.d 明确 compat 导出中 `*_FILE_PATH`、`*_CREDS_FILE_PATH`、`*_TOKEN_FILE_PATH` 等路径字段的保留规则
+- [x] 1.6 输出 `ProviderPoolManager` 字段级归属清单，明确内存热状态、`provider_runtime_state` 与其他表之间的边界
+  - [x] 1.6.a 逐个字段标注哪些只属于 Layer 1 内存热状态，例如瞬时并发占位、短周期辅助计数和排队状态
+  - [x] 1.6.b 逐个字段标注哪些属于 `provider_runtime_state` durable 聚合状态，例如健康状态、禁用状态、错误计数、恢复时间、最近检查时间
+  - [x] 1.6.c 逐个字段标注哪些属于 `provider_registrations`、`provider_group_state`、`provider_inline_secrets`、`credential_bindings`
+  - [x] 1.6.d 明确 `PERSIST_SELECTION_STATE=true|false` 时选点相关字段的持久化边界和恢复语义
 
 ## 2. Storage Foundation
 
-- [ ] 2.1 设计统一存储抽象，隔离文件与数据库实现
-- [ ] 2.2 明确数据库数量、逻辑域与初版表清单
-- [ ] 2.3 为 Provider 池定义注册表、secret 表、credential inventory、运行时状态表和兼容投影视图
-- [ ] 2.4 提供事务化写入、并发控制、幂等更新以及 `provider_id` / `uuid` 双标识解析能力
-- [ ] 2.5 定义内存热状态层与数据库 flush 策略，明确哪些字段逐请求更新、哪些字段批量持久化
+- [x] 2.1 设计统一存储抽象，隔离文件与数据库实现
+  - [x] 2.1.a 设计 `RuntimeStorage` 顶层能力边界，区分读取、写入、导入导出、迁移、诊断接口
+  - [x] 2.1.b 拆分 Provider / Usage / Session / Plugin / Migration 五类逻辑域接口，避免一个仓储对象包打天下（建议放在一期后段 / 集成收尾阶段）
+    - [x] 2.1.b1 在不改变现有调用入口的前提下，为 `RuntimeStorage` 增加按逻辑域组织的 facade 或子模块边界
+    - [x] 2.1.b2 抽取 Provider 域接口，至少收口 provider snapshot、provider mutation、runtime flush、routing uuid update
+    - [x] 2.1.b3 抽取 Usage 域接口，至少收口 usage snapshot、provider usage upsert、usage refresh task 的读写
+    - [x] 2.1.b4 抽取 Session 域接口，至少收口 `admin_sessions` 的查询、保存、清理和 fallback import 语义
+    - [x] 2.1.b5 抽取 Plugin/Potluck 域接口，至少收口 user/config/key store 的恢复与保存能力
+    - [x] 2.1.b6 抽取 Migration 域接口，至少收口 migration run、item、verify、export、rollback 与 run artifacts 查询能力
+    - [x] 2.1.b7 保持 `file` / `db` / `dual-write` 三种后端在 facade 层的方法面一致，避免调用方按后端分支乱飞
+    - [x] 2.1.b8 为拆分后的逻辑域接口补最小 contract test，确认不改变当前 CLI-3/4/5/6 已接线能力
+  - [x] 2.1.c 为 `file` 后端实现统一适配层，收口当前零散的 `writeFile`、`rename`、目录扫描与显式导出逻辑
+  - [x] 2.1.d 为 `db` 后端实现统一适配层，覆盖 bootstrap、schema 初始化、健康检查与生命周期管理
+  - [x] 2.1.e 冻结 compat helper 能力边界，至少覆盖 `loadProviderPoolsCompatSnapshot`、`exportProviderPoolsCompatSnapshot`、`replaceProviderPoolsCompatSnapshot`
+  - [x] 2.1.f 扩展 `file|db|dual-write` 三种后端在 usage / session / potluck 逻辑域上的统一能力
+- [x] 2.2 明确数据库数量、逻辑域与初版表清单
+  - [x] 2.2.a 明确第一阶段采用单个 `runtime` 数据库，并将未来 secret backend 作为可扩展能力而非第一阶段前置条件
+  - [x] 2.2.b 冻结 Provider 域初版表：`provider_registrations`、`provider_runtime_state`、`provider_inline_secrets`、`provider_group_state`、`credential_assets`、`credential_bindings`
+  - [x] 2.2.c 冻结 Usage 域初版表：`usage_snapshots`、`usage_refresh_tasks`
+  - [x] 2.2.d 冻结 Session 域初版表：`admin_sessions`
+  - [x] 2.2.e 冻结 Potluck 域初版表：`potluck_users`、`potluck_config`、`potluck_api_keys`
+  - [x] 2.2.f 冻结 Migration 域初版表：`storage_migration_runs`、`storage_migration_items`
+  - [x] 2.2.g 明确兼容投影视图、导出视图与查询索引的命名和职责边界
+- [x] 2.3 为 Provider 池定义注册表、secret 表、credential inventory、运行时状态表和兼容投影视图
+  - [x] 2.3.a 定义 `provider_registrations` 的字段、唯一约束、外键关系与默认值
+  - [x] 2.3.b 定义 `provider_runtime_state` 的字段、更新时间语义、聚合策略与恢复语义
+  - [x] 2.3.c 定义 `provider_inline_secrets` 的字段、secret_kind 分类、保护模式与更新规则
+  - [x] 2.3.d 定义 `credential_assets` / `credential_bindings` 的稳定身份、路径引用、checksum、identity key 与绑定规则
+  - [x] 2.3.e 定义 `provider_pools.json` compat snapshot / export view 的分组、排序、空值与字段保留规则
+- [x] 2.4 提供事务化写入、并发控制、幂等更新以及 `provider_id` / `uuid` 双标识解析能力
+  - [x] 2.4.a 定义 Provider mutation 的事务边界，明确哪些操作必须一次性提交注册信息、runtime 状态与绑定关系
+  - [x] 2.4.b 定义 runtime flush 与 provider mutation 并发时的串行化行为，避免撕裂快照
+  - [x] 2.4.c 定义批量写入、重试、错误分类、重放与幂等更新规则（建议作为一期正式收尾前必须补齐项）
+    - [x] 2.4.c1 输出统一错误分类矩阵，至少区分参数/数据错误、约束冲突、后端不可用、可重试锁冲突、secondary write 失败、migration 校验失败
+    - [x] 2.4.c2 约定各类错误的处理策略：立即失败、有限重试、降级到 file backend、阻断 cutover、仅记录告警
+    - [x] 2.4.c3 明确 `dual-write` 模式下一主一副写入失败时的语义，尤其是 primary 成功 secondary 失败、primary 失败 secondary 未执行两种情况
+    - [x] 2.4.c4 明确 migration / import / rollback / runtime flush / compat export 五类写路径的幂等键与重放边界
+    - [x] 2.4.c5 明确 SQLite `database is locked`、busy timeout、spawn 失败、JSON 解析失败等错误是否可重试及其最大重试窗口
+    - [x] 2.4.c6 统一包装后端错误对象，补齐 error code、phase、domain、retryable、runId/providerId 等诊断字段
+    - [x] 2.4.c7 为 provider mutation、runtime flush、usage refresh task、potluck/session 写入分别补幂等与重试回归测试
+    - [x] 2.4.c8 为 migration verify / export / rollback 补 replay-safe 验证，确保重复执行不会把状态越跑越脏
+  - [x] 2.4.d 提供 `provider_id`、`routing_uuid`、legacy `providerType + uuid` 三种标识的解析与互查能力
+  - [x] 2.4.e 定义兼容快照替换、差异检测和原子导出时的事务边界
+- [x] 2.5 定义内存热状态层与数据库 flush 策略，明确哪些字段逐请求更新、哪些字段批量持久化
+  - [x] 2.5.a 盘点热路径高频状态：选点辅助状态、瞬时并发占位、短周期熔断/冷却、待 flush usage 增量
+  - [x] 2.5.b 决定哪些字段允许仅驻留内存，哪些字段必须在定时或阈值触发下 flush 到 durable 层
+  - [x] 2.5.c 定义 flush 触发条件：定时 flush、批量阈值、进程退出前 flush、reload 前 flush、错误恢复重试
+  - [x] 2.5.d 定义十几万账号规模下的批量 flush、分页读取、恢复加载和 compat export 性能目标线
+  - [x] 2.5.e 明确 crash recovery 的 durable 边界，允许丢失的只能是未 flush 窗口内的热状态
 
 ## 3. Migration
 
-- [ ] 3.1 实现从 `provider_pools.json` 到数据库模型的初始化导入工具
-- [ ] 3.2 为 Provider 池、内联 secret 和凭据目录建立去重、稳定主键与绑定规则
-- [ ] 3.3 迁移 `provider-pool-manager`、`provider-api`、`service-manager auto-link` 的 Provider 池写路径
-- [ ] 3.4 提供迁移校验、差异报告与回滚方案
+- [x] 3.1 生成现有 `configs/` 存量数据清单、checksum 快照与异常文件报告
+  - [x] 3.1.a 实现 inventory 扫描器，覆盖 `provider_pools.json`、`configs/<provider>/`、`usage-cache.json`、`token-store.json`、`api-potluck-data.json`、`api-potluck-keys.json`
+  - [x] 3.1.b 为每个 migration item 记录路径、大小、mtime、checksum、记录数/条目数、解析状态、provider 类型与异常原因
+  - [x] 3.1.c 识别 `provider_pools.json.*.tmp`、孤儿文件、重复文件、解析失败文件与不合法凭据文件并写入 anomaly report
+  - [x] 3.1.d 在正式回填前创建 `storage_migration_runs` 和只读 snapshot manifest，保存迁移前最后可信状态
+  - [x] 3.1.e 支持迁移前备份 legacy 文件与 SQLite 文件（含 `-wal` / `-shm`）
+- [x] 3.2 实现从 `provider_pools.json` 到数据库模型的初始化导入工具
+  - [x] 3.2.a 将 legacy Provider 记录拆分导入到 `provider_registrations`、`provider_runtime_state`、`provider_inline_secrets`、`credential_bindings`
+  - [x] 3.2.b 导入过程中处理缺失字段、未知字段、脏字段、路径字段和 legacy UUID
+  - [x] 3.2.c 为导入后的每条记录生成 compat snapshot 所需的反向映射信息
+  - [x] 3.2.d 保证导入过程可重复执行、支持按 `run_id` 断点续跑并具备幂等性
+- [x] 3.3 为 Provider 池、内联 secret 和凭据目录建立去重、稳定主键与绑定规则
+  - [x] 3.3.a 冻结 `provider_id` 生成策略与导入回填策略，避免因 UUID 刷新导致外键失效
+  - [x] 3.3.b 冻结 `credential_assets` 的 dedupe key，覆盖 checksum、identity key、路径归并与 provider 维度归一化
+  - [x] 3.3.c 定义内联 secret 与文件凭据的绑定优先级、解绑语义和冲突处理策略
+  - [x] 3.3.d 输出稳定主键、绑定关系和 dedupe 命中情况的迁移报告摘要
+- [x] 3.4 实现 `usage-cache.json`、`token-store.json`、`api-potluck` 现有数据的基线回填
+  - [x] 3.4.a 回填 `usage-cache.json`，恢复 provider/model 维度 key、统计字段与最近更新时间
+  - [x] 3.4.b 回填 `token-store.json`，恢复管理员 session、过期时间、token hash 与清理规则，允许首次读取时从旧文件幂等导入
+  - [x] 3.4.c 回填 `api-potluck-data.json`，恢复用户、绑定关系、资源包与插件状态
+  - [x] 3.4.d 回填 `api-potluck-keys.json`，恢复 Key、额度、用量、启用状态与统计信息
+  - [x] 3.4.e 保证 `usage` / `potluck` 迁移 run 支持 `run_id` 断点续跑，`token-store` fallback import 保持幂等导入
+- [x] 3.5 定义 `file -> dual-write -> db` 切换闸门、冻结窗口与断点续跑规则
+  - [x] 3.5.a 定义进入 `dual-write` 前的前置条件：inventory 完成、基线回填完成、关键计数校验通过、异常策略满足要求
+  - [x] 3.5.b 定义进入 `db` 前的前置条件：compat snapshot diff 通过、关键记录数匹配、健康检查通过、增量写入未漂移
+  - [x] 3.5.c 明确切换窗口内的冻结策略、增量写入接管顺序与失败中断后的恢复步骤
+  - [x] 3.5.d 明确回滚时依赖的 snapshot manifest、compat export、数据库备份与 feature flag 切换策略
+- [x] 3.6 迁移 `provider-pool-manager`、`provider-api`、`service-manager auto-link` 的 Provider 池写路径
+  - [x] 3.6.a 迁移 `src/providers/provider-pool-manager.js` 的写路径与 flush 提交路径
+  - [x] 3.6.b 迁移 `src/ui-modules/provider-api.js` 的 Provider 池写路径
+  - [x] 3.6.c 迁移 `src/services/service-manager.js` 的 auto-link / batch-link 写路径
+  - [x] 3.6.d 迁移与 Provider mutation 相关的 `config-api` / 上传导入入口，统一接入 RuntimeStorage 写路径
+  - [x] 3.6.e 保持目录扫描仅作为 credential 候选发现入口，真正落库、去重、绑定统一走 RuntimeStorage
+- [x] 3.7 提供迁移校验、差异报告与回滚方案
+  - [x] 3.7.a 对 Provider 迁移结果校验 providerType 分组数量、每组 Provider 数量、UUID 覆盖率、健康/禁用状态与绑定路径映射
+  - [x] 3.7.b 对 credential inventory 校验文件索引数量、dedupe 命中情况、identity key 覆盖率与无法解析文件清单
+  - [x] 3.7.c 对 usage/session/potluck 校验记录数、关键字段摘要与时间字段恢复情况
+  - [x] 3.7.d 输出 compat snapshot diff、关键字段摘要、异常列表与回滚前检查报告
+  - [x] 3.7.e 产出 `diff-report.json` 与 `diff-report.md`
+  - [x] 3.7.f 提供 `rollback`、`list-runs`、`show-run` 等迁移运维入口
 
 ## 4. Compatibility
 
-- [ ] 4.1 保留现有文件导入/导出接口，并提供 `provider_pools.json` 兼容导出
-- [ ] 4.2 让 `provider-api`、`usage-api`、`config-scanner`、`getProviderStatus()` 使用数据库兼容快照
-- [ ] 4.3 保持 `config_update` / `provider_update` 广播语义与现有 Web UI 响应结构兼容
-- [ ] 4.4 使用特性开关支持分阶段切换与灰度回退
+- [x] 4.1 保留现有文件导入/导出接口，并提供 `provider_pools.json` 兼容导出
+  - [x] 4.1.a 保留现有文件导入/导出接口签名与响应结构
+  - [x] 4.1.b 在导出链路提供 `provider_pools.json` 兼容快照
+  - [x] 4.1.c 保持 `download-all` 导出 zip 继续包含 `provider_pools.json`
+  - [x] 4.1.d 保持 compat 导出中的 `*_FILE_PATH`、`*_CREDS_FILE_PATH`、`*_TOKEN_FILE_PATH` 路径字段可见
+  - [x] 4.1.e 保留 legacy 文件型凭据导入与数据库模式下的初始化导入入口
+  - [x] 4.1.f 提供 CLI / 运维侧 `export-legacy` 能力，支持 `provider_pools.json`、`usage-cache.json`、`api-potluck-data.json`、`api-potluck-keys.json`
+  - [x] 4.1.g 保持 compatibility snapshot / legacy export 能够投影回 legacy provider 结构，满足迁移期旧读侧兼容
+- [x] 4.2 让 `provider-api`、`usage-api`、`config-scanner`、`getProviderStatus()` 使用数据库兼容快照
+  - [x] 4.2.a 让 `provider-api` 使用数据库兼容快照与统一持久化入口
+  - [x] 4.2.b 让 `usage-api` 使用数据库后端或数据库查询替代原始 JSON 文件读取
+  - [x] 4.2.c 让 `config-scanner` 使用数据库兼容快照
+  - [x] 4.2.d 让 `getProviderStatus()` 使用数据库兼容快照
+  - [x] 4.2.e 让 `download-all` / 导出链路从 compat snapshot 生成 `provider_pools.json`
+  - [x] 4.2.f 保持 `getProviderStatus()` 继续返回兼容的 `providerPoolsSlim` 结构
+  - [x] 4.2.g 保持 `config-scanner` 文件项继续暴露 legacy 风格字段，如 `path`、`usageInfo`
+  - [x] 4.2.h 修复 `service-manager` 在 DB 模式下的 compat snapshot 读取缺口，确保状态读取完整
+  - [x] 4.2.i 让启动 / Reload / `config-manager` 兼容缓存读取数据库 compat snapshot，而不是依赖原始 JSON 文件存在
+  - [x] 4.2.j 让 Potluck 管理鉴权复用统一 `verifyToken()`，避免继续直读 `token-store.json`
+- [x] 4.3 保持 `config_update` / `provider_update` 广播语义与现有 Web UI 响应结构兼容
+  - [x] 4.3.a 保持 `config_update` 的 action / payload 兼容
+  - [x] 4.3.b 保持 `provider_update` 的 action / payload 兼容
+  - [x] 4.3.c 保持 mutation 失败时的错误返回、日志输出与诊断信息兼容且可追踪
+- [x] 4.4 使用特性开关支持分阶段切换与灰度回退
+  - [x] 4.4.a 实现 `file` / `dual-write` / `db` 三种模式的后端选择，并让 usage / session / potluck 域随之切换
+  - [x] 4.4.b 暴露当前权威源、dual-write 状态、最近一次 flush / export / validation 状态等诊断信息
+  - [x] 4.4.c 实现数据库异常、迁移校验失败或 compat diff 超阈值时的 feature flag 回退路径
+  - [x] 4.4.d 在迁移 / 运维文档中明确阶段 A/B/C/D 切换方案和现有 flag 的使用约束
 
 ## 5. Validation
 
+- [x] 5.0 建立分层测试基线与统一判定标准，避免把“跑通 happy path 一次”当成完成验证
+  - [x] 5.0.a 为所有新增/改造模块建立 `Happy Path` / `Sad Path` / `Boundary Cases` 三类测试矩阵，并在任务关闭前附上对应测试入口与结果证据
+  - [x] 5.0.b 后端核心业务逻辑单元测试必须覆盖全部 `if/else`、`switch/case`、早返回、空数组循环、单次循环、多次循环、重试、降级、回滚与幂等分支
+  - [x] 5.0.c 输入验证单元测试必须覆盖 `undefined` / `null` / 空字符串 / 超长字符串 / 非法 UUID / 非法 Email / 非法 JSON / 非法枚举值 / 负数 / `0` / 分页临界值 / 超界 limit
+  - [x] 5.0.d 异常处理单元测试必须覆盖 repository 抛错、事务提交失败、序列化失败、文件解析失败、数据库锁冲突、外部依赖超时/返回脏数据时的错误类型、日志与降级路径
+  - [x] 5.0.e 数据映射单元测试必须覆盖 legacy file -> migration DTO -> normalized tables -> compat snapshot -> API response 的字段完整性、默认值、类型转换、时间字段与布尔字段一致性
+  - [x] 5.0.f DAO / Repository 单元测试统一使用 Mock DB / fake executor，断言 SQL 片段、绑定参数、事务边界、敏感字符转义、空结果集与聚合逻辑，避免把真实数据库集成测试伪装成单元测试
+  - [x] 5.0.g 前端单元测试必须覆盖条件渲染、状态流转、事件触发、Props 差异、禁用态、错误提示与 storage mode / migration diagnostics 相关交互逻辑，不允许只做静态快照截图式验证
 - [ ] 5.1 增加数据库模式下 Provider 池 CRUD、健康状态、UUID 刷新、Quick Link、Batch Import 的单元与集成测试
-- [ ] 5.2 验证启动/Reload/状态接口在数据库模式下仍能拿到正确的 Provider 池兼容快照
-- [ ] 5.3 验证高频写入场景下不再产生 `provider_pools.json.*.tmp` 临时文件堆积
-- [ ] 5.4 验证十几万账号规模下选点、批量 flush、分页查询和恢复加载的性能边界
-- [ ] 5.5 补充运维文档、备份恢复和监控说明
+  - [x] 5.1.a 增加 `provider-api` 的 CRUD、健康状态、UUID 刷新、Quick Link、Batch Import API smoke / 单元验证
+  - [x] 5.1.b 增加跨模块集成测试与统一回归矩阵，覆盖 manager、API、compat snapshot 与导出链路协同
+  - [x] 5.1.c 将关键 smoke 验证补齐到 Jest / supertest 回归用例，纳入仓库既有测试入口
+  - [x] 5.1.d 补充 credential inventory、credential binding、batch import、auto-link / batch-link 相关测试
+  - [x] 5.1.e 补充 `usage-cache`、usage refresh task、`usage-api` 的 RuntimeStorage 回归测试
+  - [x] 5.1.f 补充 `auth` / `api-potluck` RuntimeStorage 回归测试
+  - [x] 5.1.g 补充 `ProviderPoolManager` / `RuntimeStorage` / storage service 纯单元测试，覆盖 add/update/delete/disable/enable/reset unhealthy/refresh UUID/quick link/batch import 的路径分支与循环场景
+  - [x] 5.1.h 验证 Provider 写入与读取闭环：同一条记录写入数据库后，可通过 manager、compat snapshot、`provider-api`、legacy export 四条链路读回一致字段，且部分字段更新不会覆盖未修改列
+  - [x] 5.1.i 验证输入校验与业务规则：空名称、超长名称、非法 `providerType`、冲突 UUID、重复 credential、无效 batch payload、分页临界条数、批量导入上限临界值与重复导入 dedupe 规则
+  - [x] 5.1.j 验证异常与回滚：单条写入失败、批量导入中途失败、事务回滚、广播失败、dual-write 次写失败、DB 不可用时的错误暴露、重试与降级行为
+  - [x] 5.1.k 验证 DTO / Entity / compat snapshot 映射：secret 字段隔离、runtime 字段不串写、legacy 字段别名完整、默认值补齐、时间字段精度与布尔字段序列化正确
+  - [x] 5.1.l 补充 Provider 相关 DAO / Repository 纯单元测试，覆盖查询构造器 `sort=asc|desc`、filter/pagination、敏感字符转义、Row -> domain object 映射、空结果集与聚合统计逻辑
+- [x] 5.2 验证启动/Reload/状态接口在数据库模式下仍能拿到正确的 Provider 池兼容快照
+  - [x] 5.2.a 验证 `getProviderStatus()` 在数据库模式下返回正确兼容快照
+  - [x] 5.2.b 验证 `config-scanner` 在数据库模式下读取正确兼容快照
+  - [x] 5.2.c 验证启动 / Reload 全链路兼容快照恢复与缓存重建行为
+  - [x] 5.2.d 验证 `download-all` zip 中继续包含 `provider_pools.json` compat 导出
+  - [x] 5.2.e 验证 usage refresh task 在内存 miss 后可从数据库恢复，并在旧 `running` 任务场景下按预期标记失败
+  - [x] 5.2.f 验证管理员 session 在 DB 模式下以 `admin_sessions` 为准，并支持从旧 `token-store.json` 按需幂等导入
+  - [x] 5.2.g 验证 Potluck 启动时先恢复 user/key manager，再启健康检查
+  - [x] 5.2.h 补充前端单元测试，验证 `isLoading`、`error`、`storageMode=file|dual-write|db`、迁移异常提示、回退可用状态、管理员权限差异下的条件渲染与按钮显隐
+  - [x] 5.2.i 验证前端事件与状态更新：点击 reload/export/rollback/refresh UUID 等操作时，action dispatch、modal state、loading flag、toast / error banner 与 store 同步更新
+  - [x] 5.2.j 验证 Props 与边界数据：空快照、单 Provider、多 Provider、大分页、缺失可选字段、异常 diagnostics、只读模式下的 UI 表现与禁用态一致
+- [x] 5.3 验证高频写入场景下不再产生 `provider_pools.json.*.tmp` 临时文件堆积
+  - [x] 5.3.a 验证数据库模式下 `provider-api` mutation 后不再高频回写 `provider_pools.json`
+  - [x] 5.3.b 验证多模块并发写入和 dual-write 模式下不会继续堆积 `provider_pools.json.*.tmp`
+  - [x] 5.3.c 补充 `.tmp` 堆积巡检命令、验证方案与 runbook，供灰度切换阶段执行
+  - [x] 5.3.d 验证空写入、单次写入、多次突发写入、dual-write、回滚重试与异常中断后 `.tmp` 巡检结果仍满足阈值，不会把残留临时文件误当成权威输入
+- [x] 5.4 验证 SQLite CLI 后端在批量 SQL、事务提交与短周期 flush 场景下的进程启动开销、调用频率上界与可接受性能窗口
+  - [x] 5.4.a 验证 SQLite CLI 启动开销与连接生命周期管理策略
+  - [x] 5.4.b 验证批量 SQL、事务提交与 flush 频率上界在高频写场景下可接受
+  - [x] 5.4.c 输出性能窗口、瓶颈点与是否需要升级驱动/后端的结论
+  - [x] 5.4.d 修复同一 DB 路径的 SQLite CLI 并发锁冲突，增加串行执行队列以避免 `database is locked (5)`
+  - [x] 5.4.e 补充 DAO / executor 层基准与单元测试，验证批量 SQL 拆包、事务合并、空批次跳过、单条/多条 flush 与失败重试不会放大调用频率
+- [x] 5.5 验证并发写入压力下 Provider mutation、runtime flush、usage/plugin/session 持久化的事务一致性、串行化行为与幂等结果
+  - [x] 5.5.a 验证 Provider mutation 与 runtime flush 并发时的事务一致性
+  - [x] 5.5.b 验证 usage / plugin / session 三类数据并发写入时的串行化行为
+  - [x] 5.5.c 验证重试、重放和 overlapping batches 下的幂等结果
+  - [x] 5.5.d 使用 fake timers / mocked scheduler 验证 flush 队列、串行执行器、去重队列与 debounce/merge 策略在空队列、单任务、多任务重叠时的边界行为
+  - [x] 5.5.e 验证并发场景下最后写入胜出、按版本拒绝覆盖或 merge 累加等业务规则被明确实现，而不是靠运气碰对结果
+- [x] 5.6 验证十几万账号规模下选点、批量 flush、分页查询和恢复加载的性能边界
+  - [x] 5.6.a 验证大池场景下的选点、分页查询与 compat snapshot 读取性能
+  - [x] 5.6.b 验证批量 flush、恢复加载与分段预热策略的性能边界
+  - [x] 5.6.c 验证 compat export 在大数据量下的时间和内存占用窗口
+  - [x] 5.6.d 为大池测试数据集补充边界样本：`0` 条、`1` 条、恰好一页、恰好多页边界、十万级 provider、重复 credential 与异常记录混入场景
+- [x] 5.7 验证进程崩溃、flush 中断或异常退出时数据库不损坏，且未 flush 数据丢失窗口符合设计预期
+  - [x] 5.7.a 验证 crash recovery 后数据库文件不损坏、schema 不漂移、已提交事务可恢复
+  - [x] 5.7.b 验证未 flush 数据丢失窗口符合设计中允许的 durable 边界
+  - [x] 5.7.c 验证异常退出后 compat snapshot、回滚路径与重新导入流程可继续工作
+  - [x] 5.7.d 验证 crash 前后读写闭环：已提交记录可读、未提交记录不会半写入、恢复后的 migration report / diagnostics 能准确指出 durable 边界与丢失窗口
+- [x] 5.8 补充运维文档、备份恢复和监控说明
+  - [x] 5.8.a 补充数据库初始化、备份、恢复、导入、导出与兼容快照使用说明
+  - [x] 5.8.b 补充迁移执行、灰度切换、冻结窗口、回滚执行与异常处理 runbook
+  - [x] 5.8.c 补充监控指标、日志建议、诊断命令与验收清单
+  - [x] 5.8.d 补充凭据导入、备份恢复与安全边界说明
+  - [x] 5.8.e 补充 `.tmp` 文件巡检、usage refresh task 恢复、session 恢复、potluck 恢复验证说明
+  - [x] 5.8.f 补充统一 CLI 管理命令说明：`migrate`、`verify`、`export-legacy`、`rollback`、`list-runs`、`show-run`
+- [x] 5.9 验证现有 `configs/` 存量数据迁移后，Provider、usage、session、potluck 记录数与关键字段校验通过
+  - [x] 5.9.a 校验 Provider 注册、runtime 状态、compat snapshot 记录数与关键字段摘要
+  - [x] 5.9.b 校验 usage、session、potluck 数据迁移后的记录数、状态字段与时间字段摘要
+  - [x] 5.9.c 校验 credential inventory、dedupe 命中、绑定关系和异常文件清单
+  - [x] 5.9.d 执行 `openspec validate refactor-runtime-storage-to-database --strict --no-interactive` 并确保最终文档通过规范校验
+  - [x] 5.9.e 针对 `provider_pools.json` 迁移补充超细粒度单元测试：空文件、单 Provider、多 Provider、重复 UUID、缺字段、非法 JSON、残留 `.tmp`、inline secret 与 file credential 混合、legacy runtime 字段缺省值
+  - [x] 5.9.f 针对 `usage-cache.json` 迁移补充单元测试：空缓存、单条、多条、过期记录、缺 `timestamp`、负数 usage、字符串数字、脏 JSON、旧版本字段缺失与 TTL 边界值
+  - [x] 5.9.g 针对 `token-store.json` / `admin_sessions` 迁移补充单元测试：过期 token、重复 token、非法过期时间、旧文件缺失、目标表已有数据、按需导入幂等、重复执行不增殖记录
+  - [x] 5.9.h 针对 `api-potluck-data.json` / `api-potluck-keys.json` 迁移补充单元测试：孤儿用户、孤儿 key、配额为 `0` / `-1`、状态枚举异常、时间字段缺失、用户-Key 绑定关系恢复与聚合字段重算
+  - [x] 5.9.i 验证 migration orchestrator 路径覆盖：空 inventory、单批次、分页多批次、断点续跑、重复执行、checksum 不匹配、anomaly 阈值超限、cutover 前失败中止、rollback 后再次执行
+  - [x] 5.9.j 验证迁移报告与验收摘要：记录数、checksum、异常清单、字段 diff 摘要、跳过/失败原因、耗时、回滚点、输入快照版本、操作者信息完整可追踪
+  - [x] 5.9.k 验证旧缓存迁移后的读写闭环：数据库成为权威源后，Provider / usage / session / potluck 的查询、更新、导出、回滚与再次导入语义均与迁移前保持一致
+  - [x] 5.9.l 验证 cutover gate：只要 counts/checksum/compat diff/anomaly policy 任一项未通过，就阻止切换到 `db` 权威模式，并保留可重复执行的修复与复验路径

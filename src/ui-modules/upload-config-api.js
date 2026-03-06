@@ -5,6 +5,7 @@ import path from 'path';
 import AdmZip from 'adm-zip';
 import { broadcastEvent } from './event-broadcast.js';
 import { scanConfigFiles } from './config-scanner.js';
+import { exportProviderPoolsCompatSnapshot } from '../storage/runtime-storage-registry.js';
 
 /**
  * 获取上传配置文件列表
@@ -147,7 +148,7 @@ export async function handleDeleteConfigFile(req, res, filePath) {
 /**
  * 下载所有配置为 zip
  */
-export async function handleDownloadAllConfigs(req, res) {
+export async function handleDownloadAllConfigs(req, res, currentConfig) {
     try {
         const configsPath = path.join(process.cwd(), 'configs');
         if (!existsSync(configsPath)) {
@@ -157,6 +158,15 @@ export async function handleDownloadAllConfigs(req, res) {
         }
 
         const zip = new AdmZip();
+        let exportedProviderPools = null;
+
+        if (currentConfig) {
+            try {
+                exportedProviderPools = await exportProviderPoolsCompatSnapshot(currentConfig);
+            } catch (error) {
+                logger.warn('[UI API] Failed to export provider pools snapshot for zip backup:', error.message);
+            }
+        }
         
         // 递归添加目录函数
         const addDirectoryToZip = async (dirPath, zipPath = '') => {
@@ -164,10 +174,14 @@ export async function handleDownloadAllConfigs(req, res) {
             for (const item of items) {
                 const fullPath = path.join(dirPath, item.name);
                 const itemZipPath = zipPath ? path.join(zipPath, item.name) : item.name;
+                const normalizedZipPath = itemZipPath.replace(/\\/g, '/');
                 
                 if (item.isFile()) {
+                    if (exportedProviderPools && normalizedZipPath === 'provider_pools.json') {
+                        continue;
+                    }
                     const content = await fs.readFile(fullPath);
-                    zip.addFile(itemZipPath.replace(/\\/g, '/'), content);
+                    zip.addFile(normalizedZipPath, content);
                 } else if (item.isDirectory()) {
                     await addDirectoryToZip(fullPath, itemZipPath);
                 }
@@ -175,6 +189,10 @@ export async function handleDownloadAllConfigs(req, res) {
         };
 
         await addDirectoryToZip(configsPath);
+
+        if (exportedProviderPools) {
+            zip.addFile('provider_pools.json', Buffer.from(JSON.stringify(exportedProviderPools, null, 2), 'utf8'));
+        }
         
         const zipBuffer = zip.toBuffer();
         const filename = `configs_backup_${new Date().toISOString().replace(/[:.]/g, '-')}.zip`;

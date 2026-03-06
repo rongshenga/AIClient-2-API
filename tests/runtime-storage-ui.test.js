@@ -1,0 +1,414 @@
+import { jest } from '@jest/globals';
+
+const mockShowToast = jest.fn();
+const mockLoadConfigList = jest.fn();
+const mockReloadConfig = jest.fn();
+const mockDownloadAllConfigs = jest.fn();
+const mockUpdateProviderFilterOptions = jest.fn();
+const mockSetServiceMode = jest.fn();
+const mockUpdateProviderStats = jest.fn();
+const mockGetProviderConfigs = jest.fn(() => []);
+const mockGetProviderTypeFields = jest.fn(() => []);
+const mockGetFieldLabel = jest.fn((key) => key);
+const providerStats = { providerTypeStats: {} };
+
+function translate(key, params = {}) {
+    const map = {
+        'modal.provider.neverUsed': 'Never used',
+        'modal.provider.neverChecked': 'Never checked',
+        'modal.provider.status.healthy': 'Healthy',
+        'modal.provider.status.unhealthy': 'Unhealthy',
+        'modal.provider.status.disabled': 'Disabled',
+        'modal.provider.status.enabled': 'Enabled',
+        'modal.provider.enabled': 'Enable',
+        'modal.provider.disabled': 'Disable',
+        'modal.provider.edit': 'Edit',
+        'modal.provider.refreshUuid': 'Refresh UUID',
+        'modal.provider.refreshUuid.failed': 'Refresh UUID failed',
+        'modal.provider.refreshUuid.success': `Refreshed ${params.oldUuid || ''} -> ${params.newUuid || ''}`,
+        'modal.provider.refreshUuidConfirm': `Refresh ${params.oldUuid || ''}?`,
+        'modal.provider.lastError': 'Last Error',
+        'modal.provider.healthCheckLabel': 'Health',
+        'modal.provider.usageCount': 'Usage',
+        'modal.provider.errorCount': 'Errors',
+        'modal.provider.lastUsed': 'Last Used',
+        'modal.provider.lastCheck': 'Last Check',
+        'modal.provider.checkModel': 'Check Model',
+        'upload.detail.status': 'Status',
+        'common.success': 'Success',
+        'common.error': 'Error'
+    };
+    return map[key] || key;
+}
+
+function createFakeElement() {
+    return {
+        textContent: '',
+        hidden: false,
+        disabled: false,
+        dataset: {},
+        attributes: {},
+        setAttribute(name, value) {
+            this.attributes[name] = String(value);
+        },
+        getAttribute(name) {
+            return this.attributes[name] || null;
+        }
+    };
+}
+
+function createDiagnosticsContainer() {
+    const selectors = [
+        '#runtimeStorageMode',
+        '#runtimeStorageSource',
+        '#runtimeStorageProviderSummary',
+        '#runtimeStorageValidation',
+        '#runtimeStorageFallback',
+        '#runtimeStorageError',
+        '#runtimeStorageAlert',
+        '#runtimeStorageReloadBtn',
+        '#runtimeStorageExportBtn',
+        '#runtimeStorageRollbackBtn'
+    ];
+    const elements = Object.fromEntries(selectors.map((selector) => [selector, createFakeElement()]));
+
+    return {
+        dataset: {},
+        querySelector(selector) {
+            return elements[selector] || null;
+        },
+        elements
+    };
+}
+
+async function importProviderManagerModule() {
+    jest.resetModules();
+    global.localStorage = {
+        getItem: jest.fn(() => 'auth-token')
+    };
+    global.window = {
+        apiClient: {
+            post: jest.fn(),
+            get: jest.fn()
+        }
+    };
+
+    jest.doMock('../static/app/constants.js', () => ({
+        providerStats,
+        updateProviderStats: mockUpdateProviderStats
+    }));
+    jest.doMock('../static/app/utils.js', () => ({
+        showToast: mockShowToast,
+        getProviderConfigs: mockGetProviderConfigs
+    }));
+    jest.doMock('../static/app/file-upload.js', () => ({
+        fileUploadHandler: jest.fn()
+    }));
+    jest.doMock('../static/app/i18n.js', () => ({
+        t: translate,
+        getCurrentLanguage: jest.fn(() => 'en-US')
+    }));
+    jest.doMock('../static/app/routing-examples.js', () => ({
+        renderRoutingExamples: jest.fn()
+    }));
+    jest.doMock('../static/app/models-manager.js', () => ({
+        updateModelsProviderConfigs: jest.fn()
+    }));
+    jest.doMock('../static/app/tutorial-manager.js', () => ({
+        updateTutorialProviderConfigs: jest.fn()
+    }));
+    jest.doMock('../static/app/usage-manager.js', () => ({
+        updateUsageProviderConfigs: jest.fn()
+    }));
+    jest.doMock('../static/app/config-manager.js', () => ({
+        updateConfigProviderConfigs: jest.fn()
+    }));
+    jest.doMock('../static/app/upload-config-manager.js', () => ({
+        loadConfigList: mockLoadConfigList,
+        updateProviderFilterOptions: mockUpdateProviderFilterOptions,
+        reloadConfig: mockReloadConfig,
+        downloadAllConfigs: mockDownloadAllConfigs
+    }));
+    jest.doMock('../static/app/event-handlers.js', () => ({
+        setServiceMode: mockSetServiceMode
+    }));
+
+    return await import('../static/app/provider-manager.js');
+}
+
+async function importModalModule() {
+    jest.resetModules();
+    global.window = {};
+
+    jest.doMock('../static/app/utils.js', () => ({
+        showToast: mockShowToast,
+        getFieldLabel: mockGetFieldLabel,
+        getProviderTypeFields: mockGetProviderTypeFields
+    }));
+    jest.doMock('../static/app/event-handlers.js', () => ({
+        handleProviderPasswordToggle: jest.fn()
+    }));
+    jest.doMock('../static/app/i18n.js', () => ({
+        t: translate
+    }));
+
+    return await import('../static/app/modal.js');
+}
+
+describe('Runtime storage dashboard diagnostics UI', () => {
+    beforeEach(() => {
+        jest.clearAllMocks();
+        providerStats.providerTypeStats = {};
+    });
+
+    test('should build diagnostics view model with fallback warning and readonly actions', async () => {
+        const { buildRuntimeStorageDiagnosticsViewModel } = await importProviderManagerModule();
+
+        const viewModel = buildRuntimeStorageDiagnosticsViewModel({
+            runtimeStorage: {
+                backend: 'dual-write',
+                requestedBackend: 'db',
+                authoritativeSource: 'database',
+                lastFallback: {
+                    status: 'applied',
+                    triggeredBy: 'verifyRuntimeStorageMigration',
+                    toBackend: 'file'
+                },
+                lastValidation: {
+                    overallStatus: 'fail',
+                    runId: 'run-42'
+                }
+            },
+            providerSummary: {
+                providerTypeCount: 3,
+                providerCount: 9
+            }
+        }, {
+            hasAdminAccess: false
+        });
+
+        expect(viewModel.storageModeLabel).toBe('Dual-write');
+        expect(viewModel.sourceOfTruthLabel).toBe('Database');
+        expect(viewModel.providerTypeCount).toBe(3);
+        expect(viewModel.providerCount).toBe(9);
+        expect(viewModel.readOnly).toBe(true);
+        expect(viewModel.actions.reload.disabled).toBe(true);
+        expect(viewModel.alert.message).toContain('Fallback applied');
+        expect(viewModel.diagnostics.validation).toContain('run-42');
+    });
+
+    test('should render diagnostics panel fields, loading state, and disabled buttons', async () => {
+        const {
+            buildRuntimeStorageDiagnosticsViewModel,
+            renderRuntimeStorageDiagnostics
+        } = await importProviderManagerModule();
+        const container = createDiagnosticsContainer();
+        const viewModel = buildRuntimeStorageDiagnosticsViewModel({
+            runtimeStorage: {
+                backend: 'db',
+                authoritativeSource: 'database',
+                lastValidation: {
+                    overallStatus: 'pass',
+                    runId: 'run-100'
+                },
+                lastError: {
+                    error: {
+                        message: 'database is locked'
+                    }
+                }
+            },
+            providerSummary: {
+                providerTypeCount: 1,
+                providerCount: 2
+            }
+        }, {
+            isLoading: true,
+            hasAdminAccess: true,
+            readOnly: true
+        });
+
+        renderRuntimeStorageDiagnostics(viewModel, container);
+
+        expect(container.elements['#runtimeStorageMode'].textContent).toBe('Loading…');
+        expect(container.elements['#runtimeStorageSource'].textContent).toBe('Database');
+        expect(container.elements['#runtimeStorageProviderSummary'].textContent).toBe('1 types / 2 providers');
+        expect(container.elements['#runtimeStorageValidation'].textContent).toContain('run-100');
+        expect(container.elements['#runtimeStorageError'].textContent).toBe('database is locked');
+        expect(container.elements['#runtimeStorageReloadBtn'].disabled).toBe(true);
+        expect(container.elements['#runtimeStorageAlert'].hidden).toBe(false);
+        expect(container.dataset.loading).toBe('true');
+        expect(container.dataset.readOnly).toBe('true');
+    });
+
+    test('should execute reload/export/rollback actions and refresh dependent stores', async () => {
+        const {
+            executeRuntimeStorageReloadAction,
+            executeRuntimeStorageExportAction,
+            executeRuntimeStorageRollbackAction
+        } = await importProviderManagerModule();
+        const loadingStates = [];
+        const refreshProvidersFn = jest.fn();
+        const refreshSystemInfoFn = jest.fn();
+        const refreshConfigListFn = jest.fn();
+        const apiClient = {
+            post: jest.fn().mockResolvedValue({ success: true })
+        };
+
+        mockReloadConfig.mockResolvedValue({ success: true });
+        mockDownloadAllConfigs.mockResolvedValue({ success: true });
+
+        await executeRuntimeStorageReloadAction({
+            reloadConfigFn: mockReloadConfig,
+            refreshProvidersFn,
+            refreshSystemInfoFn,
+            setLoading: (value) => loadingStates.push(value)
+        });
+        await executeRuntimeStorageExportAction({
+            exportFn: mockDownloadAllConfigs,
+            refreshSystemInfoFn,
+            setLoading: (value) => loadingStates.push(value)
+        });
+        await executeRuntimeStorageRollbackAction({
+            apiClient,
+            runId: 'run-88',
+            confirmFn: () => true,
+            notify: mockShowToast,
+            refreshConfigListFn,
+            refreshProvidersFn,
+            refreshSystemInfoFn,
+            setLoading: (value) => loadingStates.push(value)
+        });
+
+        expect(mockReloadConfig).toHaveBeenCalledTimes(1);
+        expect(mockDownloadAllConfigs).toHaveBeenCalledTimes(1);
+        expect(apiClient.post).toHaveBeenCalledWith('/runtime-storage/rollback', { runId: 'run-88' });
+        expect(refreshConfigListFn).toHaveBeenCalledTimes(1);
+        expect(refreshProvidersFn).toHaveBeenCalledTimes(2);
+        expect(refreshSystemInfoFn).toHaveBeenCalledTimes(3);
+        expect(loadingStates).toEqual([true, false, true, false, true, false]);
+        expect(mockShowToast).toHaveBeenCalledWith('Success', 'Runtime storage rollback completed (run-88)', 'success');
+    });
+
+    test('should skip rollback when runId prompt is empty or confirmation is rejected', async () => {
+        const { executeRuntimeStorageRollbackAction } = await importProviderManagerModule();
+        const apiClient = {
+            post: jest.fn()
+        };
+
+        const emptyRunResult = await executeRuntimeStorageRollbackAction({
+            apiClient,
+            promptRunIdFn: () => ''
+        });
+        const deniedResult = await executeRuntimeStorageRollbackAction({
+            apiClient,
+            runId: 'run-91',
+            confirmFn: () => false
+        });
+
+        expect(emptyRunResult).toEqual({ skipped: true });
+        expect(deniedResult).toEqual({ skipped: true, runId: 'run-91' });
+        expect(apiClient.post).not.toHaveBeenCalled();
+    });
+});
+
+describe('Provider modal runtime storage interactions', () => {
+    beforeEach(() => {
+        jest.clearAllMocks();
+    });
+
+    test('should refresh uuid and reload compat snapshot consumers on success', async () => {
+        const { executeRefreshProviderUuidAction } = await importModalModule();
+        const apiClient = {
+            post: jest.fn().mockResolvedValue({
+                success: true,
+                oldUuid: 'old-uuid',
+                newUuid: 'new-uuid'
+            })
+        };
+        const reloadConfigFn = jest.fn();
+        const refreshProviderConfigFn = jest.fn();
+
+        const result = await executeRefreshProviderUuidAction({
+            uuid: 'old-uuid',
+            providerType: 'grok-custom',
+            apiClient,
+            confirmFn: () => true,
+            notify: mockShowToast,
+            translate,
+            reloadConfigFn,
+            refreshProviderConfigFn
+        });
+
+        expect(result.newUuid).toBe('new-uuid');
+        expect(apiClient.post).toHaveBeenCalledWith('/providers/grok-custom/old-uuid/refresh-uuid', {});
+        expect(reloadConfigFn).toHaveBeenCalledTimes(1);
+        expect(refreshProviderConfigFn).toHaveBeenCalledWith('grok-custom');
+        expect(mockShowToast).toHaveBeenCalledWith('Success', 'Refreshed old-uuid -> new-uuid', 'success');
+    });
+
+    test('should skip or surface error toast when refresh uuid is not confirmed or fails', async () => {
+        const { executeRefreshProviderUuidAction } = await importModalModule();
+        const apiClient = {
+            post: jest.fn().mockResolvedValue({ success: false })
+        };
+
+        const skipped = await executeRefreshProviderUuidAction({
+            uuid: 'old-uuid',
+            providerType: 'grok-custom',
+            apiClient,
+            confirmFn: () => false,
+            notify: mockShowToast,
+            translate
+        });
+
+        expect(skipped).toEqual({ skipped: true });
+        expect(apiClient.post).not.toHaveBeenCalled();
+
+        await executeRefreshProviderUuidAction({
+            uuid: 'old-uuid',
+            providerType: 'grok-custom',
+            apiClient,
+            confirmFn: () => true,
+            notify: mockShowToast,
+            translate
+        });
+
+        expect(mockShowToast).toHaveBeenCalledWith('Error', 'Refresh UUID failed', 'error');
+    });
+
+    test('should render pagination and paginated provider list without undefined fields', async () => {
+        const {
+            renderPagination,
+            renderProviderListPaginated,
+            renderProviderList
+        } = await importModalModule();
+
+        const providers = Array.from({ length: 6 }, (_, index) => ({
+            uuid: `provider-${index + 1}`,
+            customName: index === 0 ? 'Primary Node' : '',
+            isHealthy: index % 2 === 0,
+            isDisabled: index === 1,
+            usageCount: index,
+            errorCount: index + 1,
+            lastErrorMessage: index === 1 ? 'bad <token>' : '',
+            lastHealthCheckModel: index === 2 ? 'grok-3' : undefined
+        }));
+
+        const firstPageHtml = renderProviderListPaginated(providers, 1);
+        const rawListHtml = renderProviderList([providers[1]]);
+        const firstPagePagination = renderPagination(1, 2, 6, 'top');
+        const lastPagePagination = renderPagination(2, 2, 6, 'bottom');
+
+        expect(firstPageHtml).toContain('provider-1');
+        expect(firstPageHtml).not.toContain('provider-6');
+        expect(rawListHtml).toContain('Never used');
+        expect(rawListHtml).toContain('Never checked');
+        expect(rawListHtml).toContain('Disabled');
+        expect(rawListHtml).toContain('&lt;token&gt;');
+        expect(rawListHtml).not.toContain('undefined');
+        expect(firstPagePagination).toContain('disabled');
+        expect(lastPagePagination).toContain('disabled');
+        expect(firstPagePagination).toContain('显示 1-5 / 共 6 条');
+        expect(lastPagePagination).toContain('显示 6-6 / 共 6 条');
+    });
+});

@@ -8,6 +8,8 @@ import { broadcastEvent } from '../services/ui-manager.js';
 import { autoLinkProviderConfigs } from '../services/service-manager.js';
 import { CONFIG } from '../core/config-manager.js';
 import { getGoogleAuthProxyConfig } from '../utils/proxy-utils.js';
+import { getRuntimeStorage } from '../storage/runtime-storage-registry.js';
+import { buildCredentialAssetRecord } from '../storage/provider-storage-mapper.js';
 
 /**
  * OAuth 提供商配置
@@ -349,6 +351,31 @@ export async function checkGeminiCredentialsDuplicate(providerType, refreshToken
 
     const providerDir = config.credentialsDir.replace('.', '');
     const targetDir = path.join(process.cwd(), 'configs', providerDir);
+
+    const runtimeStorage = getRuntimeStorage();
+    if (runtimeStorage?.findCredentialAsset) {
+        try {
+            const probe = buildCredentialAssetRecord({
+                providerType,
+                sourcePath: path.join('configs', providerDir, config.credentialsFile),
+                payload: { refresh_token: refreshToken },
+                sourceKind: 'duplicate_probe',
+                timestamp: new Date().toISOString()
+            });
+            const existingAsset = await runtimeStorage.findCredentialAsset(providerType, {
+                dedupeKey: probe.asset.dedupeKey,
+                identityKey: probe.asset.identityKey
+            });
+            if (existingAsset?.source_path) {
+                return {
+                    isDuplicate: true,
+                    existingPath: existingAsset.source_path.replace(/\\/g, '/')
+                };
+            }
+        } catch (error) {
+            logger.warn(`[Gemini Auth] Runtime credential inventory lookup failed for ${providerType}:`, error.message);
+        }
+    }
     
     try {
         if (!fs.existsSync(targetDir)) {

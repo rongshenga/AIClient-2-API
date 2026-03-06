@@ -170,6 +170,21 @@ export const upload = multer({
     }
 });
 
+
+async function autoLinkUploadedCredential(relativePath, currentConfig = null, sourceKind = 'ui_upload_oauth_credentials') {
+    const activeConfig = currentConfig || (await import('../core/config-manager.js')).CONFIG;
+    if (!activeConfig || typeof relativePath !== 'string' || !relativePath) {
+        return;
+    }
+
+    const { autoLinkProviderConfigs } = await import('../services/service-manager.js');
+    await autoLinkProviderConfigs(activeConfig, {
+        onlyCurrentCred: true,
+        credPath: relativePath,
+        sourceKind
+    });
+}
+
 /**
  * 处理 OAuth 凭据文件上传
  * @param {http.IncomingMessage} req - HTTP 请求对象
@@ -186,7 +201,8 @@ export function handleUploadOAuthCredentials(req, res, options = {}) {
         providerMap = {},
         logPrefix = '[UI API]',
         userInfo = '',
-        customUpload = null
+        customUpload = null,
+        currentConfig = null
     } = options;
     
     const uploadMiddleware = customUpload ? customUpload.single('file') : upload.single('file');
@@ -239,8 +255,9 @@ export function handleUploadOAuthCredentials(req, res, options = {}) {
                 
                 const targetFilePath = path.join(targetDir, req.file.filename);
                 await fs.rename(tempFilePath, targetFilePath);
-                
-                const relativePath = path.relative(process.cwd(), targetFilePath);
+
+                const relativePath = path.relative(process.cwd(), targetFilePath).replace(/\\/g, '/');
+                await autoLinkUploadedCredential(relativePath, currentConfig, 'ui_upload_oauth_credentials');
 
                 // 广播更新事件
                 broadcastEvent('config_update', {

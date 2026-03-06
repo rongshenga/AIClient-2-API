@@ -8,6 +8,8 @@ import { broadcastEvent } from '../services/ui-manager.js';
 import { autoLinkProviderConfigs } from '../services/service-manager.js';
 import { CONFIG } from '../core/config-manager.js';
 import { getProxyConfigForProvider } from '../utils/proxy-utils.js';
+import { getRuntimeStorage } from '../storage/runtime-storage-registry.js';
+import { buildCredentialAssetRecord } from '../storage/provider-storage-mapper.js';
 
 /**
  * Kiro OAuth 配置（支持多种认证方式）
@@ -713,6 +715,31 @@ async function refreshKiroToken(refreshToken, region = KIRO_REFRESH_CONSTANTS.DE
  */
 export async function checkKiroCredentialsDuplicate(refreshToken, provider = 'claude-kiro-oauth') {
     const kiroDir = path.join(process.cwd(), 'configs', 'kiro');
+
+    const runtimeStorage = getRuntimeStorage();
+    if (runtimeStorage?.findCredentialAsset) {
+        try {
+            const probe = buildCredentialAssetRecord({
+                providerType: provider,
+                sourcePath: path.join('configs', 'kiro', KIRO_OAUTH_CONFIG.credentialsFile),
+                payload: { refreshToken },
+                sourceKind: 'duplicate_probe',
+                timestamp: new Date().toISOString()
+            });
+            const existingAsset = await runtimeStorage.findCredentialAsset(provider, {
+                dedupeKey: probe.asset.dedupeKey,
+                identityKey: probe.asset.identityKey
+            });
+            if (existingAsset?.source_path) {
+                return {
+                    isDuplicate: true,
+                    existingPath: existingAsset.source_path.replace(/\\/g, '/')
+                };
+            }
+        } catch (error) {
+            logger.warn(`${KIRO_OAUTH_CONFIG.logPrefix} Runtime credential inventory lookup failed:`, error.message);
+        }
+    }
     
     try {
         // 检查 configs/kiro 目录是否存在
@@ -1139,5 +1166,4 @@ export async function importAwsCredentials(credentials, skipDuplicateCheck = fal
         };
     }
 }
-
 

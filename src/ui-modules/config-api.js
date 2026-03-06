@@ -7,6 +7,7 @@ import { serviceInstances } from '../providers/adapter.js';
 import { initApiService } from '../services/service-manager.js';
 import { getRequestBody } from '../utils/common.js';
 import { broadcastEvent } from '../ui-modules/event-broadcast.js';
+import { rollbackRuntimeStorageMigration } from '../storage/runtime-storage-migration-service.js';
 
 /**
  * 重载配置文件
@@ -17,6 +18,13 @@ export async function reloadConfig(providerPoolManager) {
     try {
         // Import config manager dynamically
         const { initializeConfig } = await import('../core/config-manager.js');
+
+        if (providerPoolManager && typeof providerPoolManager.flushRuntimeState === 'function') {
+            await providerPoolManager.flushRuntimeState({
+                reason: 'reload',
+                requestedBy: 'config-api'
+            });
+        }
         
         // Reload main config
         const newConfig = await initializeConfig(process.argv.slice(2), 'configs/config.json');
@@ -97,6 +105,13 @@ export async function handleUpdateConfig(req, res, currentConfig) {
         if (newConfig.POOL_GROUP_MIN_HEALTHY !== undefined) currentConfig.POOL_GROUP_MIN_HEALTHY = newConfig.POOL_GROUP_MIN_HEALTHY;
         if (newConfig.POOL_GROUP_ROTATE_ON_SELECT !== undefined) currentConfig.POOL_GROUP_ROTATE_ON_SELECT = newConfig.POOL_GROUP_ROTATE_ON_SELECT;
         if (newConfig.PERSIST_SELECTION_STATE !== undefined) currentConfig.PERSIST_SELECTION_STATE = newConfig.PERSIST_SELECTION_STATE;
+        if (newConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_DEBOUNCE_MS !== undefined) currentConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_DEBOUNCE_MS = newConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_DEBOUNCE_MS;
+        if (newConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_DIRTY_THRESHOLD !== undefined) currentConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_DIRTY_THRESHOLD = newConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_DIRTY_THRESHOLD;
+        if (newConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_BATCH_SIZE !== undefined) currentConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_BATCH_SIZE = newConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_BATCH_SIZE;
+        if (newConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_RETRY_DELAY_MS !== undefined) currentConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_RETRY_DELAY_MS = newConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_RETRY_DELAY_MS;
+        if (newConfig.RUNTIME_STORAGE_LARGE_POOL_THRESHOLD !== undefined) currentConfig.RUNTIME_STORAGE_LARGE_POOL_THRESHOLD = newConfig.RUNTIME_STORAGE_LARGE_POOL_THRESHOLD;
+        if (newConfig.RUNTIME_STORAGE_COMPAT_EXPORT_PAGE_SIZE !== undefined) currentConfig.RUNTIME_STORAGE_COMPAT_EXPORT_PAGE_SIZE = newConfig.RUNTIME_STORAGE_COMPAT_EXPORT_PAGE_SIZE;
+        if (newConfig.RUNTIME_STORAGE_STARTUP_RESTORE_PAGE_SIZE !== undefined) currentConfig.RUNTIME_STORAGE_STARTUP_RESTORE_PAGE_SIZE = newConfig.RUNTIME_STORAGE_STARTUP_RESTORE_PAGE_SIZE;
         if (newConfig.WARMUP_TARGET !== undefined) currentConfig.WARMUP_TARGET = newConfig.WARMUP_TARGET;
         if (newConfig.REFRESH_CONCURRENCY_PER_PROVIDER !== undefined) currentConfig.REFRESH_CONCURRENCY_PER_PROVIDER = newConfig.REFRESH_CONCURRENCY_PER_PROVIDER;
         if (newConfig.USAGE_QUERY_CONCURRENCY_PER_PROVIDER !== undefined) currentConfig.USAGE_QUERY_CONCURRENCY_PER_PROVIDER = newConfig.USAGE_QUERY_CONCURRENCY_PER_PROVIDER;
@@ -171,6 +186,13 @@ export async function handleUpdateConfig(req, res, currentConfig) {
                 POOL_GROUP_MIN_HEALTHY: currentConfig.POOL_GROUP_MIN_HEALTHY,
                 POOL_GROUP_ROTATE_ON_SELECT: currentConfig.POOL_GROUP_ROTATE_ON_SELECT,
                 PERSIST_SELECTION_STATE: currentConfig.PERSIST_SELECTION_STATE,
+                RUNTIME_STORAGE_PROVIDER_FLUSH_DEBOUNCE_MS: currentConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_DEBOUNCE_MS,
+                RUNTIME_STORAGE_PROVIDER_FLUSH_DIRTY_THRESHOLD: currentConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_DIRTY_THRESHOLD,
+                RUNTIME_STORAGE_PROVIDER_FLUSH_BATCH_SIZE: currentConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_BATCH_SIZE,
+                RUNTIME_STORAGE_PROVIDER_FLUSH_RETRY_DELAY_MS: currentConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_RETRY_DELAY_MS,
+                RUNTIME_STORAGE_LARGE_POOL_THRESHOLD: currentConfig.RUNTIME_STORAGE_LARGE_POOL_THRESHOLD,
+                RUNTIME_STORAGE_COMPAT_EXPORT_PAGE_SIZE: currentConfig.RUNTIME_STORAGE_COMPAT_EXPORT_PAGE_SIZE,
+                RUNTIME_STORAGE_STARTUP_RESTORE_PAGE_SIZE: currentConfig.RUNTIME_STORAGE_STARTUP_RESTORE_PAGE_SIZE,
                 WARMUP_TARGET: currentConfig.WARMUP_TARGET,
                 REFRESH_CONCURRENCY_PER_PROVIDER: currentConfig.REFRESH_CONCURRENCY_PER_PROVIDER,
                 USAGE_QUERY_CONCURRENCY_PER_PROVIDER: currentConfig.USAGE_QUERY_CONCURRENCY_PER_PROVIDER,
@@ -262,6 +284,64 @@ export async function handleReloadConfig(req, res, providerPoolManager) {
         res.end(JSON.stringify({
             error: {
                 message: 'Failed to reload configuration files: ' + error.message
+            }
+        }));
+        return true;
+    }
+}
+
+
+/**
+ * 执行 Runtime Storage 回滚并重载配置
+ */
+export async function handleRollbackRuntimeStorage(req, res, currentConfig, providerPoolManager) {
+    try {
+        const body = await getRequestBody(req);
+        const runId = body?.runId ? String(body.runId).trim() : '';
+
+        if (!runId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                error: {
+                    message: 'Runtime storage rollback requires runId'
+                }
+            }));
+            return true;
+        }
+
+        const rollbackResult = await rollbackRuntimeStorageMigration(currentConfig || CONFIG, {
+            runId,
+            restoreLegacyFiles: body?.restoreLegacyFiles !== false
+        });
+        const newConfig = await reloadConfig(providerPoolManager);
+
+        broadcastEvent('config_update', {
+            action: 'runtime_storage_rollback',
+            runId,
+            filePath: 'configs/config.json',
+            providerPoolsPath: newConfig.PROVIDER_POOLS_FILE_PATH || null,
+            timestamp: new Date().toISOString()
+        });
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: true,
+            message: 'Runtime storage rollback completed successfully',
+            details: {
+                runId,
+                rollbackResult,
+                configReloaded: true,
+                providerPoolsPath: newConfig.PROVIDER_POOLS_FILE_PATH || null,
+                runtimeStorage: newConfig.RUNTIME_STORAGE_INFO || null
+            }
+        }));
+        return true;
+    } catch (error) {
+        logger.error('[UI API] Failed to rollback runtime storage:', error);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            error: {
+                message: 'Failed to rollback runtime storage: ' + error.message
             }
         }));
         return true;

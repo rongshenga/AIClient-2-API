@@ -9,7 +9,12 @@ import { updateModelsProviderConfigs } from './models-manager.js';
 import { updateTutorialProviderConfigs } from './tutorial-manager.js';
 import { updateUsageProviderConfigs } from './usage-manager.js';
 import { updateConfigProviderConfigs } from './config-manager.js';
-import { loadConfigList, updateProviderFilterOptions } from './upload-config-manager.js';
+import {
+    loadConfigList,
+    updateProviderFilterOptions,
+    reloadConfig as reloadUploadConfig,
+    downloadAllConfigs
+} from './upload-config-manager.js';
 import { setServiceMode } from './event-handlers.js';
 
 // 保存初始服务器时间
@@ -45,6 +50,375 @@ function setProvidersSectionLoading(isLoading) {
  * 显示提供商详情加载遮罩
  * @param {string} message - 加载文案
  */
+function getRuntimeStorageModeLabel(mode) {
+    if (mode === 'dual-write') {
+        return 'Dual-write';
+    }
+    if (mode === 'db') {
+        return 'DB';
+    }
+    if (mode === 'file') {
+        return 'File';
+    }
+    return 'Unavailable';
+}
+
+function getRuntimeStorageSourceLabel(source) {
+    return source === 'database' ? 'Database' : 'File';
+}
+
+function formatRuntimeStorageDiagnostic(entry, fallback = '--') {
+    if (!entry || typeof entry !== 'object') {
+        return fallback;
+    }
+
+    const status = entry.overallStatus || entry.status || 'unknown';
+    if (entry.runId) {
+        return `${status} · ${entry.runId}`;
+    }
+    if (entry.triggeredBy) {
+        return `${status} · ${entry.triggeredBy}`;
+    }
+    if (entry.operation) {
+        return `${status} · ${entry.operation}`;
+    }
+    return status;
+}
+
+export function buildRuntimeStorageDiagnosticsViewModel(systemInfo = {}, options = {}) {
+    const runtimeStorage = systemInfo?.runtimeStorage || {};
+    const providerSummary = systemInfo?.providerSummary || {};
+    const isLoading = options.isLoading === true;
+    const error = options.error || null;
+    const hasAdminAccess = options.hasAdminAccess ?? Boolean(globalThis?.localStorage?.getItem?.('authToken'));
+    const readOnly = options.readOnly === true || !hasAdminAccess;
+    const storageMode = runtimeStorage.backend || 'unavailable';
+    const providerTypeCount = Number(providerSummary.providerTypeCount) || 0;
+    const providerCount = Number(providerSummary.providerCount) || 0;
+    const lastValidation = runtimeStorage.lastValidation || null;
+    const lastFallback = runtimeStorage.lastFallback || null;
+    const lastError = runtimeStorage.lastError || null;
+    const suggestedRunId = options.suggestedRunId
+        || lastValidation?.runId
+        || runtimeStorage?.featureFlagRollback?.runId
+        || '';
+
+    let alert = null;
+    if (error) {
+        alert = {
+            type: 'error',
+            message: `Failed to load runtime storage diagnostics: ${error.message}`
+        };
+    } else if (lastError?.error?.message) {
+        alert = {
+            type: 'error',
+            message: `Last runtime storage error: ${lastError.error.message}`
+        };
+    } else if (lastFallback?.status === 'applied') {
+        alert = {
+            type: 'warning',
+            message: `Fallback applied via ${lastFallback.triggeredBy || 'runtime storage'} (${lastFallback.toBackend || 'file'})`
+        };
+    } else if (lastValidation && (lastValidation.overallStatus || lastValidation.status) && (lastValidation.overallStatus || lastValidation.status) !== 'pass') {
+        alert = {
+            type: 'warning',
+            message: `Validation status: ${lastValidation.overallStatus || lastValidation.status}`
+        };
+    }
+
+    return {
+        isLoading,
+        hasAdminAccess,
+        readOnly,
+        error,
+        alert,
+        storageMode,
+        storageModeLabel: getRuntimeStorageModeLabel(storageMode),
+        requestedBackend: runtimeStorage.requestedBackend || '--',
+        sourceOfTruthLabel: getRuntimeStorageSourceLabel(runtimeStorage.authoritativeSource),
+        providerTypeCount,
+        providerCount,
+        diagnostics: {
+            validation: formatRuntimeStorageDiagnostic(lastValidation),
+            fallback: formatRuntimeStorageDiagnostic(lastFallback),
+            dualWriteEnabled: runtimeStorage.dualWriteEnabled === true,
+            lastErrorMessage: lastError?.error?.message || '--'
+        },
+        suggestedRunId,
+        actions: {
+            reload: {
+                visible: true,
+                disabled: readOnly || isLoading
+            },
+            export: {
+                visible: true,
+                disabled: readOnly || isLoading
+            },
+            rollback: {
+                visible: true,
+                disabled: readOnly || isLoading
+            }
+        }
+    };
+}
+
+function ensureRuntimeStorageDiagnosticsPanel() {
+    if (typeof document === 'undefined') {
+        return null;
+    }
+
+    const systemPanel = document.querySelector('#dashboard .system-info-panel');
+    if (!systemPanel) {
+        return null;
+    }
+
+    let panel = document.getElementById('runtimeStorageDiagnosticsPanel');
+    if (panel) {
+        return panel;
+    }
+
+    panel = document.createElement('div');
+    panel.id = 'runtimeStorageDiagnosticsPanel';
+    panel.className = 'system-info-panel';
+    panel.innerHTML = `
+        <div class="system-info-header">
+            <h3>Runtime Storage</h3>
+            <div class="update-controls">
+                <button id="runtimeStorageReloadBtn" class="btn btn-outline btn-sm" type="button">Reload</button>
+                <button id="runtimeStorageExportBtn" class="btn btn-outline btn-sm" type="button">Export</button>
+                <button id="runtimeStorageRollbackBtn" class="btn btn-primary btn-sm" type="button">Rollback</button>
+            </div>
+        </div>
+        <div class="info-grid">
+            <div class="info-item">
+                <span class="info-label"><i class="fas fa-database"></i> <span>Storage Mode</span></span>
+                <div class="version-display-wrapper"><span class="info-value" id="runtimeStorageMode">--</span></div>
+            </div>
+            <div class="info-item">
+                <span class="info-label"><i class="fas fa-route"></i> <span>Source of Truth</span></span>
+                <div class="version-display-wrapper"><span class="info-value" id="runtimeStorageSource">--</span></div>
+            </div>
+            <div class="info-item">
+                <span class="info-label"><i class="fas fa-layer-group"></i> <span>Compat Snapshot</span></span>
+                <div class="version-display-wrapper"><span class="info-value" id="runtimeStorageProviderSummary">--</span></div>
+            </div>
+            <div class="info-item">
+                <span class="info-label"><i class="fas fa-check-double"></i> <span>Last Validation</span></span>
+                <div class="version-display-wrapper"><span class="info-value" id="runtimeStorageValidation">--</span></div>
+            </div>
+            <div class="info-item">
+                <span class="info-label"><i class="fas fa-arrow-rotate-left"></i> <span>Last Fallback</span></span>
+                <div class="version-display-wrapper"><span class="info-value" id="runtimeStorageFallback">--</span></div>
+            </div>
+            <div class="info-item">
+                <span class="info-label"><i class="fas fa-triangle-exclamation"></i> <span>Last Error</span></span>
+                <div class="version-display-wrapper"><span class="info-value" id="runtimeStorageError">--</span></div>
+            </div>
+        </div>
+        <div id="runtimeStorageAlert" class="routing-description" hidden></div>
+    `;
+    systemPanel.appendChild(panel);
+    return panel;
+}
+
+export function renderRuntimeStorageDiagnostics(viewModel, container = ensureRuntimeStorageDiagnosticsPanel()) {
+    if (!container || !viewModel) {
+        return null;
+    }
+
+    const modeEl = container.querySelector('#runtimeStorageMode');
+    const sourceEl = container.querySelector('#runtimeStorageSource');
+    const providerSummaryEl = container.querySelector('#runtimeStorageProviderSummary');
+    const validationEl = container.querySelector('#runtimeStorageValidation');
+    const fallbackEl = container.querySelector('#runtimeStorageFallback');
+    const errorEl = container.querySelector('#runtimeStorageError');
+    const alertEl = container.querySelector('#runtimeStorageAlert');
+    const reloadBtn = container.querySelector('#runtimeStorageReloadBtn');
+    const exportBtn = container.querySelector('#runtimeStorageExportBtn');
+    const rollbackBtn = container.querySelector('#runtimeStorageRollbackBtn');
+
+    if (modeEl) modeEl.textContent = viewModel.isLoading ? 'Loading…' : viewModel.storageModeLabel;
+    if (sourceEl) sourceEl.textContent = viewModel.sourceOfTruthLabel;
+    if (providerSummaryEl) providerSummaryEl.textContent = `${viewModel.providerTypeCount} types / ${viewModel.providerCount} providers`;
+    if (validationEl) validationEl.textContent = viewModel.diagnostics.validation;
+    if (fallbackEl) fallbackEl.textContent = viewModel.diagnostics.fallback;
+    if (errorEl) errorEl.textContent = viewModel.diagnostics.lastErrorMessage;
+
+    if (alertEl) {
+        if (viewModel.alert) {
+            alertEl.hidden = false;
+            alertEl.textContent = viewModel.alert.message;
+            alertEl.dataset.level = viewModel.alert.type;
+        } else {
+            alertEl.hidden = true;
+            alertEl.textContent = '';
+            delete alertEl.dataset.level;
+        }
+    }
+
+    const buttons = [
+        [reloadBtn, viewModel.actions.reload],
+        [exportBtn, viewModel.actions.export],
+        [rollbackBtn, viewModel.actions.rollback]
+    ];
+    buttons.forEach(([button, action]) => {
+        if (!button || !action) {
+            return;
+        }
+        button.hidden = action.visible === false;
+        button.disabled = action.disabled === true;
+        button.setAttribute('aria-disabled', button.disabled ? 'true' : 'false');
+    });
+
+    container.dataset.loading = viewModel.isLoading ? 'true' : 'false';
+    container.dataset.readOnly = viewModel.readOnly ? 'true' : 'false';
+    return container;
+}
+
+export async function executeRuntimeStorageReloadAction({
+    reloadConfigFn = reloadUploadConfig,
+    refreshProvidersFn = loadProviders,
+    refreshSystemInfoFn = loadSystemInfo,
+    setLoading = () => {}
+} = {}) {
+    setLoading(true);
+    try {
+        const result = await reloadConfigFn();
+        if (typeof refreshProvidersFn === 'function') {
+            await refreshProvidersFn();
+        }
+        if (typeof refreshSystemInfoFn === 'function') {
+            await refreshSystemInfoFn();
+        }
+        return result;
+    } finally {
+        setLoading(false);
+    }
+}
+
+export async function executeRuntimeStorageExportAction({
+    exportFn = downloadAllConfigs,
+    refreshSystemInfoFn = loadSystemInfo,
+    setLoading = () => {}
+} = {}) {
+    setLoading(true);
+    try {
+        const result = await exportFn();
+        if (typeof refreshSystemInfoFn === 'function') {
+            await refreshSystemInfoFn();
+        }
+        return result;
+    } finally {
+        setLoading(false);
+    }
+}
+
+export async function executeRuntimeStorageRollbackAction({
+    apiClient = window.apiClient,
+    runId = '',
+    setLoading = () => {},
+    promptRunIdFn = (defaultRunId = '') => window.prompt('Enter migration runId to rollback', defaultRunId),
+    confirmFn = (message) => window.confirm(message),
+    notify = showToast,
+    refreshConfigListFn = loadConfigList,
+    refreshProvidersFn = loadProviders,
+    refreshSystemInfoFn = loadSystemInfo
+} = {}) {
+    const promptedRunId = typeof runId === 'string' && runId.trim()
+        ? runId.trim()
+        : String(promptRunIdFn(runId) || '').trim();
+
+    if (!promptedRunId) {
+        return { skipped: true };
+    }
+
+    if (!confirmFn(`Rollback runtime storage using run ${promptedRunId}?`)) {
+        return {
+            skipped: true,
+            runId: promptedRunId
+        };
+    }
+
+    setLoading(true);
+    try {
+        const result = await apiClient.post('/runtime-storage/rollback', {
+            runId: promptedRunId
+        });
+        notify('Success', `Runtime storage rollback completed (${promptedRunId})`, 'success');
+        if (typeof refreshConfigListFn === 'function') {
+            await refreshConfigListFn();
+        }
+        if (typeof refreshProvidersFn === 'function') {
+            await refreshProvidersFn();
+        }
+        if (typeof refreshSystemInfoFn === 'function') {
+            await refreshSystemInfoFn();
+        }
+        return result;
+    } catch (error) {
+        notify('Error', `Runtime storage rollback failed: ${error.message}`, 'error');
+        throw error;
+    } finally {
+        setLoading(false);
+    }
+}
+
+function bindRuntimeStorageDiagnosticsActions(panel, viewModel) {
+    if (!panel || !viewModel) {
+        return;
+    }
+
+    const createLoadingSetter = () => {
+        return (isLoading) => {
+            renderRuntimeStorageDiagnostics({
+                ...viewModel,
+                isLoading
+            }, panel);
+        };
+    };
+
+    const reloadBtn = panel.querySelector('#runtimeStorageReloadBtn');
+    const exportBtn = panel.querySelector('#runtimeStorageExportBtn');
+    const rollbackBtn = panel.querySelector('#runtimeStorageRollbackBtn');
+
+    if (reloadBtn) {
+        reloadBtn.onclick = async () => {
+            try {
+                await executeRuntimeStorageReloadAction({
+                    setLoading: createLoadingSetter()
+                });
+            } catch (error) {
+                console.error('Runtime storage reload failed:', error);
+            }
+        };
+    }
+
+    if (exportBtn) {
+        exportBtn.onclick = async () => {
+            try {
+                await executeRuntimeStorageExportAction({
+                    setLoading: createLoadingSetter()
+                });
+            } catch (error) {
+                console.error('Runtime storage export failed:', error);
+            }
+        };
+    }
+
+    if (rollbackBtn) {
+        rollbackBtn.onclick = async () => {
+            try {
+                await executeRuntimeStorageRollbackAction({
+                    runId: viewModel.suggestedRunId,
+                    setLoading: createLoadingSetter()
+                });
+            } catch (error) {
+                console.error('Runtime storage rollback failed:', error);
+            }
+        };
+    }
+}
+
 function showProviderGlobalLoading(message = t('providers.loadingDetails')) {
     providerDetailsGlobalLoadingCount += 1;
 
@@ -131,8 +505,20 @@ async function loadSystemInfo() {
         // 加载服务模式信息
         await loadServiceModeInfo();
 
+        const runtimeStorageViewModel = buildRuntimeStorageDiagnosticsViewModel(data, {
+            hasAdminAccess: Boolean(globalThis?.localStorage?.getItem?.('authToken'))
+        });
+        const runtimeStoragePanel = renderRuntimeStorageDiagnostics(runtimeStorageViewModel);
+        bindRuntimeStorageDiagnosticsActions(runtimeStoragePanel, runtimeStorageViewModel);
+
     } catch (error) {
         console.error('Failed to load system info:', error);
+        const runtimeStorageViewModel = buildRuntimeStorageDiagnosticsViewModel({}, {
+            error,
+            hasAdminAccess: Boolean(globalThis?.localStorage?.getItem?.('authToken'))
+        });
+        const runtimeStoragePanel = renderRuntimeStorageDiagnostics(runtimeStorageViewModel);
+        bindRuntimeStorageDiagnosticsActions(runtimeStoragePanel, runtimeStorageViewModel);
     }
 }
 

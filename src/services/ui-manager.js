@@ -85,7 +85,9 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
 
     // 文件上传API
     if (method === 'POST' && pathParam === '/api/upload-oauth-credentials') {
-        return await eventBroadcast.handleUploadOAuthCredentials(req, res);
+        return await eventBroadcast.handleUploadOAuthCredentials(req, res, {
+            currentConfig
+        });
     }
 
     // Update admin password
@@ -267,7 +269,7 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
 
     // Download all configs as zip
     if (method === 'GET' && pathParam === '/api/upload-configs/download-all') {
-        return await uploadConfigApi.handleDownloadAllConfigs(req, res);
+        return await uploadConfigApi.handleDownloadAllConfigs(req, res, currentConfig);
     }
 
     // Delete all unbound config files
@@ -317,6 +319,11 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
     // Reload configuration files
     if (method === 'POST' && pathParam === '/api/reload-config') {
         return await configApi.handleReloadConfig(req, res, providerPoolManager);
+    }
+
+    // Roll back runtime storage migration and rebuild compat snapshot caches
+    if (method === 'POST' && pathParam === '/api/runtime-storage/rollback') {
+        return await configApi.handleRollbackRuntimeStorage(req, res, currentConfig, providerPoolManager);
     }
 
     // Restart service (worker process)

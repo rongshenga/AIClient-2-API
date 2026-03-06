@@ -2,11 +2,14 @@ import * as fs from 'fs';
 import { promises as pfs } from 'fs';
 import { INPUT_SYSTEM_PROMPT_FILE, MODEL_PROVIDER } from '../utils/common.js';
 import logger from '../utils/logger.js';
+import { getRuntimeStorageDefaults } from '../storage/runtime-storage-factory.js';
+import { initializeRuntimeStorage } from '../storage/runtime-storage-registry.js';
 
 export let CONFIG = {}; // Make CONFIG exportable
 export let PROMPT_LOG_FILENAME = ''; // Make PROMPT_LOG_FILENAME exportable
 
 const ALL_MODEL_PROVIDERS = Object.values(MODEL_PROVIDER);
+const RUNTIME_STORAGE_DEFAULTS = getRuntimeStorageDefaults();
 
 function normalizeConfiguredProviders(config) {
     const fallbackProvider = MODEL_PROVIDER.GEMINI_CLI;
@@ -81,6 +84,7 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
             CRON_REFRESH_TOKEN: false,
             LOGIN_EXPIRY: 3600, // 登录过期时间（秒），默认1小时
             PROVIDER_POOLS_FILE_PATH: null, // 新增号池配置文件路径
+            ...RUNTIME_STORAGE_DEFAULTS,
             MAX_ERROR_COUNT: 10, // 提供商最大错误次数
             POOL_GROUP_SELECTION_ENABLED: true, // 大号池分组选点开关
             POOL_GROUP_SIZE: 100, // 每组账号数量
@@ -89,6 +93,13 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
             POOL_GROUP_MIN_HEALTHY: 1, // 组内最少健康节点数
             POOL_GROUP_ROTATE_ON_SELECT: true, // 命中后是否轮转到下一组
             PERSIST_SELECTION_STATE: false, // 是否持久化每次选点状态（大池建议关闭）
+            RUNTIME_STORAGE_PROVIDER_FLUSH_DEBOUNCE_MS: 1000, // Provider 热状态 flush 防抖时间
+            RUNTIME_STORAGE_PROVIDER_FLUSH_DIRTY_THRESHOLD: 64, // 达到脏记录阈值后立即 flush
+            RUNTIME_STORAGE_PROVIDER_FLUSH_BATCH_SIZE: 200, // 单批次 runtime flush 的 provider 数量
+            RUNTIME_STORAGE_PROVIDER_FLUSH_RETRY_DELAY_MS: 3000, // flush 失败后的重试延迟
+            RUNTIME_STORAGE_LARGE_POOL_THRESHOLD: 100000, // 大池性能目标线
+            RUNTIME_STORAGE_COMPAT_EXPORT_PAGE_SIZE: 1000, // compat export 建议分页窗口
+            RUNTIME_STORAGE_STARTUP_RESTORE_PAGE_SIZE: 2000, // 启动恢复建议分页窗口
             providerFallbackChain: {}, // 跨类型 Fallback 链配置
             LOG_ENABLED: true,
             LOG_OUTPUT_MODE: "all",
@@ -119,6 +130,11 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         { flag: '--cron-near-minutes',    configKey: 'CRON_NEAR_MINUTES',      type: 'int' },
         { flag: '--cron-refresh-token',   configKey: 'CRON_REFRESH_TOKEN',     type: 'bool' },
         { flag: '--provider-pools-file',  configKey: 'PROVIDER_POOLS_FILE_PATH', type: 'string' },
+        { flag: '--runtime-storage-backend', configKey: 'RUNTIME_STORAGE_BACKEND', type: 'enum', validValues: ['file', 'db'] },
+        { flag: '--runtime-storage-db-path', configKey: 'RUNTIME_STORAGE_DB_PATH', type: 'string' },
+        { flag: '--runtime-storage-dual-write', configKey: 'RUNTIME_STORAGE_DUAL_WRITE', type: 'bool' },
+        { flag: '--runtime-storage-auto-import-provider-pools', configKey: 'RUNTIME_STORAGE_AUTO_IMPORT_PROVIDER_POOLS', type: 'bool' },
+        { flag: '--runtime-storage-fallback-to-file', configKey: 'RUNTIME_STORAGE_FALLBACK_TO_FILE', type: 'bool' },
         { flag: '--max-error-count',      configKey: 'MAX_ERROR_COUNT',        type: 'int' },
     ];
 
@@ -154,6 +170,12 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         }
     }
 
+    for (const [key, value] of Object.entries(RUNTIME_STORAGE_DEFAULTS)) {
+        if (currentConfig[key] === undefined || currentConfig[key] === null) {
+            currentConfig[key] = value;
+        }
+    }
+
     normalizeConfiguredProviders(currentConfig);
 
     if (!currentConfig.SYSTEM_PROMPT_FILE_PATH) {
@@ -165,17 +187,22 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
     if (!currentConfig.PROVIDER_POOLS_FILE_PATH) {
         currentConfig.PROVIDER_POOLS_FILE_PATH = 'configs/provider_pools.json';
     }
-    if (currentConfig.PROVIDER_POOLS_FILE_PATH) {
-        try {
-            const poolsData = await pfs.readFile(currentConfig.PROVIDER_POOLS_FILE_PATH, 'utf8');
-            currentConfig.providerPools = JSON.parse(poolsData);
-            logger.info(`[Config] Loaded provider pools from ${currentConfig.PROVIDER_POOLS_FILE_PATH}`);
-        } catch (error) {
-            logger.error(`[Config Error] Failed to load provider pools from ${currentConfig.PROVIDER_POOLS_FILE_PATH}: ${error.message}`);
-            currentConfig.providerPools = {};
-        }
-    } else {
+
+    try {
+        const runtimeStorage = await initializeRuntimeStorage(currentConfig);
+        currentConfig.RUNTIME_STORAGE_INFO = runtimeStorage.getInfo();
+        currentConfig.providerPools = await runtimeStorage.loadProviderPoolsSnapshot({
+            filePath: currentConfig.PROVIDER_POOLS_FILE_PATH,
+            autoImportFromFile: currentConfig.RUNTIME_STORAGE_AUTO_IMPORT_PROVIDER_POOLS !== false
+        });
+        logger.info(`[Config] Loaded provider pools via runtime storage backend: ${currentConfig.RUNTIME_STORAGE_INFO.backend}`);
+    } catch (error) {
+        logger.error(`[Config Error] Failed to load provider pools via runtime storage: ${error.message}`);
         currentConfig.providerPools = {};
+        currentConfig.RUNTIME_STORAGE_INFO = {
+            backend: 'unavailable',
+            error: error.message
+        };
     }
 
     // Set PROMPT_LOG_FILENAME based on the determined config

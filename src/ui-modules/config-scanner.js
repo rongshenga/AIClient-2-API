@@ -3,6 +3,30 @@ import logger from '../utils/logger.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { addToUsedPaths, isPathUsed, pathsEqual } from '../utils/provider-utils.js';
+import { loadProviderPoolsCompatSnapshot } from '../storage/runtime-storage-registry.js';
+
+async function loadScannerProviderPools(currentConfig, providerPoolManager) {
+    const runtimeBackend = currentConfig?.RUNTIME_STORAGE_INFO?.backend;
+
+    if (runtimeBackend !== 'db' && providerPoolManager?.providerPools) {
+        return providerPoolManager.providerPools;
+    }
+
+    try {
+        const providerPools = await loadProviderPoolsCompatSnapshot(currentConfig);
+        if (providerPools && (runtimeBackend === 'db' || Object.keys(providerPools).length > 0)) {
+            return providerPools;
+        }
+    } catch (error) {
+        logger.warn('[Config Scanner] Failed to load provider pools from runtime storage:', error.message);
+    }
+
+    if (providerPoolManager?.providerPools) {
+        return providerPoolManager.providerPools;
+    }
+
+    return currentConfig?.providerPools || {};
+}
 
 /**
  * 扫描和分析配置文件
@@ -32,10 +56,7 @@ export async function scanConfigFiles(currentConfig, providerPoolManager) {
     addToUsedPaths(usedPaths, currentConfig.CODEX_OAUTH_CREDS_FILE_PATH);
 
     // 使用最新的提供商池数据
-    let providerPools = currentConfig.providerPools;
-    if (providerPoolManager && providerPoolManager.providerPools) {
-        providerPools = providerPoolManager.providerPools;
-    }
+    const providerPools = await loadScannerProviderPools(currentConfig, providerPoolManager);
 
     // 检查提供商池文件中的所有OAuth凭据路径 - 标准化路径格式
     if (providerPools) {
@@ -53,8 +74,8 @@ export async function scanConfigFiles(currentConfig, providerPoolManager) {
 
     try {
         // 扫描configs目录下的所有子目录和文件
-        const configsFiles = await scanOAuthDirectory(configsPath, usedPaths, currentConfig);
-        configFiles.push(...configsFiles);
+            const configsFiles = await scanOAuthDirectory(configsPath, usedPaths, currentConfig, providerPools);
+            configFiles.push(...configsFiles);
     } catch (error) {
         logger.warn(`[Config Scanner] Failed to scan configs directory:`, error.message);
     }
@@ -68,7 +89,7 @@ export async function scanConfigFiles(currentConfig, providerPoolManager) {
  * @param {Set} usedPaths - Set of paths currently in use
  * @returns {Promise<Object|null>} OAuth file information object
  */
-async function analyzeOAuthFile(filePath, usedPaths, currentConfig) {
+async function analyzeOAuthFile(filePath, usedPaths, currentConfig, providerPools) {
     try {
         const stats = await fs.stat(filePath);
         const ext = path.extname(filePath).toLowerCase();
@@ -81,7 +102,7 @@ async function analyzeOAuthFile(filePath, usedPaths, currentConfig) {
         let isValid = true;
         let errorMessage = '';
         let oauthProvider = 'unknown';
-        let usageInfo = getFileUsageInfo(relativePath, filename, usedPaths, currentConfig);
+        let usageInfo = getFileUsageInfo(relativePath, filename, usedPaths, currentConfig, providerPools);
         
         try {
             if (ext === '.json') {
@@ -157,7 +178,7 @@ async function analyzeOAuthFile(filePath, usedPaths, currentConfig) {
  * @param {Object} currentConfig - Current configuration
  * @returns {Object} Usage information object
  */
-function getFileUsageInfo(relativePath, fileName, usedPaths, currentConfig) {
+function getFileUsageInfo(relativePath, fileName, usedPaths, currentConfig, providerPools = {}) {
     const usageInfo = {
         isUsed: false,
         usageType: null,
@@ -229,9 +250,9 @@ function getFileUsageInfo(relativePath, fileName, usedPaths, currentConfig) {
     }
 
     // 检查提供商池中的使用情况
-    if (currentConfig.providerPools) {
+    if (providerPools && Object.keys(providerPools).length > 0) {
         // 使用 flatMap 将双重循环优化为单层循环 O(n)
-        const allProviders = Object.entries(currentConfig.providerPools).flatMap(
+        const allProviders = Object.entries(providerPools).flatMap(
             ([providerType, providers]) =>
                 providers.map((provider, index) => ({ provider, providerType, index }))
         );
@@ -345,7 +366,7 @@ function getFileUsageInfo(relativePath, fileName, usedPaths, currentConfig) {
  * @param {Object} currentConfig - Current configuration
  * @returns {Promise<Array>} Array of OAuth configuration file objects
  */
-async function scanOAuthDirectory(dirPath, usedPaths, currentConfig) {
+async function scanOAuthDirectory(dirPath, usedPaths, currentConfig, providerPools) {
     const oauthFiles = [];
     
     try {
@@ -358,7 +379,7 @@ async function scanOAuthDirectory(dirPath, usedPaths, currentConfig) {
                 const ext = path.extname(file.name).toLowerCase();
                 // 只关注OAuth相关的文件类型
                 if (['.json', '.oauth', '.creds', '.key', '.pem', '.txt'].includes(ext)) {
-                    const fileInfo = await analyzeOAuthFile(fullPath, usedPaths, currentConfig);
+                    const fileInfo = await analyzeOAuthFile(fullPath, usedPaths, currentConfig, providerPools);
                     if (fileInfo) {
                         oauthFiles.push(fileInfo);
                     }
@@ -368,7 +389,7 @@ async function scanOAuthDirectory(dirPath, usedPaths, currentConfig) {
                 const relativePath = path.relative(process.cwd(), fullPath);
                 // 最大深度4层，以支持 configs/kiro/{subfolder}/file.json 这样的结构
                 if (relativePath.split(path.sep).length < 4) {
-                    const subFiles = await scanOAuthDirectory(fullPath, usedPaths, currentConfig);
+                    const subFiles = await scanOAuthDirectory(fullPath, usedPaths, currentConfig, providerPools);
                     oauthFiles.push(...subFiles);
                 }
             }

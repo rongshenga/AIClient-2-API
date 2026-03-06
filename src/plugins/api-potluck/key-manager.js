@@ -5,9 +5,10 @@
 
 import { promises as fs } from 'fs';
 import logger from '../../utils/logger.js';
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { getRuntimeStorage } from '../../storage/runtime-storage-registry.js';
 
 // 配置常量
 const KEYS_STORE_FILE = path.join(process.cwd(), 'configs', 'api-potluck-keys.json');
@@ -47,48 +48,123 @@ let isWriting = false;
 let persistTimer = null;
 let currentPersistInterval = DEFAULT_CONFIG.persistInterval;
 
+
+function createEmptyKeyStore() {
+    return { keys: {} };
+}
+
+function normalizeKeyStore(store) {
+    const normalized = createEmptyKeyStore();
+    if (store && typeof store === 'object' && store.keys && typeof store.keys === 'object') {
+        normalized.keys = { ...store.keys };
+    }
+
+    for (const [keyId, keyData] of Object.entries(normalized.keys)) {
+        normalized.keys[keyId] = {
+            ...keyData,
+            id: keyData?.id || keyId,
+            name: keyData?.name || `Key-${Object.keys(normalized.keys).length}`,
+            createdAt: keyData?.createdAt || new Date().toISOString(),
+            dailyLimit: keyData?.dailyLimit ?? DEFAULT_CONFIG.defaultDailyLimit,
+            todayUsage: Number(keyData?.todayUsage ?? 0),
+            totalUsage: Number(keyData?.totalUsage ?? 0),
+            lastResetDate: keyData?.lastResetDate || getTodayDateString(),
+            lastUsedAt: keyData?.lastUsedAt || null,
+            enabled: keyData?.enabled !== false,
+            bonusRemaining: Number(keyData?.bonusRemaining ?? 0)
+        };
+    }
+
+    return normalized;
+}
+
+function getPotluckKeyStorage() {
+    const runtimeStorage = getRuntimeStorage();
+    if (!runtimeStorage
+        || typeof runtimeStorage.loadPotluckKeyStore !== 'function'
+        || typeof runtimeStorage.savePotluckKeyStore !== 'function') {
+        return null;
+    }
+    return runtimeStorage;
+}
+
+function ensurePersistTimer() {
+    if (!persistTimer) {
+        persistTimer = setInterval(persistIfDirty, currentPersistInterval);
+        if (typeof persistTimer.unref === 'function') {
+            persistTimer.unref();
+        }
+        process.on('beforeExit', () => { void persistIfDirty(); });
+        process.on('SIGINT', () => { void persistIfDirty(); process.exit(0); });
+        process.on('SIGTERM', () => { void persistIfDirty(); process.exit(0); });
+    }
+}
+
+function loadKeyStoreFromFileSync() {
+    try {
+        if (existsSync(KEYS_STORE_FILE)) {
+            const content = readFileSync(KEYS_STORE_FILE, 'utf8');
+            return normalizeKeyStore(JSON.parse(content));
+        }
+
+        const emptyStore = createEmptyKeyStore();
+        keyStore = emptyStore;
+        syncWriteToFile();
+        return emptyStore;
+    } catch (error) {
+        logger.error('[API Potluck] Failed to load key store:', error.message);
+        return createEmptyKeyStore();
+    }
+}
+
+export async function initializeKeyManager(forceReload = false) {
+    if (keyStore !== null && !forceReload) {
+        ensurePersistTimer();
+        return keyStore;
+    }
+
+    const runtimeStorage = getPotluckKeyStorage();
+    if (runtimeStorage) {
+        try {
+            keyStore = normalizeKeyStore(await runtimeStorage.loadPotluckKeyStore());
+        } catch (error) {
+            logger.error('[API Potluck] Failed to load key store from runtime storage:', error.message);
+            keyStore = loadKeyStoreFromFileSync();
+        }
+    } else {
+        keyStore = loadKeyStoreFromFileSync();
+    }
+
+    const config = getConfig();
+    currentPersistInterval = config.persistInterval || DEFAULT_CONFIG.persistInterval;
+    ensurePersistTimer();
+    return keyStore;
+}
+
+export async function resetKeyManagerForTests() {
+    if (persistTimer) {
+        clearInterval(persistTimer);
+        persistTimer = null;
+    }
+    keyStore = null;
+    isDirty = false;
+    isWriting = false;
+    currentPersistInterval = DEFAULT_CONFIG.persistInterval;
+}
+
 /**
  * 初始化：从文件加载数据到内存
  */
 function ensureLoaded() {
-    if (keyStore !== null) return;
-    try {
-        if (existsSync(KEYS_STORE_FILE)) {
-            const content = readFileSync(KEYS_STORE_FILE, 'utf8');
-            keyStore = JSON.parse(content);
-            // 兼容历史数据：为旧 Key 添加 bonusRemaining 字段
-            let needsMigration = false;
-            for (const keyData of Object.values(keyStore.keys)) {
-                if (keyData.bonusRemaining === undefined) {
-                    keyData.bonusRemaining = 0;
-                    needsMigration = true;
-                }
-            }
-            if (needsMigration) {
-                logger.info('[API Potluck] Migrated legacy keys: added bonusRemaining field');
-                markDirty();
-            }
-        } else {
-            keyStore = { keys: {} };
-            syncWriteToFile();
-        }
-    } catch (error) {
-        logger.error('[API Potluck] Failed to load key store:', error.message);
-        keyStore = { keys: {} };
+    if (keyStore !== null) {
+        ensurePersistTimer();
+        return;
     }
-    
-    // 获取配置的持久化间隔
+
+    keyStore = loadKeyStoreFromFileSync();
     const config = getConfig();
     currentPersistInterval = config.persistInterval || DEFAULT_CONFIG.persistInterval;
-    
-    // 启动定期持久化
-    if (!persistTimer) {
-        persistTimer = setInterval(persistIfDirty, currentPersistInterval);
-        // 进程退出时保存
-        process.on('beforeExit', () => persistIfDirty());
-        process.on('SIGINT', () => { persistIfDirty(); process.exit(0); });
-        process.on('SIGTERM', () => { persistIfDirty(); process.exit(0); });
-    }
+    ensurePersistTimer();
 }
 
 /**
@@ -98,7 +174,7 @@ function syncWriteToFile() {
     try {
         const dir = path.dirname(KEYS_STORE_FILE);
         if (!existsSync(dir)) {
-            require('fs').mkdirSync(dir, { recursive: true });
+            mkdirSync(dir, { recursive: true });
         }
         writeFileSync(KEYS_STORE_FILE, JSON.stringify(keyStore, null, 2), 'utf8');
     } catch (error) {
@@ -113,14 +189,18 @@ async function persistIfDirty() {
     if (!isDirty || isWriting || keyStore === null) return;
     isWriting = true;
     try {
-        const dir = path.dirname(KEYS_STORE_FILE);
-        if (!existsSync(dir)) {
-            await fs.mkdir(dir, { recursive: true });
+        const runtimeStorage = getPotluckKeyStorage();
+        if (runtimeStorage) {
+            await runtimeStorage.savePotluckKeyStore(normalizeKeyStore(keyStore));
+        } else {
+            const dir = path.dirname(KEYS_STORE_FILE);
+            if (!existsSync(dir)) {
+                await fs.mkdir(dir, { recursive: true });
+            }
+            const tempFile = KEYS_STORE_FILE + '.tmp';
+            await fs.writeFile(tempFile, JSON.stringify(keyStore, null, 2), 'utf8');
+            await fs.rename(tempFile, KEYS_STORE_FILE);
         }
-        // 写入临时文件再重命名，防止写入中断导致文件损坏
-        const tempFile = KEYS_STORE_FILE + '.tmp';
-        await fs.writeFile(tempFile, JSON.stringify(keyStore, null, 2), 'utf8');
-        await fs.rename(tempFile, KEYS_STORE_FILE);
         isDirty = false;
     } catch (error) {
         logger.error('[API Potluck] Persist failed:', error.message);

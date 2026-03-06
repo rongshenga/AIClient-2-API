@@ -1735,33 +1735,56 @@ async function performHealthCheck(providerType) {
  * @param {string} uuid - 提供商UUID
  * @param {Event} event - 事件对象
  */
+async function executeRefreshProviderUuidAction({
+    uuid,
+    providerType,
+    apiClient = window.apiClient,
+    confirmFn = (message) => confirm(message),
+    notify = showToast,
+    translate = t,
+    reloadConfigFn = async () => await apiClient.post('/reload-config'),
+    refreshProviderConfigFn = refreshProviderConfig
+} = {}) {
+    if (!uuid || !providerType) {
+        throw new Error('providerType and uuid are required');
+    }
+
+    if (!confirmFn(translate('modal.provider.refreshUuidConfirm', { oldUuid: uuid }))) {
+        return { skipped: true };
+    }
+
+    const response = await apiClient.post(
+        `/providers/${encodeURIComponent(providerType)}/${uuid}/refresh-uuid`,
+        {}
+    );
+
+    if (response.success) {
+        notify(translate('common.success'), translate('modal.provider.refreshUuid.success', { oldUuid: response.oldUuid, newUuid: response.newUuid }), 'success');
+        await reloadConfigFn();
+        await refreshProviderConfigFn(providerType);
+        return response;
+    }
+
+    notify(translate('common.error'), translate('modal.provider.refreshUuid.failed'), 'error');
+    return response;
+}
+
+/**
+ * 刷新提供商UUID
+ * @param {string} uuid - 提供商UUID
+ * @param {Event} event - 事件对象
+ */
 async function refreshProviderUuid(uuid, event) {
     event.stopPropagation();
-    
-    if (!confirm(t('modal.provider.refreshUuidConfirm', { oldUuid: uuid }))) {
-        return;
-    }
-    
+
     const providerDetail = event.target.closest('.provider-item-detail');
     const providerType = providerDetail.closest('.provider-modal').getAttribute('data-provider-type');
-    
+
     try {
-        const response = await window.apiClient.post(
-            `/providers/${encodeURIComponent(providerType)}/${uuid}/refresh-uuid`,
-            {}
-        );
-        
-        if (response.success) {
-            showToast(t('common.success'), t('modal.provider.refreshUuid.success', { oldUuid: response.oldUuid, newUuid: response.newUuid }), 'success');
-            
-            // 重新加载配置
-            await window.apiClient.post('/reload-config');
-            
-            // 刷新提供商配置显示
-            await refreshProviderConfig(providerType);
-        } else {
-            showToast(t('common.error'), t('modal.provider.refreshUuid.failed'), 'error');
-        }
+        await executeRefreshProviderUuidAction({
+            uuid,
+            providerType
+        });
     } catch (error) {
         console.error('刷新uuid失败:', error);
         showToast(t('common.error'), t('modal.provider.refreshUuid.failed') + ': ' + error.message, 'error');
@@ -1914,8 +1937,12 @@ export {
     showGrokBatchImportModal,
     loadModelsForProviderType,
     renderNotSupportedModelsSelector,
+    renderPagination,
+    renderProviderListPaginated,
+    renderProviderList,
     goToProviderPage,
     applyProviderHealthFilter,
+    executeRefreshProviderUuidAction,
     refreshProviderUuid
 };
 

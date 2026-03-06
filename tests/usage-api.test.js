@@ -363,4 +363,84 @@ describe('Usage API Refresh Cache Strategy', () => {
             'grok-custom'
         ]);
     });
+test('should clamp oversized group size and ignore non-positive query overrides', async () => {
+    const providerType = 'gemini-cli-oauth';
+    const providers = buildProviderPool('gemini', 600);
+    mockReadUsageCache.mockResolvedValue(null);
+    mockReadProviderUsageCache.mockResolvedValue(null);
+    mockUpdateProviderUsageCache.mockResolvedValue(undefined);
+
+    const currentConfig = {
+        providerPools: {
+            [providerType]: providers
+        },
+        USAGE_QUERY_CONCURRENCY_PER_PROVIDER: 4,
+        USAGE_QUERY_GROUP_SIZE: 100,
+        USAGE_QUERY_GROUP_MIN_POOL_SIZE: 2000
+    };
+    const providerPoolManager = {
+        providerPools: {
+            [providerType]: providers
+        }
+    };
+
+    const oversizedReq = {
+        url: `/api/usage/${encodeURIComponent(providerType)}?refresh=true&async=true&concurrency=0&groupSize=999999&groupMinPoolSize=1`,
+        headers: {
+            host: 'localhost:3000'
+        }
+    };
+    const oversizedRes = createMockRes();
+    const oversizedHandled = await handleGetProviderUsage(oversizedReq, oversizedRes, currentConfig, providerPoolManager, providerType);
+    expect(oversizedHandled).toBe(true);
+    expect(oversizedRes.statusCode).toBe(202);
+
+    const oversizedPayload = JSON.parse(oversizedRes.body);
+    const oversizedDeadline = Date.now() + 30000;
+    let oversizedStatus = null;
+    while (Date.now() < oversizedDeadline) {
+        const taskRes = createMockRes();
+        const ok = await handleGetUsageRefreshTask({}, taskRes, oversizedPayload.taskId);
+        expect(ok).toBe(true);
+        oversizedStatus = JSON.parse(taskRes.body);
+        if (oversizedStatus.status !== 'running') {
+            break;
+        }
+        await sleep(5);
+    }
+
+    expect(oversizedStatus).toBeTruthy();
+    expect(oversizedStatus.status).toBe('completed');
+    expect(oversizedStatus.progress.totalInstances).toBe(600);
+    expect(oversizedStatus.progress.totalGroups).toBe(2);
+
+    const invalidBoundaryReq = {
+        url: `/api/usage/${encodeURIComponent(providerType)}?refresh=true&async=true&groupSize=0&groupMinPoolSize=-1`,
+        headers: {
+            host: 'localhost:3000'
+        }
+    };
+    const invalidBoundaryRes = createMockRes();
+    const invalidHandled = await handleGetProviderUsage(invalidBoundaryReq, invalidBoundaryRes, currentConfig, providerPoolManager, providerType);
+    expect(invalidHandled).toBe(true);
+    expect(invalidBoundaryRes.statusCode).toBe(202);
+
+    const invalidPayload = JSON.parse(invalidBoundaryRes.body);
+    const invalidDeadline = Date.now() + 30000;
+    let invalidStatus = null;
+    while (Date.now() < invalidDeadline) {
+        const taskRes = createMockRes();
+        const ok = await handleGetUsageRefreshTask({}, taskRes, invalidPayload.taskId);
+        expect(ok).toBe(true);
+        invalidStatus = JSON.parse(taskRes.body);
+        if (invalidStatus.status !== 'running') {
+            break;
+        }
+        await sleep(5);
+    }
+
+    expect(invalidStatus).toBeTruthy();
+    expect(invalidStatus.status).toBe('completed');
+    expect(invalidStatus.progress.totalGroups).toBe(1);
+});
 });

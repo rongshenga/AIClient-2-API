@@ -247,5 +247,8 @@ export {
     addLogEntry,
     updateServerStatus,
     updateProviderStatus,
-    handleProviderUpdate
+    handleProviderUpdate,
+    handleConfigUpdate,
+    handleUsageRefresh,
+    getUsageRefreshProviderName
 };

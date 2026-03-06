@@ -139,6 +139,14 @@
 | 日志 | `logs/`、`prompt_log-*.log` | 审计、问题排查、调试 | `logger`、`utils/common.js` | 否 | 保持文件日志，不纳入业务数据库 |
 | 更新临时文件 | `.update_temp/`、`update.tar.gz` | 自更新下载与解压 | `update-api` | 否 | 纯运维临时文件，不应入库 |
 
+### Inventory supplement: write frequency and conflict hotspots
+
+- **高频 durable 运行态**：`configs/provider_pools.json`、隐式存在于目录扫描中的 credential inventory、`configs/usage-cache.json`、`configs/token-store.json`、`configs/api-potluck-data.json`、`configs/api-potluck-keys.json`。这些数据要么高频更新，要么需要去重/查询/事务边界，继续靠整文件覆写只会把故障放大。
+- **低频 bootstrap / 人工维护数据**：`configs/config.json`、`configs/plugins.json`、`configs/input_system_prompt.txt`、`configs/pwd`。它们适合继续保留文件语义，不值得为数据库化付出额外复杂度。
+- **纯临时或运维产物**：`configs/temp/`、`.update_temp/`、`logs/`。这些东西天然不该进入业务数据库，否则只是把垃圾从文件系统搬进另一种垃圾桶。
+- **当前多写方冲突最严重的热点**：`provider_pools.json` 同时被 `config-manager`、`provider-pool-manager`、`provider-api`、`service-manager` 等链路影响，且混用了内存缓存、整文件重写、临时文件 + `rename` 与兼容导出语义，`.tmp` 残留不是意外，是现状自己作出来的。
+- **当前写入语义最不稳定的热点**：credential 相关状态长期隐含在目录扫描、文件名和路径拼接里；`usage-cache.json` 走串行队列 + 整文件覆盖；`token-store.json` 和 `api-potluck` 文件既承担运行时权威源，又要兼容恢复和热更新，模块之间谁说了算并不总是稳定。
+
 ## Migration Priority
 
 ### Phase 1: 必须迁移
@@ -272,7 +280,7 @@
 
 ### Recommendation
 
-- **必须只有 1 个主数据库**：第一阶段建议只引入一个 `runtime` 数据库，默认实现为单文件 SQLite，例如 `data/runtime.sqlite`
+- **必须只有 1 个主数据库**：第一阶段建议只引入一个 `runtime` 数据库，默认实现为单文件 SQLite，当前默认路径为 `configs/runtime/runtime-storage.sqlite`
 - **高频热状态不直接等于数据库热写**：`runtime` 库负责持久化聚合结果，真正的请求热路径状态先进入内存层，再按批次 flush 到数据库
 - **第一阶段就要容纳 provider_pools 内联 secret**：它们可先留在同一主库的受保护表中；只有在第二阶段决定把更大范围的 OAuth 原文完整入库时，才考虑额外的 `secret` backend
 - **不建议一开始拆 2~3 个业务数据库**：当前项目还是单机部署、单进程主导，先拆多表，不要先拆多库；不然迁移、备份、回滚、开发联调全都会一起变得恶心
@@ -282,6 +290,14 @@
 - 当前最痛的问题是高频运行态数据和凭据索引无法事务化管理，不是数据库数量不够
 - 单库更适合做统一事务、统一迁移脚本、统一备份恢复
 - SQLite 足够承接第一阶段目标，后续如果有多实例部署需求，再把同一套表结构迁到外部数据库
+
+### Operational defaults and deployment constraints
+
+- 默认数据库实现采用系统 `sqlite3` CLI 驱动的嵌入式 SQLite；不额外引入 npm 原生驱动，避免在当前单机部署模型下把依赖面先炸开。
+- 默认数据库路径为 `configs/runtime/runtime-storage.sqlite`，兼容导出默认建议输出到 `configs/runtime/compat-export/`，迁移制品默认写入 `configs/runtime/migrations/<runId>/`。
+- 运行模式固定围绕 `RUNTIME_STORAGE_BACKEND=file|db`、`RUNTIME_STORAGE_DUAL_WRITE=true|false`、`PERSIST_SELECTION_STATE=true|false` 这组最小 feature flag 展开，不在 Proposal 阶段继续发明更多切换开关。
+- 数据库初始化必须支持幂等建表、schema 版本检查和冷启动自举；迁移与回滚流程必须同时备份 SQLite 主文件及其 `-wal` / `-shm` 辅助文件。
+- 第一阶段部署约束仍以单机、单主进程模型为前提；如果后续进入多实例/外部数据库阶段，属于下一轮设计扩展，而不是现在就把问题摊大饼。
 
 ## Proposed Tables
 
@@ -347,7 +363,7 @@
 
 - `provider_registrations`: 主键建议 `provider_id`，兼容唯一键建议 `unique(provider_type, routing_uuid)`
 - `provider_runtime_state`: 唯一键建议 `unique(provider_id)`
-- `provider_inline_secrets`: 唯一键建议 `unique(provider_id)`
+- `provider_inline_secrets`: 唯一键建议 `unique(provider_id, secret_kind)`
 - `provider_group_state`: 唯一键建议 `unique(provider_type, group_key)`
 - `credential_assets`: 唯一键建议 `unique(provider_type, dedupe_key)`，辅助索引 `identity_key`, `email`, `account_id`
 - `credential_file_index`: 唯一键建议 `unique(file_path)`
@@ -501,6 +517,9 @@
 - Decision: 默认数据库实现优先采用嵌入式方案（如 SQLite），并预留外部数据库扩展点。
   - Why: 这能保留当前项目“单机即可部署”的优势，又能获得事务、索引和并发协调能力；后续如果有更高并发需求，再扩展到外部数据库。
 
+- Decision: CLI-1 基础实现先采用系统 `sqlite3` CLI 驱动的嵌入式 SQLite 后端，并保留 `file|db|dual-write` 三种运行模式。
+  - Why: 当前仓库没有可直接使用的 SQLite npm 驱动，Node 运行时也不提供 `node:sqlite`；先用系统自带 `sqlite3` 命令把基础层跑起来，能在不新增依赖的前提下让后续 CLI 并行对接统一存储契约。
+
 - Decision: 凭据原文入库采用分阶段策略。
   - Why: 直接把所有敏感凭据一次性塞进数据库，听起来很猛，实际上会把安全、加密、导出恢复、密钥管理一起引爆。第一阶段先迁移索引和元数据，第二阶段再决定是否将敏感字段完整入库或接入专用 secret store。
 
@@ -524,9 +543,74 @@
 - 大量历史文件迁移可能耗时较长
   - Mitigation: 提供批量导入、断点续跑、幂等去重与迁移摘要
 
+- 基于 `sqlite3` CLI 的数据库调用存在额外进程启动开销
+  - Mitigation: 使用批量 SQL、事务合并、flush 节流与性能基准测试量化开销；若启动成本超出阈值，再评估长驻 worker 或替换驱动实现
+
+- 批量 flush 会引入“已写入内存但尚未 durable commit”的短暂窗口
+  - Mitigation: 明确脏数据窗口预算、周期性强制 flush、退出前 flush 与崩溃恢复测试，确保最坏情况下的数据丢失范围有上界且可观测
+
+## Validation Focus for Key Risks
+
+- 必须单独测量 `sqlite3` CLI 调用的启动开销，不能只看功能对不对；否则最后可能功能全绿，性能像爬。
+- 必须覆盖并发写入压力：Provider mutation、runtime flush、usage/plugin/session 持久化同时发生时，数据库状态不能撕裂。
+- 必须覆盖十万级账号规模下的大池性能边界，包括选点、批量 flush、分页查询、启动恢复。
+- 必须覆盖进程崩溃、flush 中断、异常退出时的一致性验证，确认数据库不会损坏，且未 flush 的损失窗口符合设计声明。
+
+## Hot State Flush Strategy
+
+### 2.5.a Hot-path state inventory
+
+- Provider 选择热路径中的高频状态分为四类：
+  - 选点辅助状态：`lastUsed`、`_lastSelectionSeq`、`roundRobinIndex`、`_groupCursor`。
+  - 瞬时并发占位：`activeCount`、`waitingCount`、`_selectionLocks`、`_isSelecting`。
+  - 短周期熔断/冷却与刷新调度：`needsRefresh`、`refreshingUuids`、`refreshQueues`、`refreshBufferQueues`、`refreshBufferTimers`、`activeProviderRefreshes`、`globalRefreshWaiters`。
+  - 待 flush 聚合结果：`usageCount`、`errorCount`、`lastErrorTime`、`lastErrorMessage`、`lastHealthCheckTime`、`lastHealthCheckModel`、`scheduledRecoveryTime`、`refreshCount`、可选的 `_lastSelectionSeq`。
+- 第一阶段不引入额外的 request-level usage event log；Provider 请求路径上的 usage 增量继续先累加到内存镜像，再随 runtime flush 批量 durable。
+
+### 2.5.b Memory-only vs durable boundary
+
+- 允许只驻留内存的字段：
+  - 所有锁、Promise 队列、瞬时并发占位和调度游标。
+  - `needsRefresh` 这类“当前进程需要处理”的短周期标记。
+  - `_lastSelectionSeq` 在 `PERSIST_SELECTION_STATE=false` 时仅作为内存排序辅助。
+- 必须进入 durable 层的字段：
+  - `isHealthy`、`isDisabled`、`usageCount`、`errorCount`。
+  - `lastUsed`、`lastErrorTime`、`lastErrorMessage`。
+  - `lastHealthCheckTime`、`lastHealthCheckModel`、`scheduledRecoveryTime`、`refreshCount`。
+- 这条边界必须保持：数据库承载“跨重启仍成立的聚合快照”，内存承载“只对当前进程调度有意义的瞬时态”。
+
+### 2.5.c Flush triggers and recovery retry
+
+- Provider runtime flush 第一阶段采用以下触发组合：
+  - 定时 flush：默认 `1000ms` 防抖窗口。
+  - 脏记录阈值 flush：当 pending runtime mutation 达到 `64` 条时立即触发。
+  - 批量 flush：单批次默认 `200` 个 provider runtime records。
+  - reload 前 flush：`/api/reload-config` 在重新初始化配置前必须先 flush pending runtime state。
+  - 退出前 flush：正常 `SIGTERM` / `SIGINT` / worker disconnect 路径上，在 HTTP server drain 后执行 best-effort flush。
+  - 错误恢复重试：flush 失败后保留脏集合并在 `3000ms` 后重试；若底层触发更细粒度的 lock-conflict retry，则由 RuntimeStorage backend 先消化。
+- `routing_uuid` 更新属于同一 flush 域，但仍允许按 provider 粒度单条提交；失败后必须和 runtime dirty set 一起重新排队。
+
+### 2.5.d Large-pool performance target lines
+
+- 十万级账号规模下的目标线：
+  - 请求热路径不允许逐请求同步 durable commit。
+  - runtime flush 以脏记录批次提交，单批默认 `200` 条，可按部署放大。
+  - 启动恢复与 reload hydrate 以分页思维设计，建议 restore page size 为 `2000`，compat export page size 为 `1000`。
+  - `STARTUP_PRELOAD_MAX_PER_PROVIDER` 与 `STARTUP_PRELOAD_MAX_TOTAL` 继续限制启动阶段真实实例化数量，避免把“恢复快照”误做成“全节点预热”。
+  - 当池规模达到 `100000` provider 量级时，排序辅助、索引、group cursor 和 selection seq 仍应主要依赖内存，不允许把这些辅助结构整体刷进 compat snapshot。
+
+### 2.5.e Crash recovery durable boundary
+
+- 崩溃恢复边界固定为：
+  - 已成功提交的 runtime flush batch 必须可从数据库完整恢复。
+  - 允许丢失的只能是“最近一次未 flush 窗口内”的热状态增量。
+  - 永久允许丢失的是纯内存态：锁、队列、瞬时并发占位、`needsRefresh`、buffer timers 等。
+- 这意味着 crash 后最多回退到“上一次成功 flush 的聚合快照”，而不是回退到旧的 `provider_pools.json` 文件写回点。
+- compat export 只导出 durable 快照，不试图序列化未 flush 的内存态；否则导出的不是备份，是幻觉。
+
 ## Migration Plan
 
-1. 盘点当前 `configs/` 中的文件类型和权威来源。
+1. 盘点当前 `configs/` 中的文件类型和权威来源，并生成现有存量数据的 snapshot manifest（包含 checksum、记录数、异常文件清单）。
 2. 引入 `RuntimeStorage` 抽象，并为文件后端补齐统一接口。
 3. 先为 `provider_pools.json` 建立数据库数据模型：注册记录、secret 记录、credential inventory、运行时状态、兼容投影视图。
 4. 优先替换 `provider-pool-manager`、`provider-api`、`service-manager auto-link` 的 Provider 池写路径。
@@ -535,6 +619,74 @@
 7. 保留文件导入/导出能力，并使用特性开关切换读写权威源。
 8. 在稳定后评估是否将文件型敏感凭据原文迁入数据库或 secret store。
 9. 最后再决定是否继续保留 `fetch_system_prompt.txt` 这类运行辅助文件，或将其降级为纯临时态。
+
+## Existing Config Data Migration Workflow
+
+### Scope of existing data
+
+- 在数据库切换为权威源之前，必须先处理当前 `configs/` 里已经存在的运行时存量数据，而不是假装线上实例会自己从天而降变干净。
+- 必须纳入基线回填的数据：
+  - `configs/provider_pools.json`
+  - `configs/<provider>/` 凭据目录（第一阶段迁索引、绑定、去重元数据，原文文件继续保留）
+  - `configs/usage-cache.json`
+  - `configs/token-store.json`
+  - `configs/api-potluck-data.json`
+  - `configs/api-potluck-keys.json`
+- 不属于这次“存量运行态回填”的对象：`configs/config.json`、`configs/plugins.json`、系统提示词文件、日志目录、上传暂存目录、更新临时目录。
+- `provider_pools.json.*.tmp`、孤儿文件、解析失败文件不允许被默默当成权威输入；它们必须进入迁移异常报告，并由迁移策略显式决定忽略、人工确认或恢复。
+
+### Stage 0: Preflight inventory and snapshot
+
+- 迁移启动前必须创建 `storage_migration_runs` 记录，并为每个源文件/目录生成 `storage_migration_items` 明细。
+- inventory 至少记录：路径、文件大小、mtime、checksum、记录数/条目数、解析状态、关联 provider type、异常原因。
+- 对写入频繁的数据集，迁移需要配合短暂冻结窗口或 `dual-write` 过渡，避免导入基线后又被旧文件路径继续偷偷改脏。
+- 基线导入前要保留只读快照或等价 manifest，确保回滚时能定位“迁移前最后一个可信文件状态”。
+
+### Stage 1: Baseline backfill order
+
+1. 先导入 `provider_pools.json`，完成 Provider 注册、运行时状态、内联 secret、兼容 UUID 与绑定关系的拆分。
+2. 再扫描 `configs/<provider>/` 凭据目录，建立 credential inventory、文件索引、去重键与 Provider 绑定关系，但不要求第一阶段搬走原始密文文件。
+3. 再回填 `usage-cache.json`，把按 provider/model 维度可恢复的缓存快照写入 `usage_snapshots` / `usage_refresh_tasks`。
+4. 再回填 `token-store.json`，把后台会话和过期信息迁入 `admin_sessions`。
+5. 最后回填 `api-potluck-data.json` 与 `api-potluck-keys.json`，把用户、凭据绑定、Key 配额与统计状态迁入对应表。
+- 每一步都必须满足“可重复执行 + 幂等更新 + 可按 `run_id` 断点续跑”，否则大数据量迁移只会把自己玩死。
+
+### Stage 2: Validation gates
+
+- `provider_pools.json` 迁移后至少校验：providerType 分组数量、每组 provider 数量、`uuid` 覆盖率、健康/禁用状态、绑定文件路径映射、兼容投影视图差异。
+- 凭据目录迁移后至少校验：文件索引数量、dedupe 命中情况、identity key/account/email 映射覆盖率、无法解析文件清单。
+- `usage-cache.json` 迁移后至少校验：provider/model 维度 key 数量、最近更新时间、核心计数字段是否可恢复。
+- `token-store.json` 迁移后至少校验：有效 session 数量、过期时间、token hash 唯一性。
+- `api-potluck` 迁移后至少校验：用户数量、Key 数量、enabled 状态、额度/用量字段摘要。
+- 任一必需数据集未完成回填，或兼容投影视图 diff 超出允许范围时，不允许切换到 `db` 作为唯一权威源。
+
+### Stage 3: Cutover and rollback
+
+- 切换顺序明确为 `file -> dual-write -> db`，不允许跳步骤直接把老文件扔了；那种“切了再祈祷”的操作只配出事故复盘。
+- `dual-write` 只能在基线回填与首轮校验通过后开启，此时数据库作为候选权威源，文件路径继续保留兜底。
+- 进入 `db` 模式前，必须再次执行兼容投影 diff 与关键计数校验，确认导入后增量写入没有产生漂移。
+- 一旦数据库健康检查失败、迁移校验失败或发现异常数据不可接受，系统必须能依赖 feature flag 和导入前快照退回 `file` 模式，而不是要求人工重建 runtime 状态。
+
+### Error taxonomy, retry window, and replay boundaries
+
+- 运行时存储错误至少分为六类：`parameter_error`、`data_error`、`constraint_conflict`、`backend_unavailable`、`lock_conflict`、`secondary_write_failed`；迁移校验失败单独归类为 `migration_validation_failed`。
+- 处理策略固定如下：
+  - `parameter_error` / `data_error` / `constraint_conflict`：立即失败，不重试，不允许静默降级。
+  - `backend_unavailable`：立即失败，并允许通过 feature flag 回退到 `file` backend。
+  - `lock_conflict`：执行有限重试，第一阶段默认最多 `2` 次额外重试，线性退避 `75ms * attempt`，总额外等待窗口约 `150ms`。
+  - `secondary_write_failed`：不自动降级到 `file`，因为 primary 已提交；仅记录告警、阻断 cutover，并要求后续校验或补写。
+  - `migration_validation_failed`：阻断 cutover，并允许回退到 `file` 模式。
+- SQLite `database is locked` / `busy timeout` / `SQLITE_BUSY` / `SQLITE_LOCKED` 视为 `lock_conflict`；`spawn sqlite3` 失败视为 `backend_unavailable`；JSON 解析失败视为 `data_error`，均不允许无限重试。
+- `dual-write` 语义必须固定：
+  - primary 失败且 secondary 未执行：返回 `runtime_storage_primary_write_failed`，`primaryCommitted=false`，`secondaryAttempted=false`。
+  - primary 成功但 secondary 失败：返回 `runtime_storage_secondary_write_failed`，`primaryCommitted=true`，`secondaryAttempted=true`，并把该次写入视为“已写主、未写副”的阻断事件。
+- 第一阶段需要明确的幂等键与重放边界：
+  - runtime flush：以 `provider_id` 集合和 `persistSelectionState` 组合生成幂等键，重放边界为 `provider_runtime_state` upsert。
+  - compat export：以导出域集合生成幂等键，重放边界为覆盖式导出 `provider_pools.json` / `usage-cache.json` / `api-potluck-*`。
+  - migration verify：以 `run_id`（无 `run_id` 时退化为 adhoc key）生成幂等键，重放边界为 diff report 产物覆盖写。
+  - migration import：以 `run_id` 作为幂等主键，重放边界为同一 `run_id` 下的 manifest、items 记录与目标表全量替换/幂等 upsert。
+  - rollback：以 `run_id + restoreLegacyFiles` 生成幂等键，重放边界为对备份制品的重复恢复与 rollback note 追加写。
+- 所有统一包装后的错误对象都必须携带 `code`、`classification`、`phase`、`domain`、`backend`、`operation`、`retryable` 和 `details`；`details` 至少可承载 `runId`、`providerId`、`taskId`、`idempotencyKey`、`replayBoundary` 这类诊断字段。
 
 ## Open Questions
 

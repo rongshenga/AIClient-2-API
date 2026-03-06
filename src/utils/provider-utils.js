@@ -130,15 +130,19 @@ export function getFileName(filePath) {
  * @param {string} relativePath - 相对路径
  * @returns {string} 格式化后的路径（带有 ./ 或 .\ 前缀）
  */
-export function formatSystemPath(relativePath) {
-    if (!relativePath) return relativePath;
+export function formatSystemPath(filePath) {
+    if (!filePath) return filePath;
     
-    // 根据操作系统判断使用对应的路径分隔符
     const isWindows = process.platform === 'win32';
     const separator = isWindows ? '\\' : '/';
-    // 统一转换路径分隔符为当前系统的分隔符
-    const systemPath = relativePath.replace(/[\/\\]/g, separator);
-    return systemPath.startsWith('.' + separator) ? systemPath : '.' + separator + systemPath;
+    const systemPath = filePath.replace(/[\/\\]/g, separator);
+    const isWindowsAbsolutePath = /^[A-Za-z]:[\/]/.test(systemPath) || systemPath.startsWith('\\');
+
+    if (path.isAbsolute(systemPath) || isWindowsAbsolutePath) {
+        return systemPath;
+    }
+
+    return systemPath.startsWith('.' + separator) ? systemPath : '.' + separator + systemPath.replace(/^[\/]/, '');
 }
 
 /**
@@ -279,6 +283,24 @@ export function detectProviderFromPath(normalizedPath) {
  */
 export function getProviderMappingByDirName(dirName) {
     return PROVIDER_MAPPINGS.find(m => m.dirName === dirName) || null;
+}
+
+/**
+ * 根据 providerType 获取提供商映射
+ * @param {string} providerType - 提供商类型
+ * @returns {Object|null} 提供商映射对象，如果未找到则返回 null
+ */
+export function getProviderMappingByProviderType(providerType) {
+    return PROVIDER_MAPPINGS.find(m => m.providerType === providerType) || null;
+}
+
+/**
+ * 根据 providerType 获取凭据路径字段名
+ * @param {string} providerType - 提供商类型
+ * @returns {string|null} 凭据路径字段名
+ */
+export function getCredentialPathKeyByProviderType(providerType) {
+    return getProviderMappingByProviderType(providerType)?.credPathKey || null;
 }
 
 /**
