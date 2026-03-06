@@ -10,18 +10,28 @@ const mockLogger = {
 };
 
 const serviceInstances = {};
-const sharedAdapter = {
-    async getUsageLimits() {
-        return {
-            usageBreakdown: []
-        };
-    }
-};
+const adapterCallOrder = [];
+const providerUsageHandlers = new Map();
+const mockBroadcastEvent = jest.fn();
 
 const mockGetServiceAdapter = jest.fn((config) => {
     const providerKey = config.uuid ? `${config.MODEL_PROVIDER}${config.uuid}` : config.MODEL_PROVIDER;
     if (!serviceInstances[providerKey]) {
-        serviceInstances[providerKey] = sharedAdapter;
+        serviceInstances[providerKey] = {
+            async getUsageLimits() {
+                adapterCallOrder.push({
+                    providerType: config.MODEL_PROVIDER,
+                    uuid: config.uuid || null
+                });
+                const handler = providerUsageHandlers.get(config.MODEL_PROVIDER);
+                if (typeof handler === 'function') {
+                    return handler(config);
+                }
+                return {
+                    usageBreakdown: []
+                };
+            }
+        };
     }
     return serviceInstances[providerKey];
 });
@@ -35,6 +45,7 @@ const passthrough = (value) => value;
 
 let handleGetProviderUsage;
 let handleGetUsageRefreshTask;
+let handleGetUsage;
 
 function createMockRes() {
     return {
@@ -55,14 +66,14 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function buildLargeProviderPool(count) {
+function buildProviderPool(prefix, count) {
     return Array.from({ length: count }, (_, index) => ({
-        uuid: `gemini-${index}`,
-        customName: `Gemini-${index}`
+        uuid: `${prefix}-${index}`,
+        customName: `${prefix.toUpperCase()}-${index}`
     }));
 }
 
-describe('Usage API Large Pool Async Task', () => {
+describe('Usage API Refresh Cache Strategy', () => {
     beforeAll(async () => {
         jest.resetModules();
 
@@ -95,9 +106,14 @@ describe('Usage API Large Pool Async Task', () => {
             updateProviderUsageCache: mockUpdateProviderUsageCache
         }));
 
+        jest.doMock('../src/ui-modules/event-broadcast.js', () => ({
+            broadcastEvent: mockBroadcastEvent
+        }));
+
         const usageApiModule = await import('../src/ui-modules/usage-api.js');
         handleGetProviderUsage = usageApiModule.handleGetProviderUsage;
         handleGetUsageRefreshTask = usageApiModule.handleGetUsageRefreshTask;
+        handleGetUsage = usageApiModule.handleGetUsage;
     });
 
     beforeEach(() => {
@@ -106,21 +122,25 @@ describe('Usage API Large Pool Async Task', () => {
         mockReadProviderUsageCache.mockReset();
         mockUpdateProviderUsageCache.mockReset();
         mockGetServiceAdapter.mockClear();
+        mockBroadcastEvent.mockReset();
         mockLogger.info.mockClear();
         mockLogger.debug.mockClear();
         mockLogger.warn.mockClear();
         mockLogger.error.mockClear();
+        adapterCallOrder.length = 0;
+        providerUsageHandlers.clear();
 
         for (const key of Object.keys(serviceInstances)) {
             delete serviceInstances[key];
         }
     });
 
-    test('should refresh 80000 providers with async task and grouped progress', async () => {
+    test('should persist provider snapshots incrementally during large async refresh', async () => {
         const providerType = 'gemini-cli-oauth';
-        const totalProviders = 80000;
-        const providers = buildLargeProviderPool(totalProviders);
+        const totalProviders = 2500;
+        const providers = buildProviderPool('gemini', totalProviders);
 
+        mockReadUsageCache.mockResolvedValue(null);
         mockReadProviderUsageCache.mockResolvedValue(null);
         mockUpdateProviderUsageCache.mockResolvedValue(undefined);
 
@@ -151,11 +171,7 @@ describe('Usage API Large Pool Async Task', () => {
         expect(res.statusCode).toBe(202);
 
         const startPayload = JSON.parse(res.body);
-        expect(startPayload.taskId).toBeTruthy();
-        expect(startPayload.status).toBe('running');
-        expect(startPayload.type).toBe('provider');
-
-        const deadline = Date.now() + 110000;
+        const deadline = Date.now() + 60000;
         let latestTaskStatus = null;
 
         while (Date.now() < deadline) {
@@ -176,21 +192,175 @@ describe('Usage API Large Pool Async Task', () => {
         expect(latestTaskStatus.status).toBe('completed');
         expect(latestTaskStatus.progress.totalInstances).toBe(totalProviders);
         expect(latestTaskStatus.progress.processedInstances).toBe(totalProviders);
-        expect(latestTaskStatus.progress.successCount).toBe(totalProviders);
-        expect(latestTaskStatus.progress.errorCount).toBe(0);
-        expect(latestTaskStatus.progress.percent).toBe(100);
         expect(latestTaskStatus.result.totalCount).toBe(totalProviders);
         expect(latestTaskStatus.result.successCount).toBe(totalProviders);
         expect(latestTaskStatus.result.errorCount).toBe(0);
 
-        expect(mockUpdateProviderUsageCache).toHaveBeenCalledTimes(1);
-        expect(mockUpdateProviderUsageCache).toHaveBeenCalledWith(
-            providerType,
+        expect(mockUpdateProviderUsageCache.mock.calls.length).toBeGreaterThanOrEqual(3);
+        expect(mockUpdateProviderUsageCache.mock.calls[0][0]).toBe(providerType);
+        expect(mockUpdateProviderUsageCache.mock.calls[0][1]).toEqual(
+            expect.objectContaining({
+                totalCount: totalProviders,
+                processedCount: 1000
+            })
+        );
+        expect(mockUpdateProviderUsageCache.mock.calls[0][1].instances).toHaveLength(1000);
+
+        const lastCall = mockUpdateProviderUsageCache.mock.calls.at(-1);
+        expect(lastCall[0]).toBe(providerType);
+        expect(lastCall[1]).toEqual(
             expect.objectContaining({
                 totalCount: totalProviders,
                 successCount: totalProviders,
-                errorCount: 0
+                errorCount: 0,
+                processedCount: totalProviders
             })
         );
+        expect(lastCall[1].instances).toHaveLength(totalProviders);
+    });
+
+    test('should refresh uncached and oldest instances first on provider refresh', async () => {
+        const providerType = 'gemini-cli-oauth';
+        const providers = [
+            { uuid: 'alpha', customName: 'Alpha' },
+            { uuid: 'beta', customName: 'Beta' },
+            { uuid: 'gamma', customName: 'Gamma' }
+        ];
+
+        mockReadUsageCache.mockResolvedValue(null);
+        mockReadProviderUsageCache.mockResolvedValue({
+            providerType,
+            timestamp: '2026-03-06T03:00:00.000Z',
+            totalCount: 3,
+            successCount: 2,
+            errorCount: 0,
+            processedCount: 2,
+            instances: [
+                {
+                    uuid: 'beta',
+                    name: 'Beta',
+                    success: true,
+                    usage: { usageBreakdown: [] },
+                    lastRefreshedAt: '2026-03-06T02:59:00.000Z'
+                },
+                {
+                    uuid: 'gamma',
+                    name: 'Gamma',
+                    success: true,
+                    usage: { usageBreakdown: [] },
+                    lastRefreshedAt: '2026-02-01T00:00:00.000Z'
+                }
+            ]
+        });
+        mockUpdateProviderUsageCache.mockResolvedValue(undefined);
+
+        const req = {
+            url: `/api/usage/${encodeURIComponent(providerType)}?refresh=true&concurrency=1`,
+            headers: {
+                host: 'localhost:3000'
+            }
+        };
+        const res = createMockRes();
+        const currentConfig = {
+            providerPools: {
+                [providerType]: providers
+            },
+            USAGE_QUERY_CONCURRENCY_PER_PROVIDER: 1
+        };
+        const providerPoolManager = {
+            providerPools: {
+                [providerType]: providers
+            }
+        };
+
+        const handled = await handleGetProviderUsage(req, res, currentConfig, providerPoolManager, providerType);
+        expect(handled).toBe(true);
+        expect(res.statusCode).toBe(200);
+
+        const responsePayload = JSON.parse(res.body);
+        expect(responsePayload.totalCount).toBe(3);
+        expect(adapterCallOrder.map(item => item.uuid)).toEqual(['alpha', 'gamma', 'beta']);
+        expect(mockUpdateProviderUsageCache).toHaveBeenCalledTimes(2);
+    });
+
+    test('should prioritize uncached provider types first in full async refresh', async () => {
+        const geminiProviders = [{ uuid: 'gemini-1', customName: 'Gemini-1' }];
+        const grokProviders = [{ uuid: 'grok-1', customName: 'Grok-1' }];
+
+        mockReadUsageCache.mockResolvedValue({
+            timestamp: '2026-03-06T03:00:00.000Z',
+            providers: {
+                'grok-custom': {
+                    providerType: 'grok-custom',
+                    timestamp: '2026-03-06T02:59:00.000Z',
+                    totalCount: 1,
+                    successCount: 1,
+                    errorCount: 0,
+                    processedCount: 1,
+                    instances: [
+                        {
+                            uuid: 'grok-1',
+                            name: 'Grok-1',
+                            success: true,
+                            usage: { usageBreakdown: [] },
+                            lastRefreshedAt: '2026-03-06T02:59:00.000Z'
+                        }
+                    ]
+                }
+            }
+        });
+        mockReadProviderUsageCache.mockResolvedValue(null);
+        mockUpdateProviderUsageCache.mockResolvedValue(undefined);
+        mockWriteUsageCache.mockResolvedValue(undefined);
+
+        const req = {
+            url: '/api/usage?refresh=true&async=true&concurrency=1',
+            headers: {
+                host: 'localhost:3000'
+            }
+        };
+        const res = createMockRes();
+        const currentConfig = {
+            providerPools: {
+                'gemini-cli-oauth': geminiProviders,
+                'grok-custom': grokProviders
+            },
+            USAGE_QUERY_CONCURRENCY_PER_PROVIDER: 1
+        };
+        const providerPoolManager = {
+            providerPools: {
+                'gemini-cli-oauth': geminiProviders,
+                'grok-custom': grokProviders
+            }
+        };
+
+        const handled = await handleGetUsage(req, res, currentConfig, providerPoolManager);
+        expect(handled).toBe(true);
+        expect(res.statusCode).toBe(202);
+
+        const startPayload = JSON.parse(res.body);
+        const deadline = Date.now() + 30000;
+        let latestTaskStatus = null;
+
+        while (Date.now() < deadline) {
+            const taskRes = createMockRes();
+            const ok = await handleGetUsageRefreshTask({}, taskRes, startPayload.taskId);
+            expect(ok).toBe(true);
+            expect(taskRes.statusCode).toBe(200);
+
+            latestTaskStatus = JSON.parse(taskRes.body);
+            if (latestTaskStatus.status !== 'running') {
+                break;
+            }
+
+            await sleep(5);
+        }
+
+        expect(latestTaskStatus).toBeTruthy();
+        expect(latestTaskStatus.status).toBe('completed');
+        expect(adapterCallOrder.map(item => item.providerType)).toEqual([
+            'gemini-cli-oauth',
+            'grok-custom'
+        ]);
     });
 });

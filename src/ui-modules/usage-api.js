@@ -18,6 +18,8 @@ const USAGE_PROGRESS_EMIT_INTERVAL_MS = 400;
 const USAGE_TASK_RETENTION_MS = 10 * 60 * 1000;
 const MAX_USAGE_TASK_RECORDS = 200;
 const USAGE_TASK_DEFAULT_POLL_INTERVAL_MS = 1200;
+const DEFAULT_USAGE_CACHE_FLUSH_STEP = 1000;
+const DEFAULT_USAGE_CACHE_FLUSH_INTERVAL_MS = 5000;
 const usageRefreshTasks = new Map();
 
 /**
@@ -333,6 +335,217 @@ async function mapWithConcurrency(items, concurrency, mapper) {
 }
 
 
+
+/**
+ * 解析时间戳为毫秒值
+ * @param {string|null|undefined} value - 时间戳
+ * @returns {number} 毫秒值，无法解析时返回正无穷
+ */
+function parseTimestampMs(value) {
+    if (!value || typeof value !== 'string') {
+        return Number.POSITIVE_INFINITY;
+    }
+
+    const timestampMs = new Date(value).getTime();
+    return Number.isFinite(timestampMs) ? timestampMs : Number.POSITIVE_INFINITY;
+}
+
+/**
+ * 获取实例缓存键
+ * @param {Object} provider - 提供商配置或实例缓存
+ * @param {number} index - 当前索引
+ * @returns {string} 缓存键
+ */
+function getProviderInstanceCacheKey(provider, index = 0) {
+    if (provider?.uuid) {
+        return `uuid:${provider.uuid}`;
+    }
+    if (provider?.customName) {
+        return `name:${provider.customName}`;
+    }
+    if (provider?.name) {
+        return `name:${provider.name}`;
+    }
+    return `index:${index}`;
+}
+
+/**
+ * 获取指定类型的提供商池
+ * @param {string} providerType - 提供商类型
+ * @param {Object} currentConfig - 当前配置
+ * @param {Object} providerPoolManager - 提供商池管理器
+ * @returns {Array<Object>} 提供商实例列表
+ */
+function getProvidersForType(providerType, currentConfig, providerPoolManager) {
+    if (providerPoolManager?.providerPools?.[providerType]) {
+        return providerPoolManager.providerPools[providerType];
+    }
+
+    if (currentConfig?.providerPools?.[providerType]) {
+        return currentConfig.providerPools[providerType];
+    }
+
+    return [];
+}
+
+/**
+ * 规范化缓存实例结果
+ * @param {string} providerType - 提供商类型
+ * @param {Object} provider - 当前提供商配置
+ * @param {Object|null} cachedInstance - 缓存实例结果
+ * @returns {Object|null} 规范化后的实例结果
+ */
+function normalizeCachedInstanceResult(providerType, provider, cachedInstance) {
+    if (!cachedInstance) {
+        return null;
+    }
+
+    return {
+        uuid: cachedInstance.uuid || provider?.uuid || 'unknown',
+        name: cachedInstance.name || getProviderDisplayName(provider, providerType),
+        isHealthy: provider?.isHealthy !== false,
+        isDisabled: provider?.isDisabled === true,
+        success: cachedInstance.success === true,
+        usage: cachedInstance.usage ?? null,
+        error: cachedInstance.error ?? null,
+        lastRefreshedAt: cachedInstance.lastRefreshedAt || cachedInstance.timestamp || cachedInstance.cachedAt || null
+    };
+}
+
+/**
+ * 构建按刷新优先级排序的实例候选列表
+ * @param {string} providerType - 提供商类型
+ * @param {Array<Object>} providers - 当前提供商池
+ * @param {Object|null} cachedProviderData - 提供商缓存
+ * @returns {Array<Object>} 候选列表
+ */
+function createProviderRefreshCandidates(providerType, providers, cachedProviderData = null) {
+    const cachedInstanceMap = new Map();
+    const cachedInstances = Array.isArray(cachedProviderData?.instances) ? cachedProviderData.instances : [];
+
+    cachedInstances.forEach((instance, index) => {
+        const cacheKey = getProviderInstanceCacheKey(instance, index);
+        if (!cachedInstanceMap.has(cacheKey)) {
+            cachedInstanceMap.set(cacheKey, instance);
+        }
+    });
+
+    return providers
+        .map((provider, originalIndex) => {
+            const cacheKey = getProviderInstanceCacheKey(provider, originalIndex);
+            const cachedInstance = cachedInstanceMap.get(cacheKey) || null;
+
+            return {
+                provider,
+                originalIndex,
+                cachedInstance,
+                priorityMissing: cachedInstance ? 1 : 0,
+                priorityTimestampMs: parseTimestampMs(
+                    cachedInstance?.lastRefreshedAt || cachedInstance?.timestamp || cachedProviderData?.timestamp
+                )
+            };
+        })
+        .sort((left, right) => {
+            if (left.priorityMissing !== right.priorityMissing) {
+                return left.priorityMissing - right.priorityMissing;
+            }
+            if (left.priorityTimestampMs !== right.priorityTimestampMs) {
+                return left.priorityTimestampMs - right.priorityTimestampMs;
+            }
+            return left.originalIndex - right.originalIndex;
+        });
+}
+
+/**
+ * 根据当前实例结果构建提供商缓存快照
+ * @param {string} providerType - 提供商类型
+ * @param {Object} result - 当前聚合结果
+ * @returns {Object} 提供商缓存快照
+ */
+function buildProviderUsageSnapshot(providerType, result) {
+    const timestamp = new Date().toISOString();
+    const instances = (result.instances || [])
+        .filter(Boolean)
+        .map((instance) => ({
+            ...instance,
+            lastRefreshedAt: instance.lastRefreshedAt || timestamp
+        }));
+    const successCount = instances.filter(instance => instance.success === true).length;
+    const errorCount = instances.filter(instance => instance.success !== true).length;
+
+    return {
+        providerType,
+        instances,
+        totalCount: result.totalCount,
+        successCount,
+        errorCount,
+        processedCount: instances.length,
+        timestamp
+    };
+}
+
+/**
+ * 持久化提供商用量快照
+ * @param {string} providerType - 提供商类型
+ * @param {Object} result - 当前聚合结果
+ */
+async function persistProviderUsageSnapshot(providerType, result) {
+    await updateProviderUsageCache(providerType, buildProviderUsageSnapshot(providerType, result));
+}
+
+/**
+ * 计算提供商类型的刷新优先级
+ * @param {string} providerType - 提供商类型
+ * @param {Object} currentConfig - 当前配置
+ * @param {Object} providerPoolManager - 提供商池管理器
+ * @param {Object|null} usageCache - 全量缓存
+ * @returns {Object} 排序优先级
+ */
+function getProviderTypeRefreshPriority(providerType, currentConfig, providerPoolManager, usageCache = null) {
+    const providers = getProvidersForType(providerType, currentConfig, providerPoolManager);
+    if (providers.length === 0) {
+        return {
+            priorityMissing: 1,
+            priorityTimestampMs: Number.POSITIVE_INFINITY
+        };
+    }
+
+    const cachedProviderData = usageCache?.providers?.[providerType] || null;
+    const [firstCandidate] = createProviderRefreshCandidates(providerType, providers, cachedProviderData);
+
+    return {
+        priorityMissing: firstCandidate?.priorityMissing ?? 1,
+        priorityTimestampMs: firstCandidate?.priorityTimestampMs ?? Number.POSITIVE_INFINITY
+    };
+}
+
+/**
+ * 按未刷新和最久未刷新的优先级排序提供商类型
+ * @param {Array<string>} providerTypes - 提供商类型列表
+ * @param {Object} currentConfig - 当前配置
+ * @param {Object} providerPoolManager - 提供商池管理器
+ * @param {Object|null} usageCache - 全量缓存
+ * @returns {Array<string>} 排序后的提供商类型列表
+ */
+function sortProviderTypesByRefreshPriority(providerTypes, currentConfig, providerPoolManager, usageCache = null) {
+    return providerTypes
+        .map((providerType, originalIndex) => ({
+            providerType,
+            originalIndex,
+            ...getProviderTypeRefreshPriority(providerType, currentConfig, providerPoolManager, usageCache)
+        }))
+        .sort((left, right) => {
+            if (left.priorityMissing !== right.priorityMissing) {
+                return left.priorityMissing - right.priorityMissing;
+            }
+            if (left.priorityTimestampMs !== right.priorityTimestampMs) {
+                return left.priorityTimestampMs - right.priorityTimestampMs;
+            }
+            return left.originalIndex - right.originalIndex;
+        })
+        .map(item => item.providerType);
+}
+
 /**
  * 获取所有支持用量查询的提供商的用量信息
  * @param {Object} currentConfig - 当前配置
@@ -443,47 +656,49 @@ async function queryUsageForProviderInstance(providerType, provider) {
  * @returns {Promise<Object>} 提供商用量信息
  */
 async function getProviderTypeUsage(providerType, currentConfig, providerPoolManager, options = {}) {
+    const providers = getProvidersForType(providerType, currentConfig, providerPoolManager);
     const result = {
         providerType,
-        instances: [],
-        totalCount: 0,
+        instances: new Array(providers.length),
+        totalCount: providers.length,
         successCount: 0,
         errorCount: 0
     };
+    const cachedProviderData = options.cachedProviderData || await readProviderUsageCache(providerType);
+    const providerCandidates = createProviderRefreshCandidates(providerType, providers, cachedProviderData);
 
-    // 获取提供商池中的所有实例
-    let providers = [];
-    if (providerPoolManager && providerPoolManager.providerPools && providerPoolManager.providerPools[providerType]) {
-        providers = providerPoolManager.providerPools[providerType];
-    } else if (currentConfig.providerPools && currentConfig.providerPools[providerType]) {
-        providers = currentConfig.providerPools[providerType];
-    }
-
-    result.totalCount = providers.length;
+    providerCandidates.forEach((candidate) => {
+        const cachedInstance = normalizeCachedInstanceResult(providerType, candidate.provider, candidate.cachedInstance);
+        if (cachedInstance) {
+            result.instances[candidate.originalIndex] = cachedInstance;
+        }
+    });
 
     const queryConcurrency = resolveUsageQueryConcurrency(currentConfig, options.usageConcurrency);
     const groupSize = resolveUsageQueryGroupSize(currentConfig, options.groupSize);
     const groupMinPoolSize = resolveUsageQueryGroupMinPoolSize(currentConfig, options.groupMinPoolSize);
-    const shouldUseGrouping = providers.length >= groupMinPoolSize;
+    const shouldUseGrouping = providerCandidates.length >= groupMinPoolSize;
     const providerGroups = [];
 
     if (shouldUseGrouping) {
-        for (let i = 0; i < providers.length; i += groupSize) {
-            providerGroups.push(providers.slice(i, i + groupSize));
+        for (let i = 0; i < providerCandidates.length; i += groupSize) {
+            providerGroups.push(providerCandidates.slice(i, i + groupSize));
         }
-        logger.info(`[Usage API] Querying usage for ${providerType} with ${providers.length} instances (groupSize=${groupSize}, groups=${providerGroups.length}, concurrency=${queryConcurrency})`);
+        logger.info(`[Usage API] Querying usage for ${providerType} with ${providerCandidates.length} instances (groupSize=${groupSize}, groups=${providerGroups.length}, concurrency=${queryConcurrency})`);
     } else {
-        providerGroups.push(providers);
-        logger.info(`[Usage API] Querying usage for ${providerType} with ${providers.length} instances (concurrency=${queryConcurrency})`);
+        providerGroups.push(providerCandidates);
+        logger.info(`[Usage API] Querying usage for ${providerType} with ${providerCandidates.length} instances (concurrency=${queryConcurrency})`);
     }
 
     const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
     let processedInstances = 0;
     let successCount = 0;
     let errorCount = 0;
-    let writeOffset = 0;
     let lastEmitAt = 0;
     let lastEmitProcessed = 0;
+    let lastPersistAt = Date.now();
+    let lastPersistProcessed = 0;
+    const flushStep = Math.max(groupSize, DEFAULT_USAGE_CACHE_FLUSH_STEP);
     const totalGroups = providerGroups.length;
 
     const emitProgress = (force = false, currentGroup = 0) => {
@@ -515,7 +730,25 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
         });
     };
 
+    const maybePersistSnapshot = async (force = false) => {
+        if (processedInstances === 0) {
+            return;
+        }
+
+        const now = Date.now();
+        const stepReached = (processedInstances - lastPersistProcessed) >= flushStep;
+        const intervalReached = (now - lastPersistAt) >= DEFAULT_USAGE_CACHE_FLUSH_INTERVAL_MS;
+        if (!force && !stepReached && !intervalReached) {
+            return;
+        }
+
+        await persistProviderUsageSnapshot(providerType, result);
+        lastPersistAt = now;
+        lastPersistProcessed = processedInstances;
+    };
+
     if (result.totalCount === 0) {
+        result.instances = [];
         emitProgress(true, 0);
         return result;
     }
@@ -523,13 +756,14 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
     emitProgress(true, 1);
 
     for (let groupIndex = 0; groupIndex < providerGroups.length; groupIndex++) {
-        const groupProviders = providerGroups[groupIndex];
+        const groupCandidates = providerGroups[groupIndex];
         const currentGroup = groupIndex + 1;
         emitProgress(true, currentGroup);
 
-        const groupResults = await mapWithConcurrency(groupProviders, queryConcurrency, async (provider) => {
-            const instanceResult = await queryUsageForProviderInstance(providerType, provider);
-            syncProviderHealthFromUsageResult(providerPoolManager, providerType, provider, instanceResult);
+        await mapWithConcurrency(groupCandidates, queryConcurrency, async (candidate) => {
+            const instanceResult = await queryUsageForProviderInstance(providerType, candidate.provider);
+            syncProviderHealthFromUsageResult(providerPoolManager, providerType, candidate.provider, instanceResult);
+            instanceResult.lastRefreshedAt = new Date().toISOString();
             processedInstances += 1;
             if (instanceResult.success) {
                 successCount += 1;
@@ -537,19 +771,21 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
                 errorCount += 1;
             }
             delete instanceResult.errorStatus;
+            result.instances[candidate.originalIndex] = instanceResult;
             emitProgress(false, currentGroup);
             return instanceResult;
         });
 
-        for (let i = 0; i < groupResults.length; i++) {
-            result.instances[writeOffset + i] = groupResults[i];
-        }
-        writeOffset += groupResults.length;
         emitProgress(true, currentGroup);
+        await maybePersistSnapshot(processedInstances >= result.totalCount);
     }
 
-    result.successCount = successCount;
-    result.errorCount = errorCount;
+    const snapshot = buildProviderUsageSnapshot(providerType, result);
+    result.instances = snapshot.instances;
+    result.successCount = snapshot.successCount;
+    result.errorCount = snapshot.errorCount;
+    result.processedCount = snapshot.processedCount;
+    result.timestamp = snapshot.timestamp;
     emitProgress(true, totalGroups);
 
     return result;
@@ -730,20 +966,28 @@ function startProviderUsageRefreshTask(currentConfig, providerPoolManager, provi
  */
 function startAllProvidersUsageRefreshTask(currentConfig, providerPoolManager, options = {}) {
     const task = createUsageRefreshTask({ type: 'all' });
-    const providerCount = supportedProviders.length;
-    let completedProviders = 0;
-    let completedTotalInstances = 0;
-    let completedSuccessCount = 0;
-    let completedErrorCount = 0;
 
     void (async () => {
+        const cachedUsageData = await readUsageCache();
+        const sortedProviderTypes = sortProviderTypesByRefreshPriority(
+            supportedProviders,
+            currentConfig,
+            providerPoolManager,
+            cachedUsageData
+        );
+        const providerCount = sortedProviderTypes.length;
+        let completedProviders = 0;
+        let completedTotalInstances = 0;
+        let completedSuccessCount = 0;
+        let completedErrorCount = 0;
+
         try {
             const allResults = {
                 timestamp: new Date().toISOString(),
                 providers: {}
             };
 
-            for (const providerType of supportedProviders) {
+            for (const providerType of sortedProviderTypes) {
                 let providerResult = null;
 
                 try {
@@ -751,6 +995,7 @@ function startAllProvidersUsageRefreshTask(currentConfig, providerPoolManager, o
                         usageConcurrency: options.usageConcurrency,
                         groupSize: options.groupSize,
                         groupMinPoolSize: options.groupMinPoolSize,
+                        cachedProviderData: cachedUsageData?.providers?.[providerType] || null,
                         onProgress: (progress) => {
                             const totalInstances = completedTotalInstances + progress.totalInstances;
                             const processedInstances = completedTotalInstances + progress.processedInstances;
@@ -786,7 +1031,8 @@ function startAllProvidersUsageRefreshTask(currentConfig, providerPoolManager, o
                         totalCount: 0,
                         successCount: 0,
                         errorCount: 1,
-                        error: providerError.message || String(providerError)
+                        error: providerError.message || String(providerError),
+                        timestamp: new Date().toISOString()
                     };
                 }
 
