@@ -196,7 +196,7 @@ export class CodexApiService {
                 error.skipErrorCount = true;
                 throw error;
             } else {
-                logger.error(`[Codex] Error calling non-stream API (Status: ${error.response?.status}, Code: ${error.code || 'N/A'}):`, error.message);
+                await this.logUpstreamRequestError('non-stream', error, { url, model, body, headers });
                 throw error;
             }
         }
@@ -270,10 +270,147 @@ export class CodexApiService {
                 error.skipErrorCount = true;
                 throw error;
             } else {
-                logger.error(`[Codex] Error calling streaming API (Status: ${error.response?.status}, Code: ${error.code || 'N/A'}):`, error.message);
+                await this.logUpstreamRequestError('streaming', error, { url, model, body, headers });
                 throw error;
             }
         }
+    }
+
+    /**
+     * 记录上游请求错误详情（重点增强 400 排查信息）
+     */
+    async logUpstreamRequestError(apiType, error, context = {}) {
+        const status = error.response?.status;
+        const errorCode = error.code || 'N/A';
+        logger.error(`[Codex] Error calling ${apiType} API (Status: ${status}, Code: ${errorCode}):`, error.message);
+
+        // 仅针对 400 输出详细排查信息，避免日志噪声过大
+        if (status !== 400) {
+            return;
+        }
+
+        const responseBody = await this.readUpstreamErrorBody(error.response?.data);
+        const responseHeaders = error.response?.headers || {};
+        const snapshot = {
+            apiType,
+            url: context.url,
+            model: context.model,
+            status,
+            statusText: error.response?.statusText || null,
+            requestKeys: Object.keys(context.body || {}),
+            promptCacheKey: context.body?.prompt_cache_key || null,
+            stream: context.body?.stream,
+            hasInstructions: Boolean(context.body?.instructions),
+            instructionsLength: typeof context.body?.instructions === 'string' ? context.body.instructions.length : null,
+            inputType: Array.isArray(context.body?.input) ? 'array' : typeof context.body?.input,
+            inputCount: Array.isArray(context.body?.input) ? context.body.input.length : null,
+            toolsCount: Array.isArray(context.body?.tools) ? context.body.tools.length : 0,
+            responseRequestId: responseHeaders['x-request-id'] || responseHeaders['request-id'] || null,
+            responseContentType: responseHeaders['content-type'] || null,
+            headersPreview: this.stringifyForLog(this.maskSensitiveHeaders(context.headers), 2000),
+            requestBodyPreview: this.stringifyForLog(context.body, 8000)
+        };
+
+        logger.error(`[Codex] Upstream 400 response body: ${this.stringifyForLog(responseBody, 8000)}`);
+        logger.error(`[Codex] Upstream 400 request snapshot: ${this.stringifyForLog(snapshot, 10000)}`);
+    }
+
+    /**
+     * 读取上游错误响应体（支持 stream/string/object）
+     */
+    async readUpstreamErrorBody(data, maxChars = 8000) {
+        if (data === undefined || data === null) {
+            return '';
+        }
+
+        if (typeof data === 'string') {
+            return this.truncateForLog(data, maxChars);
+        }
+
+        if (Buffer.isBuffer(data)) {
+            return this.truncateForLog(data.toString('utf8'), maxChars);
+        }
+
+        const isReadableStream = typeof data?.on === 'function' && typeof data?.[Symbol.asyncIterator] === 'function';
+        if (isReadableStream) {
+            let result = '';
+            try {
+                for await (const chunk of data) {
+                    result += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+                    if (result.length >= maxChars) {
+                        if (typeof data.destroy === 'function') {
+                            data.destroy();
+                        }
+                        break;
+                    }
+                }
+            } catch (streamError) {
+                return `[read_upstream_error_stream_failed] ${streamError.message}`;
+            }
+            return this.truncateForLog(result, maxChars);
+        }
+
+        return this.stringifyForLog(data, maxChars);
+    }
+
+    /**
+     * 对敏感请求头进行脱敏
+     */
+    maskSensitiveHeaders(headers = {}) {
+        const masked = { ...headers };
+        if (typeof masked.authorization === 'string' && masked.authorization.length > 0) {
+            masked.authorization = this.maskToken(masked.authorization);
+        }
+        return masked;
+    }
+
+    /**
+     * 脱敏 token 字符串
+     */
+    maskToken(token) {
+        if (!token || typeof token !== 'string') {
+            return token;
+        }
+        if (token.length <= 14) {
+            return `${token.slice(0, 4)}***`;
+        }
+        return `${token.slice(0, 10)}...${token.slice(-4)}`;
+    }
+
+    /**
+     * 序列化日志对象，避免循环引用导致异常
+     */
+    stringifyForLog(value, maxChars = 4000) {
+        const seen = new WeakSet();
+        let raw;
+        try {
+            raw = typeof value === 'string'
+                ? value
+                : JSON.stringify(value, (key, currentValue) => {
+                    if (typeof currentValue === 'object' && currentValue !== null) {
+                        if (seen.has(currentValue)) {
+                            return '[Circular]';
+                        }
+                        seen.add(currentValue);
+                    }
+                    return currentValue;
+                });
+        } catch (error) {
+            raw = `[stringify_failed] ${error.message}`;
+        }
+
+        return this.truncateForLog(raw, maxChars);
+    }
+
+    /**
+     * 截断日志内容，避免超长输出
+     */
+    truncateForLog(text, maxChars = 4000) {
+        const raw = text == null ? '' : String(text);
+        if (raw.length <= maxChars) {
+            return raw;
+        }
+        return `${raw.slice(0, maxChars)}... [truncated ${raw.length - maxChars} chars]`;
     }
 
     /**
@@ -563,7 +700,8 @@ export class CodexApiService {
                 { id: 'gpt-5.2', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'openai' },
                 { id: 'gpt-5.2-codex', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'openai' },
                 { id: 'gpt-5.3-codex', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'openai' },
-                { id: 'gpt-5.3-codex-spark', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'openai' }
+                { id: 'gpt-5.3-codex-spark', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'openai' },
+                { id: 'gpt-5.4', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'openai' }
             ]
         };
     }

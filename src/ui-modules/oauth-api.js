@@ -397,7 +397,10 @@ export async function handleBatchImportCodexTokens(req, res) {
             skipDuplicateCheck,
             concurrency,
             refreshAfterImport,
-            refreshConcurrency
+            refreshConcurrency,
+            progressEventInterval,
+            progressEventMinIntervalMs,
+            includeSuccessProgressDetail
         } = body;
 
         if (!tokens || !Array.isArray(tokens) || tokens.length === 0) {
@@ -427,16 +430,55 @@ export async function handleBatchImportCodexTokens(req, res) {
 
         sendSSE('start', { total: tokens.length });
 
+        const parsedProgressEventInterval = Number.parseInt(progressEventInterval, 10);
+        const autoProgressEventInterval = Math.max(25, Math.ceil(tokens.length / 320));
+        const effectiveProgressEventInterval = Number.isFinite(parsedProgressEventInterval)
+            ? Math.min(2000, Math.max(1, parsedProgressEventInterval))
+            : autoProgressEventInterval;
+        const parsedProgressEventMinIntervalMs = Number.parseInt(progressEventMinIntervalMs, 10);
+        const effectiveProgressEventMinIntervalMs = Number.isFinite(parsedProgressEventMinIntervalMs)
+            ? Math.min(2000, Math.max(20, parsedProgressEventMinIntervalMs))
+            : 120;
+        const shouldIncludeSuccessProgressDetail = includeSuccessProgressDetail === true;
+        let lastProgressSent = 0;
+        let lastProgressSentAt = Date.now();
+
         const result = await batchImportCodexTokensStream(
             tokens,
             {
                 skipDuplicateCheck: skipDuplicateCheck !== false,
                 concurrency,
                 refreshAfterImport: refreshAfterImport === true,
-                refreshConcurrency
+                refreshConcurrency,
+                includeDetails: false
             },
             (progress) => {
-                sendSSE('progress', progress);
+                const processed = progress?.processedCount || progress?.index || 0;
+                const isFailure = progress?.current?.success === false;
+                const isFinal = processed >= tokens.length;
+                const now = Date.now();
+                const shouldSendByStep = (processed - lastProgressSent) >= effectiveProgressEventInterval;
+                const shouldSendByTime = (now - lastProgressSentAt) >= effectiveProgressEventMinIntervalMs;
+                if (
+                    isFailure
+                    || isFinal
+                    || shouldSendByStep
+                    || shouldSendByTime
+                ) {
+                    lastProgressSent = processed;
+                    lastProgressSentAt = now;
+                    if (!isFailure && !shouldIncludeSuccessProgressDetail) {
+                        sendSSE('progress', {
+                            index: progress?.index,
+                            total: progress?.total,
+                            processedCount: progress?.processedCount,
+                            successCount: progress?.successCount,
+                            failedCount: progress?.failedCount
+                        });
+                    } else {
+                        sendSSE('progress', progress);
+                    }
+                }
             }
         );
 
@@ -446,8 +488,7 @@ export async function handleBatchImportCodexTokens(req, res) {
             success: true,
             total: result.total,
             successCount: result.success,
-            failedCount: result.failed,
-            details: result.details
+            failedCount: result.failed
         });
 
         res.end();

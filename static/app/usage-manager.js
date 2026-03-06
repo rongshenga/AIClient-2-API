@@ -16,6 +16,102 @@ const PROVIDERS_WITHOUT_USAGE_DISPLAY = [
 let currentProviderConfigs = null;
 // 正在刷新中的提供商，避免重复触发
 const refreshingProviders = new Set();
+const DEFAULT_USAGE_TASK_POLL_INTERVAL_MS = 1200;
+
+/**
+ * Promise 睡眠
+ * @param {number} ms - 毫秒
+ * @returns {Promise<void>} Promise
+ */
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * 设置用量加载文案
+ * @param {HTMLElement|null} loadingEl - loading 容器
+ * @param {string} text - 文案
+ */
+function setUsageLoadingText(loadingEl, text) {
+    if (!loadingEl) return;
+    const textEl = loadingEl.querySelector('span');
+    if (!textEl) return;
+    textEl.textContent = text || t('usage.loading');
+}
+
+/**
+ * 构建任务进度文案
+ * @param {Object} taskStatus - 任务状态
+ * @param {string} fallbackProviderName - 回退提供商名称
+ * @returns {string} 进度文案
+ */
+function buildUsageTaskProgressText(taskStatus, fallbackProviderName) {
+    const progress = taskStatus?.progress || {};
+    const providerType = progress.currentProvider || taskStatus.providerType || '';
+    const providerName = providerType ? getProviderDisplayName(providerType) : fallbackProviderName;
+    const processed = Number(progress.processedInstances || 0);
+    const total = Number(progress.totalInstances || 0);
+    const percent = Number(progress.percent || 0).toFixed(1);
+
+    return t('usage.taskProgress', {
+        provider: providerName || fallbackProviderName || t('usage.allProviders'),
+        processed,
+        total,
+        percent
+    });
+}
+
+/**
+ * 启动后台刷新任务并轮询完成
+ * @param {string} startUrl - 启动任务接口
+ * @param {HTMLElement|null} loadingEl - loading 容器
+ * @param {string} fallbackProviderName - 回退提供商名称
+ * @returns {Promise<Object>} 完成后的任务状态
+ */
+async function runUsageRefreshTask(startUrl, loadingEl, fallbackProviderName) {
+    const startResponse = await fetch(startUrl, {
+        method: 'GET',
+        headers: getAuthHeaders()
+    });
+
+    if (!startResponse.ok) {
+        throw new Error(`HTTP ${startResponse.status}: ${startResponse.statusText}`);
+    }
+
+    const startPayload = await startResponse.json();
+    const taskId = startPayload.taskId;
+    if (!taskId) {
+        throw new Error('Invalid usage task response');
+    }
+
+    showToast(t('common.info'), t('usage.taskStarted'), 'info');
+    setUsageLoadingText(loadingEl, t('usage.taskPreparing'));
+
+    while (true) {
+        const statusResponse = await fetch(`/api/usage/tasks/${encodeURIComponent(taskId)}`, {
+            method: 'GET',
+            headers: getAuthHeaders()
+        });
+
+        if (!statusResponse.ok) {
+            throw new Error(`HTTP ${statusResponse.status}: ${statusResponse.statusText}`);
+        }
+
+        const taskStatus = await statusResponse.json();
+        if (taskStatus.status === 'running') {
+            setUsageLoadingText(loadingEl, buildUsageTaskProgressText(taskStatus, fallbackProviderName));
+            const pollInterval = Number(taskStatus.pollIntervalMs) || Number(startPayload.pollIntervalMs) || DEFAULT_USAGE_TASK_POLL_INTERVAL_MS;
+            await sleep(pollInterval);
+            continue;
+        }
+
+        if (taskStatus.status === 'completed') {
+            return taskStatus;
+        }
+
+        throw new Error(taskStatus.error || t('usage.taskFailed'));
+    }
+}
 
 /**
  * 更新提供商配置
@@ -184,57 +280,23 @@ export async function loadUsage() {
 export async function refreshUsage() {
     const loadingEl = document.getElementById('usageLoading');
     const errorEl = document.getElementById('usageError');
-    const contentEl = document.getElementById('usageContent');
     const emptyEl = document.getElementById('usageEmpty');
-    const lastUpdateEl = document.getElementById('usageLastUpdate');
     const refreshBtn = document.getElementById('refreshUsageBtn');
 
     // 显示加载状态
     if (loadingEl) loadingEl.style.display = 'block';
     if (errorEl) errorEl.style.display = 'none';
     if (emptyEl) emptyEl.style.display = 'none';
+    setUsageLoadingText(loadingEl, t('usage.loading'));
     if (refreshBtn) refreshBtn.disabled = true;
 
     try {
-        // 带 refresh=true 参数，强制刷新
-        const response = await fetch('/api/usage?refresh=true', {
-            method: 'GET',
-            headers: getAuthHeaders()
-        });
-
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-
-        const data = await response.json();
-        
-        // 隐藏加载状态
-        if (loadingEl) loadingEl.style.display = 'none';
-        
-        // 渲染用量数据
-        renderUsageData(data, contentEl);
-        
-        // 更新服务端系统时间
-        if (data.serverTime) {
-            const serverTimeEl = document.getElementById('serverTimeValue');
-            if (serverTimeEl) {
-                serverTimeEl.textContent = new Date(data.serverTime).toLocaleString(getCurrentLanguage());
-            }
-        }
-        
-        // 更新最后更新时间
-        if (lastUpdateEl) {
-            const timeStr = new Date().toLocaleString(getCurrentLanguage());
-            lastUpdateEl.textContent = t('usage.lastUpdate', { time: timeStr });
-            lastUpdateEl.setAttribute('data-i18n', 'usage.lastUpdate');
-            lastUpdateEl.setAttribute('data-i18n-params', JSON.stringify({ time: timeStr }));
-        }
-
-        showToast(t('common.success'), t('common.refresh.success'), 'success');
+        await runUsageRefreshTask('/api/usage?refresh=true&async=true', loadingEl, t('usage.allProviders'));
+        await loadUsage();
+        showToast(t('common.success'), t('usage.taskCompleted'), 'success');
     } catch (error) {
         console.error('获取用量数据失败:', error);
         
-        if (loadingEl) loadingEl.style.display = 'none';
         if (errorEl) {
             errorEl.style.display = 'block';
             const errorMsgEl = document.getElementById('usageErrorMessage');
@@ -243,8 +305,12 @@ export async function refreshUsage() {
             }
         }
         
-        showToast(t('common.error'), t('common.refresh.failed') + ': ' + error.message, 'error');
+        showToast(t('common.error'), t('usage.taskFailed') + ': ' + error.message, 'error');
     } finally {
+        if (loadingEl) {
+            loadingEl.style.display = 'none';
+            setUsageLoadingText(loadingEl, t('usage.loading'));
+        }
         if (refreshBtn) refreshBtn.disabled = false;
     }
 }
@@ -330,7 +396,6 @@ function renderUsageData(data, container) {
 export async function refreshProviderUsage(providerType) {
     const loadingEl = document.getElementById('usageLoading');
     const refreshBtn = document.getElementById('refreshUsageBtn');
-    const contentEl = document.getElementById('usageContent');
 
     if (refreshingProviders.has(providerType)) {
         showToast(t('common.info'), t('usage.refreshProviderInProgress'), 'info');
@@ -341,37 +406,26 @@ export async function refreshProviderUsage(providerType) {
 
     // 显示加载状态
     if (loadingEl) loadingEl.style.display = 'block';
+    setUsageLoadingText(loadingEl, t('usage.loading'));
     if (refreshBtn) refreshBtn.disabled = true;
 
     try {
         const providerName = getProviderDisplayName(providerType);
         showToast(t('common.info'), t('usage.refreshingProvider', { name: providerName }), 'info');
 
-        // 调用按提供商刷新的 API
-        const response = await fetch(`/api/usage/${providerType}?refresh=true`, {
-            method: 'GET',
-            headers: getAuthHeaders()
-        });
-
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-
-        const providerData = await response.json();
-        
-        // 获取当前完整数据并更新其中一个提供商的数据
-        // 注意：这里为了保持页面一致性，我们重新获取一次完整数据（走缓存）来重新渲染
-        // 或者手动在当前 DOM 中更新该提供商的部分。
-        // 为了简单可靠，我们重新 loadUsage()，它会读取刚刚更新过的后端缓存
+        await runUsageRefreshTask(`/api/usage/${providerType}?refresh=true&async=true`, loadingEl, providerName);
         await loadUsage();
 
-        showToast(t('common.success'), t('common.refresh.success'), 'success');
+        showToast(t('common.success'), t('usage.taskCompleted'), 'success');
     } catch (error) {
         console.error(`刷新提供商 ${providerType} 失败:`, error);
-        showToast(t('common.error'), t('common.refresh.failed') + ': ' + error.message, 'error');
+        showToast(t('common.error'), t('usage.taskFailed') + ': ' + error.message, 'error');
     } finally {
         refreshingProviders.delete(providerType);
-        if (loadingEl) loadingEl.style.display = 'none';
+        if (loadingEl) {
+            loadingEl.style.display = 'none';
+            setUsageLoadingText(loadingEl, t('usage.loading'));
+        }
         if (refreshBtn) refreshBtn.disabled = false;
     }
 }

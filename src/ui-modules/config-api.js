@@ -90,6 +90,13 @@ export async function handleUpdateConfig(req, res, currentConfig) {
         if (newConfig.LOGIN_EXPIRY !== undefined) currentConfig.LOGIN_EXPIRY = newConfig.LOGIN_EXPIRY;
         if (newConfig.PROVIDER_POOLS_FILE_PATH !== undefined) currentConfig.PROVIDER_POOLS_FILE_PATH = newConfig.PROVIDER_POOLS_FILE_PATH;
         if (newConfig.MAX_ERROR_COUNT !== undefined) currentConfig.MAX_ERROR_COUNT = newConfig.MAX_ERROR_COUNT;
+        if (newConfig.POOL_GROUP_SELECTION_ENABLED !== undefined) currentConfig.POOL_GROUP_SELECTION_ENABLED = newConfig.POOL_GROUP_SELECTION_ENABLED;
+        if (newConfig.POOL_GROUP_SIZE !== undefined) currentConfig.POOL_GROUP_SIZE = newConfig.POOL_GROUP_SIZE;
+        if (newConfig.POOL_GROUP_MIN_POOL_SIZE !== undefined) currentConfig.POOL_GROUP_MIN_POOL_SIZE = newConfig.POOL_GROUP_MIN_POOL_SIZE;
+        if (newConfig.POOL_GROUP_UNHEALTHY_RATIO_THRESHOLD !== undefined) currentConfig.POOL_GROUP_UNHEALTHY_RATIO_THRESHOLD = newConfig.POOL_GROUP_UNHEALTHY_RATIO_THRESHOLD;
+        if (newConfig.POOL_GROUP_MIN_HEALTHY !== undefined) currentConfig.POOL_GROUP_MIN_HEALTHY = newConfig.POOL_GROUP_MIN_HEALTHY;
+        if (newConfig.POOL_GROUP_ROTATE_ON_SELECT !== undefined) currentConfig.POOL_GROUP_ROTATE_ON_SELECT = newConfig.POOL_GROUP_ROTATE_ON_SELECT;
+        if (newConfig.PERSIST_SELECTION_STATE !== undefined) currentConfig.PERSIST_SELECTION_STATE = newConfig.PERSIST_SELECTION_STATE;
         if (newConfig.WARMUP_TARGET !== undefined) currentConfig.WARMUP_TARGET = newConfig.WARMUP_TARGET;
         if (newConfig.REFRESH_CONCURRENCY_PER_PROVIDER !== undefined) currentConfig.REFRESH_CONCURRENCY_PER_PROVIDER = newConfig.REFRESH_CONCURRENCY_PER_PROVIDER;
         if (newConfig.USAGE_QUERY_CONCURRENCY_PER_PROVIDER !== undefined) currentConfig.USAGE_QUERY_CONCURRENCY_PER_PROVIDER = newConfig.USAGE_QUERY_CONCURRENCY_PER_PROVIDER;
@@ -157,6 +164,13 @@ export async function handleUpdateConfig(req, res, currentConfig) {
                 LOGIN_EXPIRY: currentConfig.LOGIN_EXPIRY,
                 PROVIDER_POOLS_FILE_PATH: currentConfig.PROVIDER_POOLS_FILE_PATH,
                 MAX_ERROR_COUNT: currentConfig.MAX_ERROR_COUNT,
+                POOL_GROUP_SELECTION_ENABLED: currentConfig.POOL_GROUP_SELECTION_ENABLED,
+                POOL_GROUP_SIZE: currentConfig.POOL_GROUP_SIZE,
+                POOL_GROUP_MIN_POOL_SIZE: currentConfig.POOL_GROUP_MIN_POOL_SIZE,
+                POOL_GROUP_UNHEALTHY_RATIO_THRESHOLD: currentConfig.POOL_GROUP_UNHEALTHY_RATIO_THRESHOLD,
+                POOL_GROUP_MIN_HEALTHY: currentConfig.POOL_GROUP_MIN_HEALTHY,
+                POOL_GROUP_ROTATE_ON_SELECT: currentConfig.POOL_GROUP_ROTATE_ON_SELECT,
+                PERSIST_SELECTION_STATE: currentConfig.PERSIST_SELECTION_STATE,
                 WARMUP_TARGET: currentConfig.WARMUP_TARGET,
                 REFRESH_CONCURRENCY_PER_PROVIDER: currentConfig.REFRESH_CONCURRENCY_PER_PROVIDER,
                 USAGE_QUERY_CONCURRENCY_PER_PROVIDER: currentConfig.USAGE_QUERY_CONCURRENCY_PER_PROVIDER,

@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import path from 'path';
 import { getServiceAdapter, getRegisteredProviders } from './adapter.js';
 import logger from '../utils/logger.js';
 import { MODEL_PROVIDER, getProtocolPrefix } from '../utils/common.js';
@@ -75,8 +76,60 @@ export class ProviderPoolManager {
         
         // 用于并发选点时的原子排序辅助（自增序列）
         this._selectionSequence = 0;
+        this._minSelectionSeqByType = {}; // 每个 providerType 的最小选择序列号（O(1) 读取）
+
+        // 大号池优化：UUID 索引，避免在 8w 节点下频繁 O(n) 查找
+        this.providerIndexByType = {};
+        this.providerIndexGlobal = new Map();
+
+        // 大号池优化：分组选择配置
+        const groupConfig = this.globalConfig || {};
+        this.groupSelection = {
+            enabled: groupConfig.POOL_GROUP_SELECTION_ENABLED !== undefined ? Boolean(groupConfig.POOL_GROUP_SELECTION_ENABLED) : true,
+            groupSize: this._normalizePositiveInt(groupConfig.POOL_GROUP_SIZE, 100),
+            minPoolSize: this._normalizePositiveInt(groupConfig.POOL_GROUP_MIN_POOL_SIZE, 2000),
+            unhealthyRatioThreshold: this._normalizeRatio(groupConfig.POOL_GROUP_UNHEALTHY_RATIO_THRESHOLD, 0.8),
+            minHealthyCount: this._normalizeNonNegativeInt(groupConfig.POOL_GROUP_MIN_HEALTHY, 1),
+            rotateOnSelect: groupConfig.POOL_GROUP_ROTATE_ON_SELECT !== undefined ? Boolean(groupConfig.POOL_GROUP_ROTATE_ON_SELECT) : true
+        };
+        this._groupCursor = {};
+
+        // 默认不持久化每次选点的 lastUsed/_lastSelectionSeq，避免大号池频繁全量落盘
+        this.persistSelectionState = groupConfig.PERSIST_SELECTION_STATE !== undefined
+            ? Boolean(groupConfig.PERSIST_SELECTION_STATE)
+            : false;
  
         this.initializeProviderStatus();
+    }
+
+    /**
+     * 归一化正整数配置
+     * @private
+     */
+    _normalizePositiveInt(value, fallback) {
+        const parsed = Number.parseInt(value, 10);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+    }
+
+    /**
+     * 归一化非负整数配置
+     * @private
+     */
+    _normalizeNonNegativeInt(value, fallback) {
+        const parsed = Number.parseInt(value, 10);
+        return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+    }
+
+    /**
+     * 归一化比例配置到 [0,1]
+     * @private
+     */
+    _normalizeRatio(value, fallback) {
+        const parsed = Number.parseFloat(value);
+        if (!Number.isFinite(parsed)) {
+            return fallback;
+        }
+        return Math.max(0, Math.min(1, parsed));
     }
 
     /**
@@ -534,7 +587,7 @@ export class ProviderPoolManager {
      * 分数越低，优先级越高
      * @private
      */
-    _calculateNodeScore(providerStatus, now = Date.now()) {
+    _calculateNodeScore(providerStatus, now = Date.now(), minSelectionSeq = 0) {
         const config = providerStatus.config;
         const state = providerStatus.state;
         
@@ -579,9 +632,7 @@ export class ProviderPoolManager {
         // 为了防止全局自增序列号导致的“老节点排挤新节点”或“重置节点排挤未重置节点”
         // 我们计算节点序列号相对于当前池中最小序列号的偏移量，并对该偏移量进行封顶处理。
         // 这样序列号只在打破“同一毫秒”的平局时起作用，而不会成为跨越长时间周期的惩罚。
-        const pool = this.providerStatus[providerStatus.type] || [];
-        const minSeqInPool = Math.min(...pool.map(p => p.config._lastSelectionSeq || 0));
-        const relativeSeq = Math.max(0, lastSelectionSeq - minSeqInPool);
+        const relativeSeq = Math.max(0, lastSelectionSeq - minSelectionSeq);
         const cappedRelativeSeq = Math.min(relativeSeq, 100); // 封顶偏移量，确保它只影响微观排序
         
         // usageCount * 10000: 每多用一次，权重增加 10 秒
@@ -592,6 +643,152 @@ export class ProviderPoolManager {
         const loadScore = (state.activeCount || 0) * 5000;
         
         return baseScore + sequenceScore + loadScore;
+    }
+
+    /**
+     * 判断节点是否支持指定模型
+     * @private
+     */
+    _isProviderModelSupported(providerStatus, requestedModel = null) {
+        if (!requestedModel) return true;
+        const notSupported = providerStatus?.config?.notSupportedModels;
+        if (!Array.isArray(notSupported) || notSupported.length === 0) {
+            return true;
+        }
+        return !notSupported.includes(requestedModel);
+    }
+
+    /**
+     * 计算 providerType 的最小选择序列号（使用缓存，避免热点路径全量扫描）
+     * @private
+     */
+    _getMinSelectionSeq(providerType) {
+        const cached = this._minSelectionSeqByType[providerType];
+        if (Number.isFinite(cached)) {
+            return cached;
+        }
+
+        const pool = this.providerStatus[providerType] || [];
+        if (pool.length === 0) {
+            this._minSelectionSeqByType[providerType] = 0;
+            return 0;
+        }
+
+        let minSeq = Number.POSITIVE_INFINITY;
+        for (const provider of pool) {
+            const seq = provider?.config?._lastSelectionSeq || 0;
+            if (seq < minSeq) {
+                minSeq = seq;
+            }
+        }
+        const normalized = Number.isFinite(minSeq) ? minSeq : 0;
+        this._minSelectionSeqByType[providerType] = normalized;
+        return normalized;
+    }
+
+    /**
+     * 判断是否启用分组选点
+     * @private
+     */
+    _shouldUseGroupSelection(providerType, providerCount) {
+        if (!this.groupSelection.enabled) return false;
+        if (providerCount <= this.groupSelection.groupSize) return false;
+        if (providerCount < this.groupSelection.minPoolSize) return false;
+        if (!this.providerStatus[providerType] || this.providerStatus[providerType].length === 0) return false;
+        return true;
+    }
+
+    /**
+     * 在大池中按组挑选候选节点
+     * 规则：组内 healthy=0 或 unhealthyRatio>=阈值 时切换到下一组
+     * @private
+     */
+    _pickGroupedCandidates(providerType, providers, requestedModel = null) {
+        if (!this._shouldUseGroupSelection(providerType, providers.length)) {
+            return null;
+        }
+
+        const groupSize = this.groupSelection.groupSize;
+        const totalGroups = Math.ceil(providers.length / groupSize);
+        const startGroup = this._groupCursor[providerType] || 0;
+        const unhealthyThreshold = this.groupSelection.unhealthyRatioThreshold;
+        const minHealthyCount = this.groupSelection.minHealthyCount;
+
+        let fallbackGroup = null;
+
+        for (let offset = 0; offset < totalGroups; offset++) {
+            const groupIndex = (startGroup + offset) % totalGroups;
+            const start = groupIndex * groupSize;
+            const end = Math.min(start + groupSize, providers.length);
+
+            let totalMatched = 0;
+            let healthyMatched = 0;
+            const healthyCandidates = [];
+
+            for (let i = start; i < end; i++) {
+                const provider = providers[i];
+                if (!this._isProviderModelSupported(provider, requestedModel)) {
+                    continue;
+                }
+
+                totalMatched++;
+                if (provider.config.isHealthy && !provider.config.isDisabled && !provider.config.needsRefresh) {
+                    healthyMatched++;
+                    healthyCandidates.push(provider);
+                }
+            }
+
+            if (totalMatched === 0) {
+                continue;
+            }
+
+            if (!fallbackGroup || healthyMatched > fallbackGroup.healthyMatched) {
+                fallbackGroup = { candidates: healthyCandidates, groupIndex, totalGroups, healthyMatched };
+            }
+
+            const unhealthyRatio = (totalMatched - healthyMatched) / totalMatched;
+            const shouldSkipGroup = healthyMatched === 0 || healthyMatched < minHealthyCount || unhealthyRatio >= unhealthyThreshold;
+
+            if (!shouldSkipGroup) {
+                return {
+                    candidates: healthyCandidates,
+                    groupIndex,
+                    totalGroups,
+                    degradedFallback: false
+                };
+            }
+        }
+
+        if (fallbackGroup && fallbackGroup.healthyMatched > 0) {
+            return {
+                candidates: fallbackGroup.candidates,
+                groupIndex: fallbackGroup.groupIndex,
+                totalGroups: fallbackGroup.totalGroups,
+                degradedFallback: true
+            };
+        }
+
+        return {
+            candidates: [],
+            groupIndex: -1,
+            totalGroups,
+            degradedFallback: false
+        };
+    }
+
+    /**
+     * 轮转分组游标，避免长期命中同一组
+     * @private
+     */
+    _advanceGroupCursor(providerType, selectedGroupIndex, totalGroups) {
+        if (!Number.isFinite(totalGroups) || totalGroups <= 0 || selectedGroupIndex < 0) {
+            return;
+        }
+        if (this.groupSelection.rotateOnSelect) {
+            this._groupCursor[providerType] = (selectedGroupIndex + 1) % totalGroups;
+        } else {
+            this._groupCursor[providerType] = selectedGroupIndex;
+        }
     }
 
     /**
@@ -611,6 +808,49 @@ export class ProviderPoolManager {
         if (levels[level] >= currentLevel) {
             logger[level](`[ProviderPoolManager] ${message}`);
         }
+    }
+
+    /**
+     * 将错误信息格式化为单行并限制长度，避免终端刷屏
+     * @private
+     */
+    _formatErrorForLog(error, maxLength = 260) {
+        const rawMessage = error instanceof Error
+            ? (error.message || String(error))
+            : String(error || 'unknown_error');
+        const singleLine = rawMessage
+            .replace(/\r?\n+/g, ' | ')
+            .replace(/\s{2,}/g, ' ')
+            .trim();
+        if (singleLine.length <= maxLength) {
+            return singleLine;
+        }
+        return `${singleLine.slice(0, maxLength)}...(truncated ${singleLine.length - maxLength} chars)`;
+    }
+
+    /**
+     * 从 providerStatus 构建可持久化的号池快照
+     * @private
+     */
+    _buildPoolsSnapshotFromStatus() {
+        const pools = {};
+        for (const type of Object.keys(this.providerStatus || {})) {
+            const providerList = this.providerStatus[type] || [];
+            pools[type] = providerList.map((provider) => {
+                const config = { ...provider.config };
+                if (config.lastUsed instanceof Date) {
+                    config.lastUsed = config.lastUsed.toISOString();
+                }
+                if (config.lastErrorTime instanceof Date) {
+                    config.lastErrorTime = config.lastErrorTime.toISOString();
+                }
+                if (config.lastHealthCheckTime instanceof Date) {
+                    config.lastHealthCheckTime = config.lastHealthCheckTime.toISOString();
+                }
+                return config;
+            });
+        }
+        return pools;
     }
 
     /**
@@ -706,6 +946,11 @@ export class ProviderPoolManager {
             this._log('error', `Invalid parameters: providerType=${providerType}, uuid=${uuid}`);
             return null;
         }
+        const providerMap = this.providerIndexByType[providerType];
+        if (providerMap) {
+            const provider = providerMap.get(uuid);
+            if (provider) return provider;
+        }
         const pool = this.providerStatus[providerType];
         return pool?.find(p => p.uuid === uuid) || null;
     }
@@ -717,10 +962,8 @@ export class ProviderPoolManager {
      */
     findProviderByUuid(uuid) {
         if (!uuid) return null;
-        for (const type in this.providerStatus) {
-            const provider = this.providerStatus[type].find(p => p.uuid === uuid);
-            if (provider) return provider.config;
-        }
+        const provider = this.providerIndexGlobal.get(uuid);
+        if (provider) return provider.config;
         return null;
     }
 
@@ -729,17 +972,27 @@ export class ProviderPoolManager {
      * Initially, all providers are considered healthy and have zero usage.
      */
     initializeProviderStatus() {
+        this.providerIndexByType = {};
+        this.providerIndexGlobal = new Map();
+
         for (const providerType in this.providerPools) {
             const oldStatus = this.providerStatus[providerType] || [];
+            const oldStatusMap = new Map(oldStatus.map(item => [item.uuid, item]));
             this.providerStatus[providerType] = [];
+            this.providerIndexByType[providerType] = new Map();
             this.roundRobinIndex[providerType] = 0; // Initialize round-robin index for each type
             // 只有在锁不存在时才初始化，避免在运行中被重置导致并发问题
             if (!this._selectionLocks[providerType]) {
                 this._selectionLocks[providerType] = Promise.resolve();
             }
+            if (!this._groupCursor[providerType]) {
+                this._groupCursor[providerType] = 0;
+            }
+            let minSeq = Number.POSITIVE_INFINITY;
+
             this.providerPools[providerType].forEach((providerConfig) => {
                 // 尝试从旧状态中恢复活跃请求计数和队列，避免重载配置时重置并发限制
-                const existing = oldStatus.find(p => p.uuid === providerConfig.uuid);
+                const existing = oldStatusMap.get(providerConfig.uuid);
 
                 // Ensure initial health and usage stats are present in the config
                 providerConfig.isHealthy = providerConfig.isHealthy !== undefined ? providerConfig.isHealthy : true;
@@ -747,6 +1000,8 @@ export class ProviderPoolManager {
                 providerConfig.lastUsed = providerConfig.lastUsed !== undefined ? providerConfig.lastUsed : null;
                 providerConfig.usageCount = providerConfig.usageCount !== undefined ? providerConfig.usageCount : 0;
                 providerConfig.errorCount = providerConfig.errorCount !== undefined ? providerConfig.errorCount : 0;
+                providerConfig._lastSelectionSeq = providerConfig._lastSelectionSeq !== undefined ? providerConfig._lastSelectionSeq : 0;
+                minSeq = Math.min(minSeq, providerConfig._lastSelectionSeq || 0);
                 
                 // --- V2: 刷新监控字段 ---
                 providerConfig.needsRefresh = providerConfig.needsRefresh !== undefined ? providerConfig.needsRefresh : false;
@@ -763,7 +1018,7 @@ export class ProviderPoolManager {
                 providerConfig.lastErrorMessage = providerConfig.lastErrorMessage || null;
                 providerConfig.customName = providerConfig.customName || null;
 
-                this.providerStatus[providerType].push({
+                const providerEntry = {
                     config: providerConfig,
                     uuid: providerConfig.uuid, // Still keep uuid at the top level for easy access
                     type: providerType, // 保存 providerType 引用
@@ -772,8 +1027,24 @@ export class ProviderPoolManager {
                         waitingCount: 0,
                         queue: []
                     }
-                });
+                };
+
+                this.providerStatus[providerType].push(providerEntry);
+
+                if (providerConfig.uuid) {
+                    this.providerIndexByType[providerType].set(providerConfig.uuid, providerEntry);
+                    this.providerIndexGlobal.set(providerConfig.uuid, providerEntry);
+                }
             });
+
+            this._minSelectionSeqByType[providerType] = Number.isFinite(minSeq) ? minSeq : 0;
+
+            const groupCount = Math.ceil(this.providerStatus[providerType].length / this.groupSelection.groupSize);
+            if (groupCount > 0) {
+                this._groupCursor[providerType] = this._groupCursor[providerType] % groupCount;
+            } else {
+                this._groupCursor[providerType] = 0;
+            }
         }
         this._log('info', `Initialized provider statuses: ok (maxErrorCount: ${this.maxErrorCount})`);
     }
@@ -917,51 +1188,62 @@ export class ProviderPoolManager {
      */
     _doSelectProvider(providerType, requestedModel, options) {
         const availableProviders = this.providerStatus[providerType] || [];
+        if (availableProviders.length === 0) {
+            this._log('warn', `No providers configured for type: ${providerType}`);
+            return null;
+        }
         
         // 检查并恢复已到恢复时间的提供商
         this._checkAndRecoverScheduledProviders(providerType);
         
         // 获取固定时间戳，确保排序过程中一致
         const now = Date.now();
-        
-        let availableAndHealthyProviders = availableProviders.filter(p =>
-            p.config.isHealthy && !p.config.isDisabled && !p.config.needsRefresh
-        );
+        let availableAndHealthyProviders = [];
+        let selectedGroupIndex = -1;
+        let selectedGroupCount = 0;
 
-        // 如果指定了模型，则排除不支持该模型的提供商
-        if (requestedModel) {
-            const modelFilteredProviders = availableAndHealthyProviders.filter(p => {
-                // 如果提供商没有配置 notSupportedModels，则认为它支持所有模型
-                if (!p.config.notSupportedModels || !Array.isArray(p.config.notSupportedModels)) {
-                    return true;
-                }
-                // 检查 notSupportedModels 数组中是否包含请求的模型，如果包含则排除
-                return !p.config.notSupportedModels.includes(requestedModel);
-            });
-
-            if (modelFilteredProviders.length === 0) {
-                this._log('warn', `No available providers for type: ${providerType} that support model: ${requestedModel}`);
-                return null;
+        // 大池优先走分组筛选，避免每次请求都扫描/排序全部节点
+        const grouped = this._pickGroupedCandidates(providerType, availableProviders, requestedModel);
+        if (grouped && grouped.candidates.length > 0) {
+            availableAndHealthyProviders = grouped.candidates;
+            selectedGroupIndex = grouped.groupIndex;
+            selectedGroupCount = grouped.totalGroups;
+            if (grouped.degradedFallback) {
+                this._log('warn', `[Group Selection] Provider ${providerType} all groups are degraded; fallback to best available group #${selectedGroupIndex}.`);
+            } else {
+                this._log('debug', `[Group Selection] Provider ${providerType} using group #${selectedGroupIndex}, candidates=${grouped.candidates.length}.`);
             }
-
-            availableAndHealthyProviders = modelFilteredProviders;
-            this._log('debug', `Filtered ${modelFilteredProviders.length} providers supporting model: ${requestedModel}`);
+        } else {
+            // 非分组路径也保持 O(n) 单次扫描
+            for (const provider of availableProviders) {
+                if (!this._isProviderModelSupported(provider, requestedModel)) {
+                    continue;
+                }
+                if (provider.config.isHealthy && !provider.config.isDisabled && !provider.config.needsRefresh) {
+                    availableAndHealthyProviders.push(provider);
+                }
+            }
         }
 
         if (availableAndHealthyProviders.length === 0) {
+            if (requestedModel) {
+                this._log('warn', `No available providers for type: ${providerType} that support model: ${requestedModel}`);
+            }
             this._log('warn', `No available and healthy providers for type: ${providerType}`);
             return null;
         }
 
-        // 改进：使用统一的评分策略进行选择
-        // 传入当前时间戳 now 确保一致性
-        const selected = availableAndHealthyProviders.sort((a, b) => {
-            const scoreA = this._calculateNodeScore(a, now);
-            const scoreB = this._calculateNodeScore(b, now);
-            if (scoreA !== scoreB) return scoreA - scoreB;
-            // 如果分值相同，使用 UUID 排序确保确定性
-            return a.uuid < b.uuid ? -1 : 1;
-        })[0];
+        // O(n) 选择最优节点，替代全量 sort
+        const minSelectionSeq = this._getMinSelectionSeq(providerType);
+        let selected = null;
+        let bestScore = Number.POSITIVE_INFINITY;
+        for (const candidate of availableAndHealthyProviders) {
+            const score = this._calculateNodeScore(candidate, now, minSelectionSeq);
+            if (!selected || score < bestScore || (score === bestScore && candidate.uuid < selected.uuid)) {
+                selected = candidate;
+                bestScore = score;
+            }
+        }
 
         // 始终更新 lastUsed（确保 LRU 策略生效，避免并发请求选到同一个 provider）
         // usageCount 只在请求成功后才增加（由 skipUsageCount 控制）
@@ -976,9 +1258,15 @@ export class ProviderPoolManager {
 
         if (!options.skipUsageCount) {
             selected.config.usageCount++;
+            this._debouncedSave(providerType);
+        } else if (this.persistSelectionState) {
+            this._debouncedSave(providerType);
         }
-        // 使用防抖保存（文件 I/O 是异步的，但内存已经更新）
-        this._debouncedSave(providerType);
+
+        // 分组场景下根据策略轮转游标
+        if (selectedGroupIndex >= 0) {
+            this._advanceGroupCursor(providerType, selectedGroupIndex, selectedGroupCount);
+        }
 
         this._log('debug', `Selected provider for ${providerType} (LRU): ${selected.config.uuid}${requestedModel ? ` for model: ${requestedModel}` : ''}${options.skipUsageCount ? ' (skip usage count)' : ''}`);
         
@@ -1578,6 +1866,7 @@ export class ProviderPoolManager {
             provider.config.lastErrorTime = null;
             provider.config.lastErrorMessage = null;
             provider.config._lastSelectionSeq = 0;
+            this._minSelectionSeqByType[providerType] = 0;
             
             // 更新健康检测信息
             if (healthCheckModel) {
@@ -1646,6 +1935,7 @@ export class ProviderPoolManager {
             provider.config.errorCount = 0;
             provider.config.usageCount = 0;
             provider.config._lastSelectionSeq = 0;
+            this._minSelectionSeqByType[providerType] = 0;
             this._log('debug', `Reset provider counters: ${provider.config.uuid} for type ${providerType}`);
             
             this._debouncedSave(providerType);
@@ -1716,6 +2006,14 @@ export class ProviderPoolManager {
             // 更新 provider 的 UUID
             provider.uuid = newUuid;
             provider.config.uuid = newUuid;
+
+            const typeIndex = this.providerIndexByType[providerType];
+            if (typeIndex) {
+                typeIndex.delete(oldUuid);
+                typeIndex.set(newUuid, provider);
+            }
+            this.providerIndexGlobal.delete(oldUuid);
+            this.providerIndexGlobal.set(newUuid, provider);
             
             // 同时更新 providerPools 中的原始数据
             const poolArray = this.providerPools[providerType];
@@ -2030,47 +2328,75 @@ export class ProviderPoolManager {
         
         try {
             const filePath = this.globalConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
+            const fileDir = path.dirname(filePath);
+            await fs.promises.mkdir(fileDir, { recursive: true });
             let currentPools = {};
+            let loadedFromFile = false;
             
-            // 一次性读取文件
-            try {
-                const fileContent = await fs.promises.readFile(filePath, 'utf8');
-                currentPools = JSON.parse(fileContent);
-            } catch (readError) {
-                if (readError.code === 'ENOENT') {
-                    this._log('info', 'configs/provider_pools.json does not exist, creating new file.');
-                } else {
+            // 读取文件时短重试，避免并发写入瞬间读到半文件
+            const maxReadAttempts = 3;
+            for (let attempt = 1; attempt <= maxReadAttempts; attempt++) {
+                try {
+                    const fileContent = await fs.promises.readFile(filePath, 'utf8');
+                    currentPools = JSON.parse(fileContent);
+                    loadedFromFile = true;
+                    break;
+                } catch (readError) {
+                    if (readError.code === 'ENOENT') {
+                        loadedFromFile = true;
+                        this._log('info', 'configs/provider_pools.json does not exist, creating new file.');
+                        break;
+                    }
+
+                    const isSyntaxError = readError instanceof SyntaxError;
+                    const canRetry = isSyntaxError && attempt < maxReadAttempts;
+                    if (canRetry) {
+                        await new Promise(resolve => setTimeout(resolve, attempt * 80));
+                        continue;
+                    }
+
+                    if (isSyntaxError) {
+                        this._log(
+                            'warn',
+                            `provider_pools.json parse failed, fallback to in-memory snapshot: ${this._formatErrorForLog(readError)}`
+                        );
+                        currentPools = this._buildPoolsSnapshotFromStatus();
+                        loadedFromFile = true;
+                        break;
+                    }
+
                     throw readError;
                 }
             }
 
+            if (!loadedFromFile) {
+                currentPools = this._buildPoolsSnapshotFromStatus();
+            }
+
+            const statusSnapshot = this._buildPoolsSnapshotFromStatus();
+
             // 更新所有待保存的 providerType
             for (const providerType of typesToSave) {
                 if (this.providerStatus[providerType]) {
-                    currentPools[providerType] = this.providerStatus[providerType].map(p => {
-                        // Convert Date objects to ISOString if they exist
-                        const config = { ...p.config };
-                        if (config.lastUsed instanceof Date) {
-                            config.lastUsed = config.lastUsed.toISOString();
-                        }
-                        if (config.lastErrorTime instanceof Date) {
-                            config.lastErrorTime = config.lastErrorTime.toISOString();
-                        }
-                        if (config.lastHealthCheckTime instanceof Date) {
-                            config.lastHealthCheckTime = config.lastHealthCheckTime.toISOString();
-                        }
-                        return config;
-                    });
+                    currentPools[providerType] = statusSnapshot[providerType] || [];
                 } else {
                     this._log('warn', `Attempted to save unknown providerType: ${providerType}`);
                 }
             }
             
-            // 一次性写入文件
-            await fs.promises.writeFile(filePath, JSON.stringify(currentPools, null, 2), 'utf8');
-            this._log('info', `configs/provider_pools.json updated successfully for types: ${typesToSave.join(', ')}`);
+            // 使用临时文件 + 原子替换，避免写入中断导致 JSON 半文件
+            const tempFilePath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+            await fs.promises.writeFile(tempFilePath, JSON.stringify(currentPools, null, 2), 'utf8');
+            await fs.promises.rename(tempFilePath, filePath);
+            const typeLogPreviewCount = 8;
+            const previewTypes = typesToSave.slice(0, typeLogPreviewCount).join(', ');
+            const omittedTypeCount = Math.max(0, typesToSave.length - typeLogPreviewCount);
+            const typeSummary = omittedTypeCount > 0
+                ? `${previewTypes} ...( +${omittedTypeCount} more )`
+                : previewTypes;
+            this._log('info', `configs/provider_pools.json updated successfully for types: ${typeSummary}`);
         } catch (error) {
-            this._log('error', `Failed to write provider_pools.json: ${error.message}`);
+            this._log('error', `Failed to write provider_pools.json: ${this._formatErrorForLog(error)}`);
         }
     }
 

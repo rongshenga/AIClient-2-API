@@ -1054,6 +1054,7 @@ export async function batchImportCodexTokensStream(tokens, options = {}, onProgr
         DEFAULT_CODEX_REFRESH_CONCURRENCY,
         MAX_CODEX_REFRESH_CONCURRENCY
     );
+    const includeDetails = options.includeDetails !== false;
 
     const targetDir = path.join(process.cwd(), 'configs', 'codex');
     await fs.promises.mkdir(targetDir, { recursive: true });
@@ -1061,11 +1062,10 @@ export async function batchImportCodexTokensStream(tokens, options = {}, onProgr
     const results = {
         total: tokens.length,
         success: 0,
-        failed: 0,
-        details: []
+        failed: 0
     };
 
-    const details = new Array(tokens.length);
+    const details = includeDetails ? new Array(tokens.length) : null;
     const importedCredPaths = [];
     let processedCount = 0;
 
@@ -1084,7 +1084,9 @@ export async function batchImportCodexTokensStream(tokens, options = {}, onProgr
         } else {
             results.failed++;
         }
-        details[index] = current;
+        if (includeDetails) {
+            details[index] = current;
+        }
 
         if (onProgress) {
             onProgress({
@@ -1257,7 +1259,9 @@ export async function batchImportCodexTokensStream(tokens, options = {}, onProgr
         }
     });
 
-    results.details = details;
+    if (includeDetails) {
+        results.details = details;
+    }
 
     if (importedCredPaths.length > 0) {
         await autoLinkProviderConfigs(CONFIG, { credPaths: importedCredPaths });

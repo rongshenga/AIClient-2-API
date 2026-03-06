@@ -17,6 +17,83 @@ let initialServerTime = null;
 let initialLoadTime = null;
 let isStaticProviderConfigsUpdated = false;
 let cachedSupportedProviders = null;
+const PROVIDERS_LIST_LOADING_DELAY_MS = 160;
+const PROVIDER_DETAILS_LOADING_DELAY_MS = 180;
+let providersSectionLoadingCount = 0;
+let providerDetailsGlobalLoadingCount = 0;
+let providerDetailsGlobalLoadingEl = null;
+
+/**
+ * 设置提供商池列表区域 loading 状态
+ * @param {boolean} isLoading - 是否显示 loading
+ * @returns {boolean} 是否成功更新了 loading 视图
+ */
+function setProvidersSectionLoading(isLoading) {
+    const loadingEl = document.getElementById('providersLoading');
+    const container = document.querySelector('#providers .providers-container');
+    if (!loadingEl || !container) {
+        return false;
+    }
+
+    loadingEl.classList.toggle('active', isLoading);
+    loadingEl.setAttribute('aria-hidden', isLoading ? 'false' : 'true');
+    container.setAttribute('aria-busy', isLoading ? 'true' : 'false');
+    return true;
+}
+
+/**
+ * 显示提供商详情加载遮罩
+ * @param {string} message - 加载文案
+ */
+function showProviderGlobalLoading(message = t('providers.loadingDetails')) {
+    providerDetailsGlobalLoadingCount += 1;
+
+    if (!providerDetailsGlobalLoadingEl) {
+        const overlay = document.createElement('div');
+        overlay.className = 'provider-global-loading-overlay';
+        overlay.setAttribute('role', 'status');
+        overlay.setAttribute('aria-live', 'polite');
+
+        const card = document.createElement('div');
+        card.className = 'provider-global-loading-card';
+
+        const icon = document.createElement('i');
+        icon.className = 'fas fa-spinner fa-spin';
+        icon.setAttribute('aria-hidden', 'true');
+
+        const text = document.createElement('span');
+        text.className = 'provider-global-loading-text';
+        text.textContent = message;
+
+        card.appendChild(icon);
+        card.appendChild(text);
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
+        providerDetailsGlobalLoadingEl = overlay;
+        return;
+    }
+
+    const textEl = providerDetailsGlobalLoadingEl.querySelector('.provider-global-loading-text');
+    if (textEl) {
+        textEl.textContent = message;
+    }
+}
+
+/**
+ * 隐藏提供商详情加载遮罩
+ */
+function hideProviderGlobalLoading() {
+    providerDetailsGlobalLoadingCount = Math.max(0, providerDetailsGlobalLoadingCount - 1);
+
+    if (providerDetailsGlobalLoadingCount > 0) {
+        return;
+    }
+
+    if (providerDetailsGlobalLoadingEl) {
+        providerDetailsGlobalLoadingEl.remove();
+        providerDetailsGlobalLoadingEl = null;
+    }
+}
 
 /**
  * 加载系统信息
@@ -177,7 +254,17 @@ function updateTimeDisplay() {
  * 加载提供商列表
  */
 async function loadProviders() {
+    let loadingTimer = null;
+    let hasDisplayedSectionLoading = false;
+
     try {
+        loadingTimer = window.setTimeout(() => {
+            if (setProvidersSectionLoading(true)) {
+                providersSectionLoadingCount += 1;
+                hasDisplayedSectionLoading = true;
+            }
+        }, PROVIDERS_LIST_LOADING_DELAY_MS);
+
         const providers = await window.apiClient.get('/providers');
 
         // 动态更新其他模块的提供商信息，只需更新一次
@@ -209,6 +296,17 @@ async function loadProviders() {
         renderProviders(providers, cachedSupportedProviders);
     } catch (error) {
         console.error('Failed to load providers:', error);
+    } finally {
+        if (loadingTimer) {
+            window.clearTimeout(loadingTimer);
+        }
+
+        if (hasDisplayedSectionLoading) {
+            providersSectionLoadingCount = Math.max(0, providersSectionLoadingCount - 1);
+            if (providersSectionLoadingCount === 0) {
+                setProvidersSectionLoading(false);
+            }
+        }
     }
 }
 
@@ -441,13 +539,29 @@ function updateProviderStatsDisplay(activeProviders, healthyProviders, totalAcco
  * @param {string} providerType - 提供商类型
  */
 async function openProviderManager(providerType) {
+    let loadingTimer = null;
+    let hasDisplayedGlobalLoading = false;
+
     try {
+        loadingTimer = window.setTimeout(() => {
+            showProviderGlobalLoading(t('providers.loadingDetails'));
+            hasDisplayedGlobalLoading = true;
+        }, PROVIDER_DETAILS_LOADING_DELAY_MS);
+
         const data = await window.apiClient.get(`/providers/${encodeURIComponent(providerType)}`);
         
         showProviderManagerModal(data);
     } catch (error) {
         console.error('Failed to load provider details:', error);
         showToast(t('common.error'), t('modal.provider.load.failed'), 'error');
+    } finally {
+        if (loadingTimer) {
+            window.clearTimeout(loadingTimer);
+        }
+
+        if (hasDisplayedGlobalLoading) {
+            hideProviderGlobalLoading();
+        }
     }
 }
 
@@ -827,6 +941,11 @@ function showCodexBatchImportModal(providerType = 'openai-codex-oauth') {
     let folderTokens = [];
     let selectedFiles = [];
     let submitActsAsClose = false;
+    const CODEX_PROGRESS_UPDATE_STEP = 20;
+    const CODEX_PROGRESS_UPDATE_INTERVAL_MS = 120;
+    const CODEX_MAX_RESULT_ROWS = 400;
+    const CODEX_LARGE_BATCH_THRESHOLD = 10000;
+    const CODEX_HUGE_BATCH_THRESHOLD = 50000;
 
     const escapeHtml = (value) => String(value || '')
         .replace(/&/g, '&amp;')
@@ -935,6 +1054,9 @@ function showCodexBatchImportModal(providerType = 'openai-codex-oauth') {
                     });
                 }
             }
+
+            // 大批量目录导入时让出主线程，避免浏览器长时间无响应
+            await new Promise(resolve => setTimeout(resolve, 0));
         }
 
         folderTokens = parsedTokens;
@@ -1047,7 +1169,7 @@ function showCodexBatchImportModal(providerType = 'openai-codex-oauth') {
 
         let tokens = [];
         try {
-            tokens = currentMode === 'folder' ? [...folderTokens] : parseTokensFromTextarea();
+            tokens = currentMode === 'folder' ? folderTokens : parseTokensFromTextarea();
         } catch (error) {
             showToast(t('common.error'), error.message, 'error');
             return;
@@ -1057,6 +1179,20 @@ function showCodexBatchImportModal(providerType = 'openai-codex-oauth') {
             showToast(t('common.warning'), t('oauth.codex.noCredentials'), 'warning');
             return;
         }
+
+        const isLargeBatch = tokens.length >= CODEX_LARGE_BATCH_THRESHOLD;
+        const isHugeBatch = tokens.length >= CODEX_HUGE_BATCH_THRESHOLD;
+        const requestedImportConcurrency = Number.parseInt(importConcurrencyInput.value, 10) || recommendedImportConcurrency;
+        const requestedRefreshConcurrency = Number.parseInt(refreshConcurrencyInput.value, 10) || recommendedRefreshConcurrency;
+        const effectiveImportConcurrency = isHugeBatch
+            ? Math.min(requestedImportConcurrency, 64)
+            : (isLargeBatch ? Math.min(requestedImportConcurrency, 96) : requestedImportConcurrency);
+        const effectiveRefreshConcurrency = isHugeBatch
+            ? Math.min(requestedRefreshConcurrency, 16)
+            : (isLargeBatch ? Math.min(requestedRefreshConcurrency, 24) : requestedRefreshConcurrency);
+        const progressEventInterval = isHugeBatch ? 300 : (isLargeBatch ? 150 : 25);
+        const progressEventMinIntervalMs = isHugeBatch ? 180 : (isLargeBatch ? 120 : 80);
+        const enableDetailedRows = !isLargeBatch;
 
         textarea.disabled = true;
         folderInput.disabled = true;
@@ -1080,14 +1216,64 @@ function showCodexBatchImportModal(providerType = 'openai-codex-oauth') {
                 <i class="fas fa-spinner fa-spin" style="color: #0284c7;"></i>
                 <strong id="codexBatchProgressText">${t('oauth.codex.importingProgress', { current: 0, total: tokens.length })}</strong>
             </div>
+            <div id="codexBatchResultsOverflow" style="display: none; margin-top: 6px; font-size: 11px; color: #6b7280;"></div>
             <div id="codexBatchResultsList" style="max-height: 220px; overflow-y: auto; font-size: 12px; margin-top: 8px;"></div>
         `;
 
         const progressText = resultDiv.querySelector('#codexBatchProgressText');
+        const overflowText = resultDiv.querySelector('#codexBatchResultsOverflow');
         const resultsList = resultDiv.querySelector('#codexBatchResultsList');
         let importSuccess = false;
+        let omittedResultCount = 0;
+        let lastProgressUiUpdateAt = 0;
+        let lastProgressUiProcessed = 0;
+
+        const updateOverflowText = () => {
+            if (!enableDetailedRows) return;
+            if (omittedResultCount <= 0) {
+                overflowText.style.display = 'none';
+                overflowText.textContent = '';
+                return;
+            }
+            overflowText.style.display = 'block';
+            overflowText.textContent = `Showing latest ${CODEX_MAX_RESULT_ROWS} entries, omitted ${omittedResultCount}.`;
+        };
+
+        if (!enableDetailedRows) {
+            overflowText.style.display = 'block';
+            overflowText.textContent = 'Large import mode enabled, per-item logs are disabled for UI responsiveness.';
+            resultsList.style.display = 'none';
+        }
+
+        const appendResultItem = (current) => {
+            if (!enableDetailedRows || !current) return;
+            const item = document.createElement('div');
+            item.style.cssText = 'padding: 4px 0; border-bottom: 1px solid rgba(0,0,0,0.08);';
+            if (current.success) {
+                const refreshInfo = current.refresh?.attempted
+                    ? (current.refresh.success ? ' (refresh ok)' : ` (refresh failed: ${current.refresh.message || 'unknown'})`)
+                    : (current.refresh?.skipped ? ' (refresh skipped)' : '');
+                item.innerHTML = `#${current.index}: <span style="color:#166534;">✓ ${escapeHtml(current.path || '')}</span>${refreshInfo}`;
+            } else if (current.error === 'duplicate') {
+                item.innerHTML = `#${current.index}: <span style="color:#b45309;">⚠ duplicate (${escapeHtml(current.reason || 'matched')})</span>
+                    ${current.existingPath ? `<span style="color:#6b7280;">(${escapeHtml(current.existingPath)})</span>` : ''}`;
+            } else {
+                item.innerHTML = `#${current.index}: <span style="color:#991b1b;">✗ ${escapeHtml(current.error || 'unknown error')}</span>`;
+            }
+            resultsList.appendChild(item);
+
+            while (resultsList.childElementCount > CODEX_MAX_RESULT_ROWS) {
+                resultsList.removeChild(resultsList.firstElementChild);
+                omittedResultCount++;
+            }
+            updateOverflowText();
+            resultsList.scrollTop = resultsList.scrollHeight;
+        };
 
         try {
+            // 先让浏览器渲染 loading 状态，再执行大对象序列化与网络请求
+            await new Promise(resolve => requestAnimationFrame(() => resolve()));
+
             const response = await fetch('/api/codex/batch-import-tokens', {
                 method: 'POST',
                 headers: window.apiClient ? window.apiClient.getAuthHeaders() : { 'Content-Type': 'application/json' },
@@ -1096,13 +1282,19 @@ function showCodexBatchImportModal(providerType = 'openai-codex-oauth') {
                     tokens,
                     skipDuplicateCheck: skipDuplicateCheckInput.checked,
                     refreshAfterImport: refreshAfterImportInput.checked,
-                    concurrency: Number.parseInt(importConcurrencyInput.value, 10) || recommendedImportConcurrency,
-                    refreshConcurrency: Number.parseInt(refreshConcurrencyInput.value, 10) || recommendedRefreshConcurrency
+                    concurrency: effectiveImportConcurrency,
+                    refreshConcurrency: effectiveRefreshConcurrency,
+                    progressEventInterval,
+                    progressEventMinIntervalMs,
+                    includeSuccessProgressDetail: enableDetailedRows
                 })
             });
 
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            if (!response.body) {
+                throw new Error('ReadableStream is not available in current browser');
             }
 
             const reader = response.body.getReader();
@@ -1131,28 +1323,34 @@ function showCodexBatchImportModal(providerType = 'openai-codex-oauth') {
                         if (eventType === 'progress') {
                             const processed = data.processedCount || data.index || 0;
                             const total = data.total || tokens.length;
-                            const percentage = total > 0 ? Math.round((processed / total) * 100) : 0;
-                            progressBar.style.width = `${percentage}%`;
-                            const label = t('oauth.codex.importingProgress', { current: processed, total });
-                            progressText.textContent = label;
-                            progressLabel.textContent = label;
+                            const now = Date.now();
+                            const shouldRefreshProgress =
+                                processed >= total
+                                || (processed - lastProgressUiProcessed) >= CODEX_PROGRESS_UPDATE_STEP
+                                || (now - lastProgressUiUpdateAt) >= CODEX_PROGRESS_UPDATE_INTERVAL_MS;
 
-                            const current = data.current || {};
-                            const item = document.createElement('div');
-                            item.style.cssText = 'padding: 4px 0; border-bottom: 1px solid rgba(0,0,0,0.08);';
-                            if (current.success) {
-                                const refreshInfo = current.refresh?.attempted
-                                    ? (current.refresh.success ? ' (refresh ok)' : ` (refresh failed: ${current.refresh.message || 'unknown'})`)
-                                    : (current.refresh?.skipped ? ' (refresh skipped)' : '');
-                                item.innerHTML = `#${current.index}: <span style="color:#166534;">✓ ${escapeHtml(current.path || '')}</span>${refreshInfo}`;
-                            } else if (current.error === 'duplicate') {
-                                item.innerHTML = `#${current.index}: <span style="color:#b45309;">⚠ duplicate (${escapeHtml(current.reason || 'matched')})</span>
-                                    ${current.existingPath ? `<span style="color:#6b7280;">(${escapeHtml(current.existingPath)})</span>` : ''}`;
-                            } else {
-                                item.innerHTML = `#${current.index}: <span style="color:#991b1b;">✗ ${escapeHtml(current.error || 'unknown error')}</span>`;
+                            if (shouldRefreshProgress) {
+                                const percentage = total > 0 ? Math.round((processed / total) * 100) : 0;
+                                progressBar.style.width = `${percentage}%`;
+                                const label = t('oauth.codex.importingProgress', { current: processed, total });
+                                progressText.textContent = label;
+                                progressLabel.textContent = label;
+                                lastProgressUiProcessed = processed;
+                                lastProgressUiUpdateAt = now;
                             }
-                            resultsList.appendChild(item);
-                            resultsList.scrollTop = resultsList.scrollHeight;
+
+                            if (enableDetailedRows) {
+                                const current = data.current || null;
+                                const shouldRenderResult =
+                                    (current && current.success === false)
+                                    || processed <= 50
+                                    || processed >= total
+                                    || (processed % CODEX_PROGRESS_UPDATE_STEP === 0);
+
+                                if (shouldRenderResult) {
+                                    appendResultItem(current);
+                                }
+                            }
                         } else if (eventType === 'complete') {
                             finished = true;
                             progressBar.style.width = '100%';

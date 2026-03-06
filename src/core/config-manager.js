@@ -82,6 +82,13 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
             LOGIN_EXPIRY: 3600, // 登录过期时间（秒），默认1小时
             PROVIDER_POOLS_FILE_PATH: null, // 新增号池配置文件路径
             MAX_ERROR_COUNT: 10, // 提供商最大错误次数
+            POOL_GROUP_SELECTION_ENABLED: true, // 大号池分组选点开关
+            POOL_GROUP_SIZE: 100, // 每组账号数量
+            POOL_GROUP_MIN_POOL_SIZE: 2000, // 触发分组选点的最小池大小
+            POOL_GROUP_UNHEALTHY_RATIO_THRESHOLD: 0.8, // 组内不健康比例阈值，超过则切组
+            POOL_GROUP_MIN_HEALTHY: 1, // 组内最少健康节点数
+            POOL_GROUP_ROTATE_ON_SELECT: true, // 命中后是否轮转到下一组
+            PERSIST_SELECTION_STATE: false, // 是否持久化每次选点状态（大池建议关闭）
             providerFallbackChain: {}, // 跨类型 Fallback 链配置
             LOG_ENABLED: true,
             LOG_OUTPUT_MODE: "all",
@@ -233,4 +240,3 @@ export async function getSystemPromptFileContent(filePath) {
 }
 
 export { ALL_MODEL_PROVIDERS };
-

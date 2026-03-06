@@ -407,10 +407,25 @@ export async function initApiService(config, isReady = false) {
     }
 
     // Initialize all provider pool nodes at startup
-    // 初始化号池中所有提供商的所有节点，以避免首个请求的额外延迟
+    // 初始化号池节点（启动期限流预加载），避免超大号池阻塞服务监听
     if (config.providerPools && Object.keys(config.providerPools).length > 0) {
+        const parsedPerProviderLimit = Number.parseInt(config.STARTUP_PRELOAD_MAX_PER_PROVIDER, 10);
+        const parsedTotalLimit = Number.parseInt(config.STARTUP_PRELOAD_MAX_TOTAL, 10);
+        const startupPreloadMaxPerProvider = Number.isFinite(parsedPerProviderLimit)
+            ? Math.max(0, parsedPerProviderLimit)
+            : 20;
+        const startupPreloadMaxTotal = Number.isFinite(parsedTotalLimit)
+            ? Math.max(0, parsedTotalLimit)
+            : 200;
+
+        logger.info(
+            `[Initialization] Startup preload limits: perProvider=${startupPreloadMaxPerProvider}, total=${startupPreloadMaxTotal}`
+        );
+
         let totalInitialized = 0;
         let totalFailed = 0;
+        let totalSkippedByLimit = 0;
+        let remainingTotalBudget = startupPreloadMaxTotal;
         
         for (const [providerType, providerConfigs] of Object.entries(config.providerPools)) {
             // 验证提供商类型是否在 DEFAULT_MODEL_PROVIDERS 中
@@ -424,21 +439,22 @@ export async function initApiService(config, isReady = false) {
             if (!Array.isArray(providerConfigs) || providerConfigs.length === 0) {
                 continue;
             }
-            
-            logger.info(`[Initialization] Initializing ${providerConfigs.length} node(s) for provider '${providerType}'...`);
+
+            const enabledProviderConfigs = providerConfigs.filter(cfg => !cfg.isDisabled);
+            const providerBudget = Math.max(0, Math.min(startupPreloadMaxPerProvider, remainingTotalBudget));
+            const preloadConfigs = enabledProviderConfigs.slice(0, providerBudget);
+            const providerSkippedByLimit = Math.max(0, enabledProviderConfigs.length - preloadConfigs.length);
+
+            logger.info(
+                `[Initialization] Initializing ${preloadConfigs.length}/${enabledProviderConfigs.length} node(s) for provider '${providerType}'...`
+            );
             let providerSucceeded = 0;
             let providerFailed = 0;
             let providerSkippedDisabled = 0;
             const failedNodeSamples = [];
             
             // 初始化该提供商类型的所有节点
-            for (const providerConfig of providerConfigs) {
-                // 跳过已禁用的节点
-                if (providerConfig.isDisabled) {
-                    providerSkippedDisabled++;
-                    continue;
-                }
-                
+            for (const providerConfig of preloadConfigs) {
                 try {
                     // 合并全局配置和节点配置
                     const nodeConfig = deepmerge(config, {
@@ -465,9 +481,14 @@ export async function initApiService(config, isReady = false) {
                 }
             }
 
+            providerSkippedDisabled = providerConfigs.length - enabledProviderConfigs.length;
+            totalSkippedByLimit += providerSkippedByLimit;
+            remainingTotalBudget = Math.max(0, remainingTotalBudget - preloadConfigs.length);
+
             logger.info(
                 `[Initialization] Provider '${providerType}' initialization summary: total=${providerConfigs.length}, ` +
-                `disabledSkipped=${providerSkippedDisabled}, succeeded=${providerSucceeded}, failed=${providerFailed}`
+                `disabledSkipped=${providerSkippedDisabled}, preloadSkipped=${providerSkippedByLimit}, ` +
+                `succeeded=${providerSucceeded}, failed=${providerFailed}`
             );
             if (providerFailed > 0) {
                 const sampleText = failedNodeSamples.join(', ');
@@ -476,9 +497,21 @@ export async function initApiService(config, isReady = false) {
                     `Sample: ${sampleText || 'none'}`
                 );
             }
+
+            if (remainingTotalBudget <= 0) {
+                logger.warn(
+                    '[Initialization] Startup preload total budget exhausted; remaining nodes will initialize lazily on first use.'
+                );
+                break;
+            }
         }
         
         logger.info(`[Initialization] Provider pool initialization complete: ${totalInitialized} succeeded, ${totalFailed} failed.`);
+        if (totalSkippedByLimit > 0) {
+            logger.warn(
+                `[Initialization] Startup skipped ${totalSkippedByLimit} node(s) due to preload limits; those nodes will initialize lazily.`
+            );
+        }
     } else {
         logger.info('[Initialization] No provider pools configured. Skipping node initialization.');
     }

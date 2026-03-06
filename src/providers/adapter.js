@@ -107,7 +107,7 @@ export class GeminiApiServiceAdapter extends ApiServiceAdapter {
 
     async generateContent(model, requestBody) {
         if (!this.geminiApiService.isInitialized) {
-            logger.warn("geminiApiService not initialized, attempting to re-initialize...");
+            logger.debug("geminiApiService not initialized, attempting to re-initialize...");
             await this.geminiApiService.initialize();
         }
         return this.geminiApiService.generateContent(model, requestBody);
@@ -115,7 +115,7 @@ export class GeminiApiServiceAdapter extends ApiServiceAdapter {
 
     async *generateContentStream(model, requestBody) {
         if (!this.geminiApiService.isInitialized) {
-            logger.warn("geminiApiService not initialized, attempting to re-initialize...");
+            logger.debug("geminiApiService not initialized, attempting to re-initialize...");
             await this.geminiApiService.initialize();
         }
         yield* this.geminiApiService.generateContentStream(model, requestBody);
@@ -123,7 +123,7 @@ export class GeminiApiServiceAdapter extends ApiServiceAdapter {
 
     async listModels() {
         if (!this.geminiApiService.isInitialized) {
-            logger.warn("geminiApiService not initialized, attempting to re-initialize...");
+            logger.debug("geminiApiService not initialized, attempting to re-initialize...");
             await this.geminiApiService.initialize();
         }
         // Gemini Core API 的 listModels 已经返回符合 Gemini 格式的数据，所以不需要额外转换
@@ -159,7 +159,7 @@ export class GeminiApiServiceAdapter extends ApiServiceAdapter {
      */
     async getUsageLimits() {
         if (!this.geminiApiService.isInitialized) {
-            logger.warn("geminiApiService not initialized, attempting to re-initialize...");
+            logger.debug("geminiApiService not initialized, attempting to re-initialize...");
             await this.geminiApiService.initialize();
         }
         return this.geminiApiService.getUsageLimits();
@@ -175,7 +175,7 @@ export class AntigravityApiServiceAdapter extends ApiServiceAdapter {
 
     async generateContent(model, requestBody) {
         if (!this.antigravityApiService.isInitialized) {
-            logger.warn("antigravityApiService not initialized, attempting to re-initialize...");
+            logger.debug("antigravityApiService not initialized, attempting to re-initialize...");
             await this.antigravityApiService.initialize();
         }
         return this.antigravityApiService.generateContent(model, requestBody);
@@ -183,7 +183,7 @@ export class AntigravityApiServiceAdapter extends ApiServiceAdapter {
 
     async *generateContentStream(model, requestBody) {
         if (!this.antigravityApiService.isInitialized) {
-            logger.warn("antigravityApiService not initialized, attempting to re-initialize...");
+            logger.debug("antigravityApiService not initialized, attempting to re-initialize...");
             await this.antigravityApiService.initialize();
         }
         yield* this.antigravityApiService.generateContentStream(model, requestBody);
@@ -191,7 +191,7 @@ export class AntigravityApiServiceAdapter extends ApiServiceAdapter {
 
     async listModels() {
         if (!this.antigravityApiService.isInitialized) {
-            logger.warn("antigravityApiService not initialized, attempting to re-initialize...");
+            logger.debug("antigravityApiService not initialized, attempting to re-initialize...");
             await this.antigravityApiService.initialize();
         }
         return this.antigravityApiService.listModels();
@@ -226,7 +226,7 @@ export class AntigravityApiServiceAdapter extends ApiServiceAdapter {
      */
     async getUsageLimits() {
         if (!this.antigravityApiService.isInitialized) {
-            logger.warn("antigravityApiService not initialized, attempting to re-initialize...");
+            logger.debug("antigravityApiService not initialized, attempting to re-initialize...");
             await this.antigravityApiService.initialize();
         }
         return this.antigravityApiService.getUsageLimits();
@@ -360,7 +360,7 @@ export class KiroApiServiceAdapter extends ApiServiceAdapter {
     async generateContent(model, requestBody) {
         // The adapter expects the requestBody to be in OpenAI format for Kiro API
         if (!this.kiroApiService.isInitialized) {
-            logger.warn("kiroApiService not initialized, attempting to re-initialize...");
+            logger.debug("kiroApiService not initialized, attempting to re-initialize...");
             await this.kiroApiService.initialize();
         }
         return this.kiroApiService.generateContent(model, requestBody);
@@ -369,7 +369,7 @@ export class KiroApiServiceAdapter extends ApiServiceAdapter {
     async *generateContentStream(model, requestBody) {
         // The adapter expects the requestBody to be in OpenAI format for Kiro API
         if (!this.kiroApiService.isInitialized) {
-            logger.warn("kiroApiService not initialized, attempting to re-initialize...");
+            logger.debug("kiroApiService not initialized, attempting to re-initialize...");
             await this.kiroApiService.initialize();
         }
         const stream = this.kiroApiService.generateContentStream(model, requestBody);
@@ -379,7 +379,7 @@ export class KiroApiServiceAdapter extends ApiServiceAdapter {
     async listModels() {
         // Returns the native model list from the Kiro service
         if (!this.kiroApiService.isInitialized) {
-            logger.warn("kiroApiService not initialized, attempting to re-initialize...");
+            logger.debug("kiroApiService not initialized, attempting to re-initialize...");
             await this.kiroApiService.initialize();
         }
         return this.kiroApiService.listModels();
@@ -414,7 +414,7 @@ export class KiroApiServiceAdapter extends ApiServiceAdapter {
      */
     async getUsageLimits() {
         if (!this.kiroApiService.isInitialized) {
-            logger.warn("kiroApiService not initialized, attempting to re-initialize...");
+            logger.debug("kiroApiService not initialized, attempting to re-initialize...");
             await this.kiroApiService.initialize();
         }
         return this.kiroApiService.getUsageLimits();
@@ -439,7 +439,7 @@ export class QwenApiServiceAdapter extends ApiServiceAdapter {
 
     async generateContent(model, requestBody) {
         if (!this.qwenApiService.isInitialized) {
-            logger.warn("qwenApiService not initialized, attempting to re-initialize...");
+            logger.debug("qwenApiService not initialized, attempting to re-initialize...");
             await this.qwenApiService.initialize();
         }
         return this.qwenApiService.generateContent(model, requestBody);
@@ -447,7 +447,7 @@ export class QwenApiServiceAdapter extends ApiServiceAdapter {
 
     async *generateContentStream(model, requestBody) {
         if (!this.qwenApiService.isInitialized) {
-            logger.warn("qwenApiService not initialized, attempting to re-initialize...");
+            logger.debug("qwenApiService not initialized, attempting to re-initialize...");
             await this.qwenApiService.initialize();
         }
         yield* this.qwenApiService.generateContentStream(model, requestBody);
@@ -455,7 +455,7 @@ export class QwenApiServiceAdapter extends ApiServiceAdapter {
 
     async listModels() {
         if (!this.qwenApiService.isInitialized) {
-            logger.warn("qwenApiService not initialized, attempting to re-initialize...");
+            logger.debug("qwenApiService not initialized, attempting to re-initialize...");
             await this.qwenApiService.initialize();
         }
         return this.qwenApiService.listModels();
@@ -494,7 +494,7 @@ export class IFlowApiServiceAdapter extends ApiServiceAdapter {
 
     async generateContent(model, requestBody) {
         if (!this.iflowApiService.isInitialized) {
-            logger.warn("iflowApiService not initialized, attempting to re-initialize...");
+            logger.debug("iflowApiService not initialized, attempting to re-initialize...");
             await this.iflowApiService.initialize();
         }
         return this.iflowApiService.generateContent(model, requestBody);
@@ -502,7 +502,7 @@ export class IFlowApiServiceAdapter extends ApiServiceAdapter {
 
     async *generateContentStream(model, requestBody) {
         if (!this.iflowApiService.isInitialized) {
-            logger.warn("iflowApiService not initialized, attempting to re-initialize...");
+            logger.debug("iflowApiService not initialized, attempting to re-initialize...");
             await this.iflowApiService.initialize();
         }
         yield* this.iflowApiService.generateContentStream(model, requestBody);
@@ -510,7 +510,7 @@ export class IFlowApiServiceAdapter extends ApiServiceAdapter {
 
     async listModels() {
         if (!this.iflowApiService.isInitialized) {
-            logger.warn("iflowApiService not initialized, attempting to re-initialize...");
+            logger.debug("iflowApiService not initialized, attempting to re-initialize...");
             await this.iflowApiService.initialize();
         }
         return this.iflowApiService.listModels();
@@ -550,7 +550,7 @@ export class CodexApiServiceAdapter extends ApiServiceAdapter {
 
     async generateContent(model, requestBody) {
         if (!this.codexApiService.isInitialized) {
-            logger.warn("codexApiService not initialized, attempting to re-initialize...");
+            logger.debug("codexApiService not initialized, attempting to re-initialize...");
             await this.codexApiService.initialize();
         }
         return this.codexApiService.generateContent(model, requestBody);
@@ -558,7 +558,7 @@ export class CodexApiServiceAdapter extends ApiServiceAdapter {
 
     async *generateContentStream(model, requestBody) {
         if (!this.codexApiService.isInitialized) {
-            logger.warn("codexApiService not initialized, attempting to re-initialize...");
+            logger.debug("codexApiService not initialized, attempting to re-initialize...");
             await this.codexApiService.initialize();
         }
         yield* this.codexApiService.generateContentStream(model, requestBody);
@@ -597,7 +597,7 @@ export class CodexApiServiceAdapter extends ApiServiceAdapter {
      */
     async getUsageLimits() {
         if (!this.codexApiService.isInitialized) {
-            logger.warn("codexApiService not initialized, attempting to re-initialize...");
+            logger.debug("codexApiService not initialized, attempting to re-initialize...");
             await this.codexApiService.initialize();
         }
         return this.codexApiService.getUsageLimits();

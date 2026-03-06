@@ -467,6 +467,8 @@ const translations = {
         'providers.stat.errorCount': '错误次数',
         'providers.auth.generate': '生成授权',
         'providers.auth.importToken': '导入 Token',
+        'providers.loadingList': '正在加载提供商池...',
+        'providers.loadingDetails': '正在加载提供商详情...',
 
         // Modal Provider Manager
         'modal.provider.manage': '管理 {type} 提供商配置',
@@ -625,6 +627,12 @@ const translations = {
         'usage.refreshProviderConfirm': '确定刷新 {name} 的用量数据吗？',
         'usage.refreshProviderInProgress': '该提供商正在刷新中，请稍候',
         'usage.refreshingProvider': '正在刷新 {name} 用量...',
+        'usage.taskStarted': '已启动后台刷新任务',
+        'usage.taskPreparing': '正在准备刷新任务...',
+        'usage.taskProgress': '正在刷新 {provider}：{processed}/{total}（{percent}%）',
+        'usage.taskCompleted': '后台刷新完成',
+        'usage.taskFailed': '后台刷新失败',
+        'usage.allProviders': '全部提供商',
         'usage.group.expandAll': '展开所有卡片',
         'usage.group.collapseAll': '折叠所有卡片',
         'usage.failedToLoad': '加载失败',
@@ -1331,6 +1339,8 @@ const translations = {
         'providers.stat.errorCount': 'Error Count',
         'providers.auth.generate': 'Gen Auth',
         'providers.auth.importToken': 'Import Token',
+        'providers.loadingList': 'Loading provider pools...',
+        'providers.loadingDetails': 'Loading provider details...',
 
         // Modal Provider Manager
         'modal.provider.manage': 'Manage {type} Provider Config',
@@ -1489,6 +1499,12 @@ const translations = {
         'usage.refreshProviderConfirm': 'Refresh usage data for {name}?',
         'usage.refreshProviderInProgress': 'This provider is already refreshing, please wait',
         'usage.refreshingProvider': 'Refreshing {name} usage...',
+        'usage.taskStarted': 'Background refresh task started',
+        'usage.taskPreparing': 'Preparing refresh task...',
+        'usage.taskProgress': 'Refreshing {provider}: {processed}/{total} ({percent}%)',
+        'usage.taskCompleted': 'Background refresh completed',
+        'usage.taskFailed': 'Background refresh failed',
+        'usage.allProviders': 'All Providers',
         'usage.group.expandAll': 'Expand All Cards',
         'usage.group.collapseAll': 'Collapse All Cards',
         'usage.failedToLoad': 'Failed to load',

@@ -285,6 +285,13 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
         return await usageApi.handleGetSupportedProviders(req, res);
     }
 
+    // Get usage refresh task status
+    const usageTaskMatch = pathParam.match(/^\/api\/usage\/tasks\/([^\/]+)$/);
+    if (method === 'GET' && usageTaskMatch) {
+        const taskId = decodeURIComponent(usageTaskMatch[1]);
+        return await usageApi.handleGetUsageRefreshTask(req, res, taskId);
+    }
+
     // Get usage limits for a specific provider type
     const usageProviderMatch = pathParam.match(/^\/api\/usage\/([^\/]+)$/);
     if (method === 'GET' && usageProviderMatch) {
