@@ -27,7 +27,7 @@ function translate(key, params = {}) {
         'modal.provider.refreshUuid.failed': 'Refresh UUID failed',
         'modal.provider.refreshUuid.success': `Refreshed ${params.oldUuid || ''} -> ${params.newUuid || ''}`,
         'modal.provider.refreshUuidConfirm': `Refresh ${params.oldUuid || ''}?`,
-        'modal.provider.lastError': 'Last Error',
+        'modal.provider.lastError': '最近错误',
         'modal.provider.healthCheckLabel': 'Health',
         'modal.provider.usageCount': 'Usage',
         'modal.provider.errorCount': 'Errors',
@@ -35,8 +35,8 @@ function translate(key, params = {}) {
         'modal.provider.lastCheck': 'Last Check',
         'modal.provider.checkModel': 'Check Model',
         'upload.detail.status': 'Status',
-        'common.success': 'Success',
-        'common.error': 'Error'
+        'common.success': '成功',
+        'common.error': '错误'
     };
     return map[key] || key;
 }
@@ -187,13 +187,13 @@ describe('Runtime storage dashboard diagnostics UI', () => {
             hasAdminAccess: false
         });
 
-        expect(viewModel.storageModeLabel).toBe('Dual-write');
-        expect(viewModel.sourceOfTruthLabel).toBe('Database');
+        expect(viewModel.storageModeLabel).toBe('双写');
+        expect(viewModel.sourceOfTruthLabel).toBe('数据库');
         expect(viewModel.providerTypeCount).toBe(3);
         expect(viewModel.providerCount).toBe(9);
         expect(viewModel.readOnly).toBe(true);
         expect(viewModel.actions.reload.disabled).toBe(true);
-        expect(viewModel.alert.message).toContain('Fallback applied');
+        expect(viewModel.alert.message).toContain('已通过');
         expect(viewModel.diagnostics.validation).toContain('run-42');
     });
 
@@ -229,9 +229,9 @@ describe('Runtime storage dashboard diagnostics UI', () => {
 
         renderRuntimeStorageDiagnostics(viewModel, container);
 
-        expect(container.elements['#runtimeStorageMode'].textContent).toBe('Loading…');
-        expect(container.elements['#runtimeStorageSource'].textContent).toBe('Database');
-        expect(container.elements['#runtimeStorageProviderSummary'].textContent).toBe('1 types / 2 providers');
+        expect(container.elements['#runtimeStorageMode'].textContent).toBe('加载中…');
+        expect(container.elements['#runtimeStorageSource'].textContent).toBe('数据库');
+        expect(container.elements['#runtimeStorageProviderSummary'].textContent).toBe('1 种类型 / 2 个提供商');
         expect(container.elements['#runtimeStorageValidation'].textContent).toContain('run-100');
         expect(container.elements['#runtimeStorageError'].textContent).toBe('database is locked');
         expect(container.elements['#runtimeStorageReloadBtn'].disabled).toBe(true);
@@ -286,7 +286,7 @@ describe('Runtime storage dashboard diagnostics UI', () => {
         expect(refreshProvidersFn).toHaveBeenCalledTimes(2);
         expect(refreshSystemInfoFn).toHaveBeenCalledTimes(3);
         expect(loadingStates).toEqual([true, false, true, false, true, false]);
-        expect(mockShowToast).toHaveBeenCalledWith('Success', 'Runtime storage rollback completed (run-88)', 'success');
+        expect(mockShowToast).toHaveBeenCalledWith('成功', '运行时存储回滚已完成（run-88）', 'success');
     });
 
     test('should skip rollback when runId prompt is empty or confirmation is rejected', async () => {
@@ -343,7 +343,7 @@ describe('Provider modal runtime storage interactions', () => {
         expect(apiClient.post).toHaveBeenCalledWith('/providers/grok-custom/old-uuid/refresh-uuid', {});
         expect(reloadConfigFn).toHaveBeenCalledTimes(1);
         expect(refreshProviderConfigFn).toHaveBeenCalledWith('grok-custom');
-        expect(mockShowToast).toHaveBeenCalledWith('Success', 'Refreshed old-uuid -> new-uuid', 'success');
+        expect(mockShowToast).toHaveBeenCalledWith('成功', 'Refreshed old-uuid -> new-uuid', 'success');
     });
 
     test('should skip or surface error toast when refresh uuid is not confirmed or fails', async () => {
@@ -373,7 +373,7 @@ describe('Provider modal runtime storage interactions', () => {
             translate
         });
 
-        expect(mockShowToast).toHaveBeenCalledWith('Error', 'Refresh UUID failed', 'error');
+        expect(mockShowToast).toHaveBeenCalledWith('错误', 'Refresh UUID failed', 'error');
     });
 
     test('should render pagination and paginated provider list without undefined fields', async () => {

@@ -52,19 +52,19 @@ function setProvidersSectionLoading(isLoading) {
  */
 function getRuntimeStorageModeLabel(mode) {
     if (mode === 'dual-write') {
-        return 'Dual-write';
+        return '双写';
     }
     if (mode === 'db') {
-        return 'DB';
+        return '数据库';
     }
     if (mode === 'file') {
-        return 'File';
+        return '文件';
     }
-    return 'Unavailable';
+    return '不可用';
 }
 
 function getRuntimeStorageSourceLabel(source) {
-    return source === 'database' ? 'Database' : 'File';
+    return source === 'database' ? '数据库' : '文件';
 }
 
 function formatRuntimeStorageDiagnostic(entry, fallback = '--') {
@@ -72,7 +72,15 @@ function formatRuntimeStorageDiagnostic(entry, fallback = '--') {
         return fallback;
     }
 
-    const status = entry.overallStatus || entry.status || 'unknown';
+    const rawStatus = entry.overallStatus || entry.status || 'unknown';
+    const statusMap = {
+        applied: '已应用',
+        fail: '失败',
+        pass: '通过',
+        warning: '警告',
+        unknown: '未知'
+    };
+    const status = statusMap[rawStatus] || rawStatus;
     if (entry.runId) {
         return `${status} · ${entry.runId}`;
     }
@@ -107,22 +115,22 @@ export function buildRuntimeStorageDiagnosticsViewModel(systemInfo = {}, options
     if (error) {
         alert = {
             type: 'error',
-            message: `Failed to load runtime storage diagnostics: ${error.message}`
+            message: `加载运行时存储诊断信息失败：${error.message}`
         };
     } else if (lastError?.error?.message) {
         alert = {
             type: 'error',
-            message: `Last runtime storage error: ${lastError.error.message}`
+            message: `最近一次运行时存储错误：${lastError.error.message}`
         };
     } else if (lastFallback?.status === 'applied') {
         alert = {
             type: 'warning',
-            message: `Fallback applied via ${lastFallback.triggeredBy || 'runtime storage'} (${lastFallback.toBackend || 'file'})`
+            message: `已通过 ${lastFallback.triggeredBy || 'runtime storage'} 回退到 ${getRuntimeStorageModeLabel(lastFallback.toBackend || 'file')}`
         };
     } else if (lastValidation && (lastValidation.overallStatus || lastValidation.status) && (lastValidation.overallStatus || lastValidation.status) !== 'pass') {
         alert = {
             type: 'warning',
-            message: `Validation status: ${lastValidation.overallStatus || lastValidation.status}`
+            message: `校验状态：${formatRuntimeStorageDiagnostic(lastValidation, '未知')}`
         };
     }
 
@@ -182,36 +190,36 @@ function ensureRuntimeStorageDiagnosticsPanel() {
     panel.className = 'system-info-panel';
     panel.innerHTML = `
         <div class="system-info-header">
-            <h3>Runtime Storage</h3>
+            <h3>运行时存储</h3>
             <div class="update-controls">
-                <button id="runtimeStorageReloadBtn" class="btn btn-outline btn-sm" type="button">Reload</button>
-                <button id="runtimeStorageExportBtn" class="btn btn-outline btn-sm" type="button">Export</button>
-                <button id="runtimeStorageRollbackBtn" class="btn btn-primary btn-sm" type="button">Rollback</button>
+                <button id="runtimeStorageReloadBtn" class="btn btn-outline btn-sm" type="button">重载</button>
+                <button id="runtimeStorageExportBtn" class="btn btn-outline btn-sm" type="button">导出</button>
+                <button id="runtimeStorageRollbackBtn" class="btn btn-primary btn-sm" type="button">回滚</button>
             </div>
         </div>
         <div class="info-grid">
             <div class="info-item">
-                <span class="info-label"><i class="fas fa-database"></i> <span>Storage Mode</span></span>
+                <span class="info-label"><i class="fas fa-database"></i> <span>存储模式</span></span>
                 <div class="version-display-wrapper"><span class="info-value" id="runtimeStorageMode">--</span></div>
             </div>
             <div class="info-item">
-                <span class="info-label"><i class="fas fa-route"></i> <span>Source of Truth</span></span>
+                <span class="info-label"><i class="fas fa-route"></i> <span>权威来源</span></span>
                 <div class="version-display-wrapper"><span class="info-value" id="runtimeStorageSource">--</span></div>
             </div>
             <div class="info-item">
-                <span class="info-label"><i class="fas fa-layer-group"></i> <span>Compat Snapshot</span></span>
+                <span class="info-label"><i class="fas fa-layer-group"></i> <span>兼容快照</span></span>
                 <div class="version-display-wrapper"><span class="info-value" id="runtimeStorageProviderSummary">--</span></div>
             </div>
             <div class="info-item">
-                <span class="info-label"><i class="fas fa-check-double"></i> <span>Last Validation</span></span>
+                <span class="info-label"><i class="fas fa-check-double"></i> <span>最近校验</span></span>
                 <div class="version-display-wrapper"><span class="info-value" id="runtimeStorageValidation">--</span></div>
             </div>
             <div class="info-item">
-                <span class="info-label"><i class="fas fa-arrow-rotate-left"></i> <span>Last Fallback</span></span>
+                <span class="info-label"><i class="fas fa-arrow-rotate-left"></i> <span>最近回退</span></span>
                 <div class="version-display-wrapper"><span class="info-value" id="runtimeStorageFallback">--</span></div>
             </div>
             <div class="info-item">
-                <span class="info-label"><i class="fas fa-triangle-exclamation"></i> <span>Last Error</span></span>
+                <span class="info-label"><i class="fas fa-triangle-exclamation"></i> <span>最近错误</span></span>
                 <div class="version-display-wrapper"><span class="info-value" id="runtimeStorageError">--</span></div>
             </div>
         </div>
@@ -237,9 +245,9 @@ export function renderRuntimeStorageDiagnostics(viewModel, container = ensureRun
     const exportBtn = container.querySelector('#runtimeStorageExportBtn');
     const rollbackBtn = container.querySelector('#runtimeStorageRollbackBtn');
 
-    if (modeEl) modeEl.textContent = viewModel.isLoading ? 'Loading…' : viewModel.storageModeLabel;
+    if (modeEl) modeEl.textContent = viewModel.isLoading ? '加载中…' : viewModel.storageModeLabel;
     if (sourceEl) sourceEl.textContent = viewModel.sourceOfTruthLabel;
-    if (providerSummaryEl) providerSummaryEl.textContent = `${viewModel.providerTypeCount} types / ${viewModel.providerCount} providers`;
+    if (providerSummaryEl) providerSummaryEl.textContent = `${viewModel.providerTypeCount} 种类型 / ${viewModel.providerCount} 个提供商`;
     if (validationEl) validationEl.textContent = viewModel.diagnostics.validation;
     if (fallbackEl) fallbackEl.textContent = viewModel.diagnostics.fallback;
     if (errorEl) errorEl.textContent = viewModel.diagnostics.lastErrorMessage;
@@ -317,7 +325,7 @@ export async function executeRuntimeStorageRollbackAction({
     apiClient = window.apiClient,
     runId = '',
     setLoading = () => {},
-    promptRunIdFn = (defaultRunId = '') => window.prompt('Enter migration runId to rollback', defaultRunId),
+    promptRunIdFn = (defaultRunId = '') => window.prompt('请输入要回滚的迁移 runId', defaultRunId),
     confirmFn = (message) => window.confirm(message),
     notify = showToast,
     refreshConfigListFn = loadConfigList,
@@ -332,7 +340,7 @@ export async function executeRuntimeStorageRollbackAction({
         return { skipped: true };
     }
 
-    if (!confirmFn(`Rollback runtime storage using run ${promptedRunId}?`)) {
+    if (!confirmFn(`确定使用运行记录 ${promptedRunId} 执行运行时存储回滚吗？`)) {
         return {
             skipped: true,
             runId: promptedRunId
@@ -344,7 +352,7 @@ export async function executeRuntimeStorageRollbackAction({
         const result = await apiClient.post('/runtime-storage/rollback', {
             runId: promptedRunId
         });
-        notify('Success', `Runtime storage rollback completed (${promptedRunId})`, 'success');
+        notify('成功', `运行时存储回滚已完成（${promptedRunId}）`, 'success');
         if (typeof refreshConfigListFn === 'function') {
             await refreshConfigListFn();
         }
@@ -356,7 +364,7 @@ export async function executeRuntimeStorageRollbackAction({
         }
         return result;
     } catch (error) {
-        notify('Error', `Runtime storage rollback failed: ${error.message}`, 'error');
+        notify('错误', `运行时存储回滚失败：${error.message}`, 'error');
         throw error;
     } finally {
         setLoading(false);

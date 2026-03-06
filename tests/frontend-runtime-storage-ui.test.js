@@ -466,16 +466,16 @@ describe('frontend runtime storage diagnostics panel', () => {
         });
 
         expect(viewModel.storageMode).toBe('dual-write');
-        expect(viewModel.storageModeLabel).toBe('Dual-write');
-        expect(viewModel.sourceOfTruthLabel).toBe('Database');
+        expect(viewModel.storageModeLabel).toBe('双写');
+        expect(viewModel.sourceOfTruthLabel).toBe('数据库');
         expect(viewModel.readOnly).toBe(true);
         expect(viewModel.alert).toMatchObject({
             type: 'warning',
-            message: 'Fallback applied via replaceProviderPoolsSnapshot (file)'
+            message: '已通过 replaceProviderPoolsSnapshot 回退到 文件'
         });
         expect(viewModel.diagnostics).toMatchObject({
             validation: '--',
-            fallback: 'applied · replaceProviderPoolsSnapshot',
+            fallback: '已应用 · replaceProviderPoolsSnapshot',
             dualWriteEnabled: true,
             lastErrorMessage: '--'
         });
@@ -488,7 +488,7 @@ describe('frontend runtime storage diagnostics panel', () => {
         });
         expect(errorViewModel.alert).toMatchObject({
             type: 'error',
-            message: 'Failed to load runtime storage diagnostics: boom'
+            message: '加载运行时存储诊断信息失败：boom'
         });
     });
 
@@ -519,13 +519,13 @@ describe('frontend runtime storage diagnostics panel', () => {
 
         providerManagerModule.renderRuntimeStorageDiagnostics(viewModel, container);
 
-        expect(nodes['#runtimeStorageMode'].textContent).toBe('Loading…');
-        expect(nodes['#runtimeStorageSource'].textContent).toBe('Database');
-        expect(nodes['#runtimeStorageProviderSummary'].textContent).toBe('3 types / 8 providers');
-        expect(nodes['#runtimeStorageValidation'].textContent).toBe('fail · run-1');
+        expect(nodes['#runtimeStorageMode'].textContent).toBe('加载中…');
+        expect(nodes['#runtimeStorageSource'].textContent).toBe('数据库');
+        expect(nodes['#runtimeStorageProviderSummary'].textContent).toBe('3 种类型 / 8 个提供商');
+        expect(nodes['#runtimeStorageValidation'].textContent).toBe('失败 · run-1');
         expect(nodes['#runtimeStorageError'].textContent).toBe('database is locked');
         expect(nodes['#runtimeStorageAlert'].hidden).toBe(false);
-        expect(nodes['#runtimeStorageAlert'].textContent).toBe('Last runtime storage error: database is locked');
+        expect(nodes['#runtimeStorageAlert'].textContent).toBe('最近一次运行时存储错误：database is locked');
         expect(nodes['#runtimeStorageAlert'].dataset.level).toBe('error');
         expect(nodes['#runtimeStorageReloadBtn'].disabled).toBe(true);
         expect(nodes['#runtimeStorageReloadBtn']['aria-disabled']).toBe('true');
@@ -574,7 +574,7 @@ describe('frontend runtime storage diagnostics panel', () => {
         expect(apiClient.post).toHaveBeenCalledWith('/runtime-storage/rollback', {
             runId: 'run-42'
         });
-        expect(showToast).toHaveBeenCalledWith('Success', 'Runtime storage rollback completed (run-42)', 'success');
+        expect(showToast).toHaveBeenCalledWith('成功', '运行时存储回滚已完成（run-42）', 'success');
         expect(loadingStates).toEqual([
             'reload:true',
             'reload:false',
@@ -617,6 +617,6 @@ describe('frontend runtime storage diagnostics panel', () => {
             notify,
             setLoading: jest.fn()
         })).rejects.toThrow('rollback failed');
-        expect(notify).toHaveBeenCalledWith('Error', 'Runtime storage rollback failed: rollback failed', 'error');
+        expect(notify).toHaveBeenCalledWith('错误', '运行时存储回滚失败：rollback failed', 'error');
     });
 });
