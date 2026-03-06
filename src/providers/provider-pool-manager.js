@@ -12,6 +12,8 @@ import { ENDPOINT_TYPE } from '../utils/common.js';
  * Manages a pool of API service providers, handling their health and selection.
  */
 export class ProviderPoolManager {
+    static MAX_REFRESH_ATTEMPTS = 5;
+
     // 默认健康检查模型配置
     // 键名必须与 MODEL_PROVIDER 常量值一致
     static DEFAULT_HEALTH_CHECK_MODELS = {
@@ -539,12 +541,13 @@ export class ProviderPoolManager {
     async _refreshNodeToken(providerType, providerStatus, force = false) {
         const config = providerStatus.config;
         
-        // 检查刷新次数是否已达上限（最大5次）
+        // 检查刷新次数是否已达上限
         const currentRefreshCount = config.refreshCount || 0;
-        if (currentRefreshCount >= 5 && !force) {
-            this._log('warn', `Node ${providerStatus.uuid} has reached maximum refresh count (3), marking as unhealthy`);
+        if (currentRefreshCount >= ProviderPoolManager.MAX_REFRESH_ATTEMPTS && !force) {
+            const reason = `Maximum refresh count (${ProviderPoolManager.MAX_REFRESH_ATTEMPTS}) reached`;
+            this._log('warn', `Node ${providerStatus.uuid} has reached ${reason}, marking as unhealthy`);
             // 标记为不健康
-            this.markProviderUnhealthyImmediately(providerType, config, 'Maximum refresh count (3) reached');
+            this.markProviderUnhealthyImmediately(providerType, config, reason);
             return;
         }
         
@@ -1908,12 +1911,24 @@ export class ProviderPoolManager {
 
         const provider = this._findProvider(providerType, uuid);
         if (provider) {
+            const wasHealthy = provider.config.isHealthy;
+            provider.config.isHealthy = true;
             provider.config.needsRefresh = false;
             provider.config.refreshCount = 0;
-            // 更新为可用
+            provider.config.errorCount = 0;
+            provider.config.lastErrorTime = null;
+            provider.config.lastErrorMessage = null;
+            provider.config.scheduledRecoveryTime = null;
+            provider.config._lastSelectionSeq = 0;
+            this._minSelectionSeqByType[providerType] = 0;
+
+            if (!wasHealthy) {
+                this._logHealthStatusChange(providerType, provider.config, 'unhealthy', 'healthy', null);
+            }
+
             provider.config.lastHealthCheckTime = new Date().toISOString();
-            // 标记为健康，以便立即投入使用
-            this._log('debug', `Reset refresh status and marked healthy for provider ${uuid} (${providerType})`);
+            const logLevel = wasHealthy ? 'debug' : 'info';
+            this._log(logLevel, `Reset refresh status and marked healthy for provider ${uuid} (${providerType})`);
 
             this._debouncedSave(providerType);
         }
