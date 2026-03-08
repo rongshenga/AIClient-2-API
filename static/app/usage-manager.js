@@ -16,7 +16,237 @@ const PROVIDERS_WITHOUT_USAGE_DISPLAY = [
 let currentProviderConfigs = null;
 // 正在刷新中的提供商，避免重复触发
 const refreshingProviders = new Set();
+const usageProviderDetailsPromises = new Map();
+let usageLoadPromise = null;
+let supportedProvidersLoadPromise = null;
+let usageSectionListenerBound = false;
 const DEFAULT_USAGE_TASK_POLL_INTERVAL_MS = 1200;
+const UI_DEBUG_SLOW_REQUEST_MS = 3000;
+const USAGE_TASK_MAX_POLL_MS = 10 * 60 * 1000;
+const USAGE_TASK_STALLED_PROGRESS_TIMEOUT_MS = 60 * 1000;
+
+function logUsageUiDebug(message, payload = null, level = 'log') {
+    if (typeof window.logUiDebug === 'function') {
+        window.logUiDebug(`[usage] ${message}`, payload, level);
+    }
+}
+
+function startUsageUiDebugPendingTimer(requestName) {
+    if (typeof window.isUiDebugModeEnabled === 'function' && !window.isUiDebugModeEnabled()) {
+        return null;
+    }
+
+    const timerApi = typeof window !== 'undefined' && typeof window.setTimeout === 'function'
+        ? window
+        : globalThis;
+
+    if (typeof timerApi.setTimeout !== 'function') {
+        return null;
+    }
+
+    return timerApi.setTimeout(() => {
+        logUsageUiDebug(`${requestName} still pending`, {
+            thresholdMs: UI_DEBUG_SLOW_REQUEST_MS
+        }, 'warn');
+    }, UI_DEBUG_SLOW_REQUEST_MS);
+}
+
+function clearUsageUiDebugPendingTimer(timerId) {
+    const timerApi = typeof window !== 'undefined' && typeof window.clearTimeout === 'function'
+        ? window
+        : globalThis;
+
+    if (timerId && typeof timerApi.clearTimeout === 'function') {
+        timerApi.clearTimeout(timerId);
+    }
+}
+
+function buildUsageTaskProgressSignature(taskStatus) {
+    const progress = taskStatus?.progress || {};
+    return JSON.stringify({
+        status: taskStatus?.status || 'unknown',
+        providerType: taskStatus?.providerType || '',
+        currentProvider: progress.currentProvider || '',
+        totalInstances: Number(progress.totalInstances || 0),
+        processedInstances: Number(progress.processedInstances || 0),
+        currentGroup: Number(progress.currentGroup || 0),
+        totalGroups: Number(progress.totalGroups || 0),
+        percent: Number(progress.percent || 0)
+    });
+}
+
+function getVisibleUsageProviderEntries(data) {
+    const providers = data?.providers && typeof data.providers === 'object' ? data.providers : {};
+    const entries = [];
+
+    for (const [providerType, providerData] of Object.entries(providers)) {
+        if (currentProviderConfigs) {
+            const config = currentProviderConfigs.find(c => c.id === providerType);
+            if (config && config.visible === false) {
+                continue;
+            }
+        }
+
+        const normalizedProviderData = providerData && typeof providerData === 'object' ? providerData : {};
+        const totalCount = Number(normalizedProviderData.totalCount ?? 0);
+        const instances = Array.isArray(normalizedProviderData.instances) ? normalizedProviderData.instances : [];
+        if (totalCount <= 0 && instances.length === 0) {
+            continue;
+        }
+
+        entries.push([providerType, normalizedProviderData]);
+    }
+
+    return entries;
+}
+
+function getUsageProviderSummary(providerType, providerData = {}) {
+    const instances = Array.isArray(providerData.instances) ? providerData.instances : [];
+    return {
+        providerType,
+        timestamp: providerData.timestamp || null,
+        totalCount: Number(providerData.totalCount ?? instances.length ?? 0),
+        successCount: Number(providerData.successCount ?? instances.filter(instance => instance.success).length ?? 0),
+        errorCount: Number(providerData.errorCount ?? Math.max(0, instances.length - instances.filter(instance => instance.success).length) ?? 0),
+        processedCount: Number(providerData.processedCount ?? instances.length ?? 0),
+        instances,
+        detailsLoaded: providerData.detailsLoaded === true || instances.length > 0
+    };
+}
+
+function filterRenderableInstances(instances = []) {
+    const validInstances = [];
+    for (const instance of instances) {
+        if (instance.error === '服务实例未初始化' || instance.error === 'Service instance not initialized') {
+            continue;
+        }
+        if (instance.isDisabled) {
+            continue;
+        }
+        validInstances.push(instance);
+    }
+    return validInstances;
+}
+
+function renderUsageGroupCards(gridContainer, providerType, instances = []) {
+    if (!gridContainer) return;
+    gridContainer.innerHTML = '';
+
+    const validInstances = filterRenderableInstances(instances);
+    for (const instance of validInstances) {
+        const instanceCard = createInstanceUsageCard(instance, providerType);
+        gridContainer.appendChild(instanceCard);
+    }
+}
+
+function renderUsageGroupPlaceholder(content, providerSummary, state = 'idle') {
+    if (!content) return;
+
+    if (state === 'loading') {
+        content.innerHTML = `
+            <div class="usage-empty">
+                <i class="fas fa-spinner fa-spin"></i>
+                <p>${t('usage.loading')}</p>
+            </div>
+        `;
+        return;
+    }
+
+    if (state === 'error') {
+        content.innerHTML = `
+            <div class="usage-empty">
+                <i class="fas fa-exclamation-triangle"></i>
+                <p>${t('usage.failedToLoad')}</p>
+            </div>
+        `;
+        return;
+    }
+
+    const totalCount = Number(providerSummary?.totalCount || 0);
+    content.innerHTML = `
+        <div class="usage-empty">
+            <i class="fas fa-layer-group"></i>
+            <p>${totalCount > 0 ? t('usage.group.expandAll') : t('usage.noInstances')}</p>
+        </div>
+    `;
+}
+
+function ensureUsageGroupGridContainer(groupContainer, content) {
+    if (!groupContainer || !content) {
+        return null;
+    }
+
+    let gridContainer = groupContainer.querySelector('.usage-cards-grid');
+    if (gridContainer) {
+        return gridContainer;
+    }
+
+    gridContainer = document.createElement('div');
+    gridContainer.className = 'usage-cards-grid';
+    groupContainer.__usageGridContainer = gridContainer;
+    return gridContainer;
+}
+
+async function ensureProviderUsageDetailsLoaded(providerType, groupContainer, providerSummary) {
+    if (!groupContainer || !providerType) {
+        return null;
+    }
+
+    if (groupContainer.dataset.detailsLoaded === 'true') {
+        return groupContainer.__usageProviderData || providerSummary || null;
+    }
+
+    if (usageProviderDetailsPromises.has(providerType)) {
+        return await usageProviderDetailsPromises.get(providerType);
+    }
+
+    const content = groupContainer.querySelector('.usage-group-content');
+    const gridContainer = ensureUsageGroupGridContainer(groupContainer, content);
+    renderUsageGroupPlaceholder(content, providerSummary, 'loading');
+    groupContainer.dataset.detailsLoading = 'true';
+
+    const requestPromise = (async () => {
+        try {
+            const response = await fetch(`/api/usage/${encodeURIComponent(providerType)}`, {
+                method: 'GET',
+                headers: getAuthHeaders()
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            const payload = await response.json();
+            const nextSummary = getUsageProviderSummary(providerType, payload);
+            renderUsageGroupCards(gridContainer, providerType, nextSummary.instances);
+            groupContainer.dataset.detailsLoaded = 'true';
+            groupContainer.dataset.detailsLoading = 'false';
+            groupContainer.__usageProviderData = nextSummary;
+
+            if (filterRenderableInstances(nextSummary.instances).length === 0) {
+                renderUsageGroupPlaceholder(content, nextSummary, 'idle');
+            } else {
+                content.innerHTML = '';
+                content.appendChild(gridContainer);
+            }
+
+            logUsageUiDebug('provider usage details loaded', {
+                providerType,
+                instanceCount: nextSummary.instances.length
+            });
+            return nextSummary;
+        } catch (error) {
+            groupContainer.dataset.detailsLoading = 'false';
+            renderUsageGroupPlaceholder(content, providerSummary, 'error');
+            throw error;
+        } finally {
+            usageProviderDetailsPromises.delete(providerType);
+        }
+    })();
+
+    usageProviderDetailsPromises.set(providerType, requestPromise);
+    return await requestPromise;
+}
 
 /**
  * Promise 睡眠
@@ -96,7 +326,29 @@ async function runUsageRefreshTask(startUrl, loadingEl, fallbackProviderName) {
     showToast(t('common.info'), t('usage.taskStarted'), 'info');
     setUsageLoadingText(loadingEl, t('usage.taskPreparing'));
 
+    return await pollUsageRefreshTask(taskId, startPayload.pollIntervalMs, loadingEl, fallbackProviderName, {
+        debugContext: startUrl
+    });
+}
+
+async function pollUsageRefreshTask(taskId, initialPollIntervalMs, loadingEl, fallbackProviderName, options = {}) {
+    const startedAt = Date.now();
+    const debugContext = options.debugContext || taskId;
+
+    let lastProgressSignature = null;
+    let lastProgressAt = Date.now();
+
+    logUsageUiDebug('usage refresh task polling started', {
+        taskId,
+        debugContext,
+        fallbackProviderName
+    });
+
     while (true) {
+        if (Date.now() - startedAt >= USAGE_TASK_MAX_POLL_MS) {
+            throw new Error(`Usage refresh task exceeded ${USAGE_TASK_MAX_POLL_MS}ms: ${taskId}`);
+        }
+
         const statusResponse = await fetch(`/api/usage/tasks/${encodeURIComponent(taskId)}`, {
             method: 'GET',
             headers: getAuthHeaders()
@@ -108,13 +360,30 @@ async function runUsageRefreshTask(startUrl, loadingEl, fallbackProviderName) {
 
         const taskStatus = await statusResponse.json();
         if (taskStatus.status === 'running') {
+            const progressSignature = buildUsageTaskProgressSignature(taskStatus);
+            if (progressSignature !== lastProgressSignature) {
+                lastProgressSignature = progressSignature;
+                lastProgressAt = Date.now();
+                logUsageUiDebug('usage refresh task progress updated', {
+                    taskId,
+                    progress: taskStatus.progress || {}
+                });
+            } else if (Date.now() - lastProgressAt >= USAGE_TASK_STALLED_PROGRESS_TIMEOUT_MS) {
+                throw new Error(`Usage refresh task stalled for ${USAGE_TASK_STALLED_PROGRESS_TIMEOUT_MS}ms: ${taskId}`);
+            }
+
             setUsageLoadingText(loadingEl, buildUsageTaskProgressText(taskStatus, fallbackProviderName));
-            const pollInterval = Number(taskStatus.pollIntervalMs) || Number(startPayload.pollIntervalMs) || DEFAULT_USAGE_TASK_POLL_INTERVAL_MS;
+            const pollInterval = Number(taskStatus.pollIntervalMs) || Number(initialPollIntervalMs) || DEFAULT_USAGE_TASK_POLL_INTERVAL_MS;
             await sleep(pollInterval);
             continue;
         }
 
         if (taskStatus.status === 'completed') {
+            logUsageUiDebug('usage refresh task completed', {
+                taskId,
+                durationMs: Date.now() - startedAt,
+                result: taskStatus.result || null
+            });
             return taskStatus;
         }
 
@@ -128,9 +397,17 @@ async function runUsageRefreshTask(startUrl, loadingEl, fallbackProviderName) {
  */
 export function updateUsageProviderConfigs(configs) {
     currentProviderConfigs = configs;
+    logUsageUiDebug('provider configs updated', {
+        configCount: Array.isArray(configs) ? configs.length : 0
+    });
     // 重新触发列表加载，以应用最新的可见性过滤、名称和图标
-    loadSupportedProviders();
-    loadUsage();
+    void loadSupportedProviders();
+    if (isUsageSectionActive()) {
+        void loadUsage();
+        return;
+    }
+
+    logUsageUiDebug('provider configs updated while usage section inactive, deferred usage reload');
 }
 
 /**
@@ -152,18 +429,46 @@ export function initUsageManager() {
     if (refreshBtn) {
         refreshBtn.addEventListener('click', refreshUsage);
     }
+
+    if (!usageSectionListenerBound && typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+        window.addEventListener('ui:section-activated', (event) => {
+            if (event?.detail?.sectionId !== 'usage') {
+                return;
+            }
+
+            logUsageUiDebug('usage section activated');
+            void loadSupportedProviders();
+            void loadUsage();
+        });
+        usageSectionListenerBound = true;
+    }
+
+    logUsageUiDebug('initUsageManager invoked', {
+        sectionActive: isUsageSectionActive()
+    });
     
-    // 初始化时自动加载缓存数据
-    loadUsage();
-    loadSupportedProviders();
+    if (isUsageSectionActive()) {
+        void loadUsage();
+        void loadSupportedProviders();
+    }
 }
 
 /**
  * 加载支持用量查询的提供商列表
  */
 async function loadSupportedProviders() {
+    if (supportedProvidersLoadPromise) {
+        logUsageUiDebug('GET /api/usage/supported-providers reused in-flight request');
+        return await supportedProvidersLoadPromise;
+    }
+
+    const runner = async () => {
     const listEl = document.getElementById('supportedProvidersList');
     if (!listEl) return;
+
+    const startedAt = Date.now();
+    const pendingTimer = startUsageUiDebugPendingTimer('GET /api/usage/supported-providers');
+    logUsageUiDebug('GET /api/usage/supported-providers started');
 
     try {
         const response = await fetch('/api/usage/supported-providers', {
@@ -210,21 +515,47 @@ async function loadSupportedProviders() {
             
             listEl.appendChild(tag);
         });
+
+        logUsageUiDebug('GET /api/usage/supported-providers completed', {
+            providerCount: Array.isArray(providers) ? providers.length : 0,
+            displayCount: Array.isArray(displayOrder) ? displayOrder.length : 0,
+            durationMs: Date.now() - startedAt
+        });
     } catch (error) {
+        logUsageUiDebug('GET /api/usage/supported-providers failed', {
+            durationMs: Date.now() - startedAt,
+            message: error?.message || String(error)
+        }, 'error');
         console.error('获取支持的提供商列表失败:', error);
         listEl.innerHTML = `<span class="error-text" data-i18n="usage.failedToLoad">${t('usage.failedToLoad')}</span>`;
+    } finally {
+        clearUsageUiDebugPendingTimer(pendingTimer);
+    }
+    };
+
+    supportedProvidersLoadPromise = runner();
+    try {
+        return await supportedProvidersLoadPromise;
+    } finally {
+        supportedProvidersLoadPromise = null;
     }
 }
 
 /**
  * 加载用量数据（优先从缓存读取）
  */
-export async function loadUsage() {
+async function loadUsageInternal(options = {}) {
     const loadingEl = document.getElementById('usageLoading');
     const errorEl = document.getElementById('usageError');
     const contentEl = document.getElementById('usageContent');
     const emptyEl = document.getElementById('usageEmpty');
     const lastUpdateEl = document.getElementById('usageLastUpdate');
+    const startedAt = Date.now();
+    const pendingTimer = startUsageUiDebugPendingTimer('GET /api/usage');
+
+    logUsageUiDebug('GET /api/usage started', {
+        sectionActive: isUsageSectionActive()
+    });
 
     // 显示加载状态
     if (loadingEl) loadingEl.style.display = 'block';
@@ -237,18 +568,48 @@ export async function loadUsage() {
             method: 'GET',
             headers: getAuthHeaders()
         });
+        const responseAt = Date.now();
 
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
 
+        if (response.status === 202) {
+            const taskPayload = await response.json();
+            logUsageUiDebug('GET /api/usage accepted async bootstrap task', {
+                taskId: taskPayload?.taskId || null,
+                pollIntervalMs: taskPayload?.pollIntervalMs || null,
+                responseDurationMs: responseAt - startedAt
+            }, 'warn');
+
+            if (!taskPayload?.taskId) {
+                throw new Error('Invalid usage bootstrap task response');
+            }
+
+            setUsageLoadingText(loadingEl, t('usage.taskPreparing'));
+            await pollUsageRefreshTask(taskPayload.taskId, taskPayload.pollIntervalMs, loadingEl, t('usage.allProviders'), {
+                debugContext: 'GET /api/usage'
+            });
+
+            if (options.afterAsyncRefresh === true) {
+                throw new Error('Usage data is still unavailable after async refresh task completed');
+            }
+
+            return await loadUsage({
+                bypassInFlight: true,
+                afterAsyncRefresh: true
+            });
+        }
+
         const data = await response.json();
+        const parsedAt = Date.now();
         
         // 隐藏加载状态
         if (loadingEl) loadingEl.style.display = 'none';
         
         // 渲染用量数据
         renderUsageData(data, contentEl);
+        const renderedAt = Date.now();
         
         // 更新服务端系统时间
         if (data.serverTime) {
@@ -271,7 +632,22 @@ export async function loadUsage() {
                 lastUpdateEl.setAttribute('data-i18n-params', JSON.stringify({ time: timeStr }));
             }
         }
+
+        logUsageUiDebug('GET /api/usage completed', {
+            status: response.status,
+            fromCache: data?.fromCache === true,
+            providerCount: Object.keys(data?.providers || {}).length,
+            totalCount: Number(data?.totalCount || 0),
+            responseDurationMs: responseAt - startedAt,
+            parseDurationMs: parsedAt - responseAt,
+            renderDurationMs: renderedAt - parsedAt,
+            totalDurationMs: renderedAt - startedAt
+        });
     } catch (error) {
+        logUsageUiDebug('GET /api/usage failed', {
+            durationMs: Date.now() - startedAt,
+            message: error?.message || String(error)
+        }, 'error');
         console.error('获取用量数据失败:', error);
         
         if (loadingEl) loadingEl.style.display = 'none';
@@ -282,6 +658,30 @@ export async function loadUsage() {
                 errorMsgEl.textContent = error.message || (t('usage.title') + t('common.refresh.failed'));
             }
         }
+    } finally {
+        clearUsageUiDebugPendingTimer(pendingTimer);
+    }
+}
+
+/**
+ * 加载用量数据（优先从缓存读取）
+ */
+export async function loadUsage(options = {}) {
+    if (options.bypassInFlight !== true && usageLoadPromise) {
+        logUsageUiDebug('GET /api/usage reused in-flight request');
+        return await usageLoadPromise;
+    }
+
+    const runner = loadUsageInternal(options);
+    if (options.bypassInFlight === true) {
+        return await runner;
+    }
+
+    usageLoadPromise = runner;
+    try {
+        return await usageLoadPromise;
+    } finally {
+        usageLoadPromise = null;
     }
 }
 
@@ -351,36 +751,9 @@ function renderUsageData(data, container) {
         return;
     }
 
-    // 按提供商分组收集已初始化且未禁用的实例
-    const groupedInstances = {};
-    
-    for (const [providerType, providerData] of Object.entries(data.providers)) {
-        // 如果配置了不可见，则跳过
-        if (currentProviderConfigs) {
-            const config = currentProviderConfigs.find(c => c.id === providerType);
-            if (config && config.visible === false) continue;
-        }
+    const providerEntries = getVisibleUsageProviderEntries(data);
 
-        if (providerData.instances && providerData.instances.length > 0) {
-            const validInstances = [];
-            for (const instance of providerData.instances) {
-                // 过滤掉服务实例未初始化的
-                if (instance.error === '服务实例未初始化' || instance.error === 'Service instance not initialized') {
-                    continue;
-                }
-                // 过滤掉已禁用的提供商
-                if (instance.isDisabled) {
-                    continue;
-                }
-                validInstances.push(instance);
-            }
-            if (validInstances.length > 0) {
-                groupedInstances[providerType] = validInstances;
-            }
-        }
-    }
-
-    if (Object.keys(groupedInstances).length === 0) {
+    if (providerEntries.length === 0) {
         container.innerHTML = `
             <div class="usage-empty">
                 <i class="fas fa-chart-bar"></i>
@@ -391,14 +764,15 @@ function renderUsageData(data, container) {
     }
 
     // 按提供商分组渲染，使用统一的显示顺序
+    const providerMap = new Map(providerEntries.map(([providerType, providerData]) => [providerType, getUsageProviderSummary(providerType, providerData)]));
     const displayOrder = currentProviderConfigs 
         ? currentProviderConfigs.map(c => c.id) 
-        : Object.keys(groupedInstances);
+        : Array.from(providerMap.keys());
 
     displayOrder.forEach(providerType => {
-        const instances = groupedInstances[providerType];
-        if (instances && instances.length > 0) {
-            const groupContainer = createProviderGroup(providerType, instances);
+        const providerSummary = providerMap.get(providerType);
+        if (providerSummary) {
+            const groupContainer = createProviderGroup(providerType, providerSummary);
             container.appendChild(groupContainer);
         }
     });
@@ -455,14 +829,19 @@ export async function refreshProviderUsage(providerType) {
  * @param {Array} instances - 实例数组
  * @returns {HTMLElement} 分组容器元素
  */
-function createProviderGroup(providerType, instances) {
+function createProviderGroup(providerType, providerData) {
     const groupContainer = document.createElement('div');
     groupContainer.className = 'usage-provider-group collapsed';
+    const providerSummary = getUsageProviderSummary(providerType, providerData);
+    groupContainer.dataset.providerType = providerType;
+    groupContainer.dataset.detailsLoaded = providerSummary.detailsLoaded ? 'true' : 'false';
+    groupContainer.dataset.detailsLoading = 'false';
+    groupContainer.__usageProviderData = providerSummary;
     
     const providerDisplayName = getProviderDisplayName(providerType);
     const providerIcon = getProviderIcon(providerType);
-    const instanceCount = instances.length;
-    const successCount = instances.filter(i => i.success).length;
+    const instanceCount = providerSummary.totalCount;
+    const successCount = providerSummary.successCount;
     
     // 分组头部（可点击折叠）
     const header = document.createElement('div');
@@ -484,16 +863,29 @@ function createProviderGroup(providerType, instances) {
     
     // 点击头部切换分组折叠状态
     const titleDiv = header.querySelector('.usage-group-title');
-    titleDiv.addEventListener('click', () => {
+    titleDiv.addEventListener('click', async () => {
         groupContainer.classList.toggle('collapsed');
+        if (!groupContainer.classList.contains('collapsed')) {
+            try {
+                await ensureProviderUsageDetailsLoaded(providerType, groupContainer, providerSummary);
+            } catch (error) {
+                console.error(`加载提供商 ${providerType} 用量详情失败:`, error);
+            }
+        }
     });
     
     groupContainer.appendChild(header);
     
     // 展开/折叠所有卡片按钮事件
     const toggleCardsBtn = header.querySelector('.btn-toggle-cards');
-    toggleCardsBtn.addEventListener('click', (e) => {
+    toggleCardsBtn.addEventListener('click', async (e) => {
         e.stopPropagation(); // 阻止事件冒泡到分组头部
+        try {
+            await ensureProviderUsageDetailsLoaded(providerType, groupContainer, providerSummary);
+        } catch (error) {
+            console.error(`加载提供商 ${providerType} 用量详情失败:`, error);
+            return;
+        }
         
         const cards = groupContainer.querySelectorAll('.usage-instance-card');
         if (cards.length === 0) return;
@@ -534,15 +926,19 @@ function createProviderGroup(providerType, instances) {
     const content = document.createElement('div');
     content.className = 'usage-group-content';
     
-    const gridContainer = document.createElement('div');
-    gridContainer.className = 'usage-cards-grid';
-    
-    for (const instance of instances) {
-        const instanceCard = createInstanceUsageCard(instance, providerType);
-        gridContainer.appendChild(instanceCard);
+    const gridContainer = ensureUsageGroupGridContainer(groupContainer, content);
+
+    if (providerSummary.detailsLoaded) {
+        renderUsageGroupCards(gridContainer, providerType, providerSummary.instances);
+        if (filterRenderableInstances(providerSummary.instances).length > 0) {
+            content.appendChild(gridContainer);
+        } else {
+            renderUsageGroupPlaceholder(content, providerSummary, 'idle');
+        }
+    } else {
+        renderUsageGroupPlaceholder(content, providerSummary, 'idle');
     }
-    
-    content.appendChild(gridContainer);
+
     groupContainer.appendChild(content);
     
     return groupContainer;

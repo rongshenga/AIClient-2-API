@@ -58,6 +58,8 @@ describe('Runtime storage extended domains', () => {
         const tempDir = await createTempDir('runtime-storage-facade-');
         const dbPath = path.join(tempDir, 'runtime.sqlite');
         const providerPoolsPath = path.join(tempDir, 'provider_pools.json');
+        const originalCwd = process.cwd();
+        process.chdir(tempDir);
 
         const storage = createRuntimeStorage({
             RUNTIME_STORAGE_BACKEND: 'db',
@@ -65,41 +67,47 @@ describe('Runtime storage extended domains', () => {
             PROVIDER_POOLS_FILE_PATH: providerPoolsPath
         });
 
-        await storage.initialize();
+        try {
+            await storage.initialize();
 
-        expect(storage.kind).toBe('db');
-        expect(typeof storage.getDomains).toBe('function');
-        expect(typeof storage.provider.loadPoolsSnapshot).toBe('function');
-        expect(typeof storage.usage.saveRefreshTask).toBe('function');
-        expect(typeof storage.session.getSession).toBe('function');
-        expect(typeof storage.plugin.savePotluckUserData).toBe('function');
-        expect(typeof storage.migration.listRuns).toBe('function');
-        expect(storage.client).toBeDefined();
+            expect(storage.kind).toBe('db');
+            expect(typeof storage.getDomains).toBe('function');
+            expect(typeof storage.provider.loadPoolsSnapshot).toBe('function');
+            expect(typeof storage.usage.loadCacheSummary).toBe('function');
+            expect(typeof storage.usage.saveRefreshTask).toBe('function');
+            expect(typeof storage.session.getSession).toBe('function');
+            expect(typeof storage.plugin.savePotluckUserData).toBe('function');
+            expect(typeof storage.migration.listRuns).toBe('function');
+            expect(storage.client).toBeDefined();
 
-        await storage.provider.replacePoolsSnapshot({
-            'grok-custom': [
-                {
-                    uuid: 'grok-1',
-                    customName: 'Grok One',
-                    GROK_BASE_URL: 'https://grok.com',
-                    GROK_COOKIE_TOKEN: 'cookie-token'
-                }
-            ]
-        });
+            await storage.provider.replacePoolsSnapshot({
+                'grok-custom': [
+                    {
+                        uuid: 'grok-1',
+                        customName: 'Grok One',
+                        GROK_BASE_URL: 'https://grok.com',
+                        GROK_COOKIE_TOKEN: 'cookie-token'
+                    }
+                ]
+            });
 
-        const legacySnapshot = await storage.loadProviderPoolsSnapshot();
-        const domainSnapshot = await storage.provider.exportPoolsSnapshot();
-        expect(domainSnapshot).toEqual(legacySnapshot);
-        expect(domainSnapshot['grok-custom'][0]).toMatchObject({
-            uuid: 'grok-1',
-            customName: 'Grok One'
-        });
+            const legacySnapshot = await storage.loadProviderPoolsSnapshot();
+            const usageSummary = await storage.loadUsageCacheSummary();
+            const domainSnapshot = await storage.provider.exportPoolsSnapshot();
+            expect(usageSummary).toBeNull();
+            expect(domainSnapshot).toEqual(legacySnapshot);
+            expect(domainSnapshot['grok-custom'][0]).toMatchObject({
+                uuid: 'grok-1',
+                customName: 'Grok One'
+            });
 
-        const runs = await storage.migration.listRuns();
-        expect(Array.isArray(runs)).toBe(true);
-        expect(runs).toHaveLength(0);
-
-        await storage.close();
+            const runs = await storage.migration.listRuns();
+            expect(Array.isArray(runs)).toBe(true);
+            expect(runs).toHaveLength(0);
+        } finally {
+            await storage.close();
+            process.chdir(originalCwd);
+        }
     });
 
     test('should persist usage, session and potluck runtime state through sqlite storage restart', async () => {
@@ -162,7 +170,7 @@ describe('Runtime storage extended domains', () => {
         await storage.saveAdminSession('token-1', {
             username: 'admin',
             loginTime: Date.parse('2026-03-06T10:00:00.000Z'),
-            expiryTime: Date.parse('2026-03-06T12:00:00.000Z'),
+            expiryTime: Date.parse('2099-03-06T12:00:00.000Z'),
             sourceIp: '127.0.0.1',
             userAgent: 'jest-runtime-test'
         });
@@ -365,7 +373,7 @@ describe('Runtime storage extended domains', () => {
         await storage.saveAdminSession('token-durable', {
             username: 'admin',
             loginTime: Date.parse('2026-03-06T09:00:00.000Z'),
-            expiryTime: Date.parse('2026-03-06T12:00:00.000Z'),
+            expiryTime: Date.parse('2099-03-06T12:00:00.000Z'),
             sourceIp: '127.0.0.1',
             userAgent: 'jest-crash-test'
         });
@@ -455,7 +463,7 @@ LIMIT 1;
         await reopened.saveAdminSession('token-after-restart', {
             username: 'admin',
             loginTime: Date.parse('2026-03-06T11:30:00.000Z'),
-            expiryTime: Date.parse('2026-03-06T14:00:00.000Z'),
+            expiryTime: Date.parse('2099-03-06T14:00:00.000Z'),
             sourceIp: '127.0.0.3',
             userAgent: 'post-crash-write'
         });
@@ -523,14 +531,14 @@ LIMIT 1;
         const firstSession = {
             username: 'admin-a',
             loginTime: Date.parse('2026-03-06T10:00:00.000Z'),
-            expiryTime: Date.parse('2026-03-07T10:00:00.000Z'),
+            expiryTime: Date.parse('2099-03-07T10:00:00.000Z'),
             sourceIp: '127.0.0.1',
             userAgent: 'jest-concurrency-a'
         };
         const secondSession = {
             username: 'admin-b',
             loginTime: Date.parse('2026-03-06T10:10:00.000Z'),
-            expiryTime: Date.parse('2026-03-07T11:00:00.000Z'),
+            expiryTime: Date.parse('2099-03-07T11:00:00.000Z'),
             sourceIp: '127.0.0.2',
             userAgent: 'jest-concurrency-b'
         };

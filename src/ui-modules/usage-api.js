@@ -2,7 +2,7 @@ import { CONFIG } from '../core/config-manager.js';
 import logger from '../utils/logger.js';
 import { serviceInstances, getServiceAdapter } from '../providers/adapter.js';
 import { formatKiroUsage, formatGeminiUsage, formatAntigravityUsage, formatCodexUsage, formatGrokUsage } from '../services/usage-service.js';
-import { readUsageCache, writeUsageCache, readProviderUsageCache, updateProviderUsageCache } from './usage-cache.js';
+import { readUsageCache, readUsageCacheSummary, writeUsageCache, readProviderUsageCache, updateProviderUsageCache } from './usage-cache.js';
 import { broadcastEvent } from './event-broadcast.js';
 import path from 'path';
 import { randomUUID } from 'crypto';
@@ -21,8 +21,154 @@ const MAX_USAGE_TASK_RECORDS = 200;
 const USAGE_TASK_DEFAULT_POLL_INTERVAL_MS = 1200;
 const DEFAULT_USAGE_CACHE_FLUSH_STEP = 1000;
 const DEFAULT_USAGE_CACHE_FLUSH_INTERVAL_MS = 5000;
+const DEFAULT_USAGE_CACHE_READ_TIMEOUT_MS = 5000;
+const DEFAULT_PROVIDER_USAGE_CACHE_READ_TIMEOUT_MS = 5000;
+const DEFAULT_PROVIDER_USAGE_INSTANCE_TIMEOUT_MS = 30000;
+const DEFAULT_USAGE_SYNC_QUERY_MAX_PROVIDER_COUNT = 500;
 const usageRefreshTasks = new Map();
 
+function normalizeUiDebugFlag(value) {
+    if (typeof value !== 'string') {
+        return false;
+    }
+
+    return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+function isUsageDebugEnabled(req = null, currentConfig = {}) {
+    if (process.env.NODE_ENV === 'test' || currentConfig?.UI_DEBUG_LOGGING === true) {
+        return true;
+    }
+
+    const headerValue = req?.headers?.['x-ui-debug'];
+    if (Array.isArray(headerValue)) {
+        if (headerValue.some((item) => normalizeUiDebugFlag(item))) {
+            return true;
+        }
+    } else if (normalizeUiDebugFlag(headerValue)) {
+        return true;
+    }
+
+    try {
+        const requestUrl = new URL(req?.url || '/', 'http://127.0.0.1');
+        return normalizeUiDebugFlag(requestUrl.searchParams.get('ui_debug'));
+    } catch {
+        return false;
+    }
+}
+
+function logUsageRequestDebug(enabled, message, payload = null, level = 'info') {
+    if (!enabled) {
+        return;
+    }
+
+    const logMethod = typeof logger[level] === 'function' ? logger[level].bind(logger) : logger.info.bind(logger);
+    if (payload !== null && payload !== undefined) {
+        logMethod(`[UI Debug][Usage API] ${message}`, payload);
+        return;
+    }
+
+    logMethod(`[UI Debug][Usage API] ${message}`);
+}
+
+function getUsageProviderCount(usageResults) {
+    return Object.keys(usageResults?.providers || {}).length;
+}
+
+function getUsageSummaryPayload(usageResults) {
+    return {
+        providerCount: getUsageProviderCount(usageResults),
+        totalCount: Number(usageResults?.totalCount || 0),
+        successCount: Number(usageResults?.successCount || 0),
+        errorCount: Number(usageResults?.errorCount || 0),
+        timestamp: usageResults?.timestamp || null,
+        fromCache: usageResults?.fromCache === true
+    };
+}
+
+function getUsageInstanceCount(usageResults) {
+    return Array.isArray(usageResults?.instances) ? usageResults.instances.length : 0;
+}
+
+function shouldEnableUsageLifecycleLogging(currentConfig = {}) {
+    return process.env.NODE_ENV === 'test' || currentConfig?.UI_DEBUG_LOGGING === true;
+}
+
+function logUsageLifecycle(enabled, message, payload = null) {
+    if (!enabled) {
+        return;
+    }
+
+    if (payload !== null && payload !== undefined) {
+        logger.info(`[Usage API] ${message}`, payload);
+        return;
+    }
+
+    logger.info(`[Usage API] ${message}`);
+}
+
+function resolveProviderUsageCacheReadTimeout(currentConfig = {}) {
+    const configValue = parsePositiveInt(currentConfig?.PROVIDER_USAGE_CACHE_READ_TIMEOUT_MS);
+    return configValue || DEFAULT_PROVIDER_USAGE_CACHE_READ_TIMEOUT_MS;
+}
+
+function resolveUsageCacheReadTimeout(currentConfig = {}) {
+    const configValue = parsePositiveInt(currentConfig?.USAGE_CACHE_READ_TIMEOUT_MS);
+    return configValue || DEFAULT_USAGE_CACHE_READ_TIMEOUT_MS;
+}
+
+function resolveProviderUsageInstanceTimeout(currentConfig = {}) {
+    const configValue = parsePositiveInt(currentConfig?.PROVIDER_USAGE_INSTANCE_TIMEOUT_MS);
+    return configValue || DEFAULT_PROVIDER_USAGE_INSTANCE_TIMEOUT_MS;
+}
+
+function resolveUsageSyncQueryMaxProviderCount(currentConfig = {}) {
+    const configValue = parsePositiveInt(currentConfig?.USAGE_SYNC_QUERY_MAX_PROVIDER_COUNT);
+    return configValue || DEFAULT_USAGE_SYNC_QUERY_MAX_PROVIDER_COUNT;
+}
+
+function getUsageProviderPoolCount(currentConfig = {}, providerPoolManager = null) {
+    const providerPools = providerPoolManager?.providerPools || currentConfig?.providerPools || {};
+    return Object.values(providerPools).reduce((sum, providers) => {
+        return sum + (Array.isArray(providers) ? providers.length : 0);
+    }, 0);
+}
+
+function shouldBootstrapUsageAsync(currentConfig = {}, providerPoolManager = null) {
+    return getUsageProviderPoolCount(currentConfig, providerPoolManager) > resolveUsageSyncQueryMaxProviderCount(currentConfig);
+}
+
+function createTimeoutError(message, timeoutMs, details = {}) {
+    const error = new Error(message);
+    error.code = 'usage_timeout';
+    error.timeoutMs = timeoutMs;
+    error.details = details;
+    return error;
+}
+
+async function withTimeout(promiseFactory, timeoutMs, message, details = {}) {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+        return await promiseFactory();
+    }
+
+    let timeoutId = null;
+    const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+            reject(createTimeoutError(message, timeoutMs, details));
+        }, timeoutMs);
+    });
+
+    try {
+        return await Promise.race([
+            Promise.resolve().then(() => promiseFactory()),
+            timeoutPromise
+        ]);
+    } finally {
+        if (timeoutId) {
+            clearTimeout(timeoutId);
+        }
+    }
+}
 
 function getUsageTaskStorage() {
     const runtimeStorage = getRuntimeStorage();
@@ -269,6 +415,24 @@ function createUsageRefreshTask(input = {}) {
     pruneUsageRefreshTasks();
     void persistUsageRefreshTask(task);
     return task;
+}
+
+function findRunningUsageRefreshTask(type, providerType = null) {
+    pruneUsageRefreshTasks();
+
+    for (const task of usageRefreshTasks.values()) {
+        if (!task || task.status !== 'running' || task.type !== type) {
+            continue;
+        }
+
+        if (type === 'provider' && task.providerType !== providerType) {
+            continue;
+        }
+
+        return task;
+    }
+
+    return null;
 }
 
 /**
@@ -694,7 +858,12 @@ async function queryUsageForProviderInstance(providerType, provider) {
  * @returns {Promise<Object>} 提供商用量信息
  */
 async function getProviderTypeUsage(providerType, currentConfig, providerPoolManager, options = {}) {
+    const startedAt = Date.now();
+    const lifecycleLoggingEnabled = shouldEnableUsageLifecycleLogging(currentConfig);
     const providers = getProvidersForType(providerType, currentConfig, providerPoolManager);
+    logUsageLifecycle(lifecycleLoggingEnabled, `Preparing provider usage refresh for ${providerType}`, {
+        providerCount: providers.length
+    });
     const result = {
         providerType,
         instances: new Array(providers.length),
@@ -702,8 +871,37 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
         successCount: 0,
         errorCount: 0
     };
-    const cachedProviderData = options.cachedProviderData || await readProviderUsageCache(providerType);
+    const hasCachedProviderData = Object.prototype.hasOwnProperty.call(options, 'cachedProviderData');
+    const skipCacheRead = options.skipCacheRead === true || hasCachedProviderData;
+    let cachedProviderData = hasCachedProviderData ? options.cachedProviderData : null;
+    const cacheReadStartedAt = Date.now();
+    const cacheReadTimeoutMs = resolveProviderUsageCacheReadTimeout(currentConfig);
+
+    if (!skipCacheRead) {
+        cachedProviderData = await withTimeout(
+            () => readProviderUsageCache(providerType),
+            cacheReadTimeoutMs,
+            `Reading usage cache for ${providerType} timed out after ${cacheReadTimeoutMs}ms`,
+            {
+                providerType,
+                stage: 'readProviderUsageCache'
+            }
+        );
+    }
+
+    logUsageLifecycle(lifecycleLoggingEnabled, `Provider usage cache lookup completed for ${providerType}`, {
+        providerType,
+        hit: Boolean(cachedProviderData),
+        skipped: skipCacheRead,
+        durationMs: Date.now() - cacheReadStartedAt,
+        timeoutMs: skipCacheRead ? null : cacheReadTimeoutMs
+    });
     const providerCandidates = createProviderRefreshCandidates(providerType, providers, cachedProviderData);
+    logUsageLifecycle(lifecycleLoggingEnabled, `Provider usage refresh candidates prepared for ${providerType}`, {
+        providerType,
+        candidateCount: providerCandidates.length,
+        durationMs: Date.now() - startedAt
+    });
 
     providerCandidates.forEach((candidate) => {
         const cachedInstance = normalizeCachedInstanceResult(providerType, candidate.provider, candidate.cachedInstance);
@@ -798,8 +996,34 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
         const currentGroup = groupIndex + 1;
         emitProgress(true, currentGroup);
 
+        logUsageLifecycle(lifecycleLoggingEnabled, `Starting provider usage group ${currentGroup}/${totalGroups} for ${providerType}`, {
+            providerType,
+            groupSize: groupCandidates.length,
+            processedInstances,
+            totalInstances: result.totalCount
+        });
+
         await mapWithConcurrency(groupCandidates, queryConcurrency, async (candidate) => {
-            const instanceResult = await queryUsageForProviderInstance(providerType, candidate.provider);
+            const instanceTimeoutMs = resolveProviderUsageInstanceTimeout(currentConfig);
+            const instanceResult = await withTimeout(
+                () => queryUsageForProviderInstance(providerType, candidate.provider),
+                instanceTimeoutMs,
+                `Usage query timed out for ${providerType}:${candidate.provider?.uuid || 'unknown'} after ${instanceTimeoutMs}ms`,
+                {
+                    providerType,
+                    providerId: candidate.provider?.uuid || null,
+                    stage: 'queryUsageForProviderInstance'
+                }
+            ).catch((error) => ({
+                uuid: candidate.provider?.uuid || 'unknown',
+                name: getProviderDisplayName(candidate.provider, providerType),
+                isHealthy: candidate.provider?.isHealthy !== false,
+                isDisabled: candidate.provider?.isDisabled === true,
+                success: false,
+                usage: null,
+                error: error?.message || String(error),
+                errorStatus: null
+            }));
             syncProviderHealthFromUsageResult(providerPoolManager, providerType, candidate.provider, instanceResult);
             instanceResult.lastRefreshedAt = new Date().toISOString();
             processedInstances += 1;
@@ -814,6 +1038,14 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
             return instanceResult;
         });
 
+        logUsageLifecycle(lifecycleLoggingEnabled, `Completed provider usage group ${currentGroup}/${totalGroups} for ${providerType}`, {
+            providerType,
+            processedInstances,
+            totalInstances: result.totalCount,
+            successCount,
+            errorCount
+        });
+
         emitProgress(true, currentGroup);
         await maybePersistSnapshot(processedInstances >= result.totalCount);
     }
@@ -825,6 +1057,15 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
     result.processedCount = snapshot.processedCount;
     result.timestamp = snapshot.timestamp;
     emitProgress(true, totalGroups);
+
+    logUsageLifecycle(lifecycleLoggingEnabled, `Provider usage refresh finished for ${providerType}`, {
+        providerType,
+        durationMs: Date.now() - startedAt,
+        totalCount: result.totalCount,
+        processedCount: result.processedCount,
+        successCount: result.successCount,
+        errorCount: result.errorCount
+    });
 
     return result;
 }
@@ -940,17 +1181,38 @@ function getProviderDisplayName(provider, providerType) {
  * @returns {Object} 任务对象
  */
 function startProviderUsageRefreshTask(currentConfig, providerPoolManager, providerType, options = {}) {
+    const lifecycleLoggingEnabled = shouldEnableUsageLifecycleLogging(currentConfig);
+    const existingTask = findRunningUsageRefreshTask('provider', providerType);
+    if (existingTask) {
+        logUsageLifecycle(lifecycleLoggingEnabled, `Provider refresh task reused for ${providerType}`, {
+            taskId: existingTask.id
+        });
+        return existingTask;
+    }
+
     const task = createUsageRefreshTask({
         type: 'provider',
         providerType
     });
+    const startedAt = Date.now();
+
+    logUsageLifecycle(lifecycleLoggingEnabled, `Provider refresh task created for ${providerType}`, {
+        taskId: task.id,
+        usageConcurrency: options.usageConcurrency ?? null,
+        groupSize: options.groupSize ?? null,
+        groupMinPoolSize: options.groupMinPoolSize ?? null
+    });
 
     void (async () => {
         try {
+            logUsageLifecycle(lifecycleLoggingEnabled, `Provider refresh task running for ${providerType}`, {
+                taskId: task.id
+            });
             const usageResults = await getProviderTypeUsage(providerType, currentConfig, providerPoolManager, {
                 usageConcurrency: options.usageConcurrency,
                 groupSize: options.groupSize,
                 groupMinPoolSize: options.groupMinPoolSize,
+                skipCacheRead: true,
                 onProgress: (progress) => {
                     task.progress = {
                         ...task.progress,
@@ -981,13 +1243,26 @@ function startProviderUsageRefreshTask(currentConfig, providerPoolManager, provi
                 successCount: usageResults.successCount || 0,
                 errorCount: usageResults.errorCount || 0
             };
+            logUsageLifecycle(lifecycleLoggingEnabled, `Provider refresh task completed for ${providerType}`, {
+                taskId: task.id,
+                durationMs: Date.now() - startedAt,
+                totalCount: task.result.totalCount,
+                successCount: task.result.successCount,
+                errorCount: task.result.errorCount
+            });
             await persistUsageRefreshTask(task);
             broadcastUsageRefreshTaskUpdate(task);
         } catch (error) {
             task.status = 'failed';
             task.finishedAt = new Date().toISOString();
             task.error = error.message || String(error);
-            logger.error(`[Usage API] Provider refresh task failed (${providerType}):`, error);
+            logger.error(`[Usage API] Provider refresh task failed (${providerType}):`, {
+                taskId: task.id,
+                durationMs: Date.now() - startedAt,
+                message: error?.message || String(error),
+                code: error?.code || null,
+                timeoutMs: error?.timeoutMs || null
+            });
             await persistUsageRefreshTask(task);
             broadcastUsageRefreshTaskUpdate(task);
         } finally {
@@ -1006,10 +1281,23 @@ function startProviderUsageRefreshTask(currentConfig, providerPoolManager, provi
  * @returns {Object} 任务对象
  */
 function startAllProvidersUsageRefreshTask(currentConfig, providerPoolManager, options = {}) {
+    const lifecycleLoggingEnabled = shouldEnableUsageLifecycleLogging(currentConfig);
+    const existingTask = findRunningUsageRefreshTask('all');
+    if (existingTask) {
+        logUsageLifecycle(lifecycleLoggingEnabled, 'All providers refresh task reused', {
+            taskId: existingTask.id
+        });
+        return existingTask;
+    }
+
     const task = createUsageRefreshTask({ type: 'all' });
 
     void (async () => {
-        const cachedUsageData = await readUsageCache();
+        const cachedUsageData = await readUsageCacheSummary({
+            runtimeReadTimeoutMs: resolveUsageCacheReadTimeout(currentConfig),
+            logLifecycle: lifecycleLoggingEnabled,
+            debugLabel: `usage refresh task ${task.id}`
+        });
         const sortedProviderTypes = sortProviderTypesByRefreshPriority(
             supportedProviders,
             currentConfig,
@@ -1163,6 +1451,9 @@ export async function handleGetSupportedProviders(req, res) {
  * 获取所有提供商的用量限制
  */
 export async function handleGetUsage(req, res, currentConfig, providerPoolManager) {
+    const debugEnabled = isUsageDebugEnabled(req, currentConfig);
+    const startedAt = Date.now();
+
     try {
         // 解析查询参数，检查是否需要强制刷新
         const url = new URL(req.url, `http://${req.headers.host}`);
@@ -1172,11 +1463,25 @@ export async function handleGetUsage(req, res, currentConfig, providerPoolManage
         const groupSize = parsePositiveInt(url.searchParams.get('groupSize'));
         const groupMinPoolSize = parsePositiveInt(url.searchParams.get('groupMinPoolSize'));
 
+        logUsageRequestDebug(debugEnabled, 'GET /api/usage started', {
+            refresh,
+            useAsyncTask,
+            usageConcurrency,
+            groupSize,
+            groupMinPoolSize
+        });
+
         if (refresh && useAsyncTask) {
             const task = startAllProvidersUsageRefreshTask(currentConfig, providerPoolManager, {
                 usageConcurrency,
                 groupSize,
                 groupMinPoolSize
+            });
+            logUsageRequestDebug(debugEnabled, 'GET /api/usage async task started', {
+                taskId: task.id,
+                status: task.status,
+                pollIntervalMs: USAGE_TASK_DEFAULT_POLL_INTERVAL_MS,
+                durationMs: Date.now() - startedAt
             });
             res.writeHead(202, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
@@ -1193,23 +1498,68 @@ export async function handleGetUsage(req, res, currentConfig, providerPoolManage
         
         if (!refresh) {
             // 优先读取缓存
-            const cachedData = await readUsageCache();
+            const cacheLookupStartedAt = Date.now();
+            const cacheReadTimeoutMs = resolveUsageCacheReadTimeout(currentConfig);
+            logUsageRequestDebug(debugEnabled, 'GET /api/usage cache lookup started', {
+                timeoutMs: cacheReadTimeoutMs
+            });
+            const cachedData = await readUsageCacheSummary({
+                runtimeReadTimeoutMs: cacheReadTimeoutMs,
+                logLifecycle: debugEnabled,
+                debugLabel: 'GET /api/usage'
+            });
+            logUsageRequestDebug(debugEnabled, 'GET /api/usage cache lookup completed', {
+                hit: Boolean(cachedData),
+                durationMs: Date.now() - cacheLookupStartedAt,
+                timeoutMs: cacheReadTimeoutMs
+            });
             if (cachedData) {
                 logger.debug('[Usage API] Returning cached usage data');
                 usageResults = { ...cachedData, fromCache: true };
+            } else if (shouldBootstrapUsageAsync(currentConfig, providerPoolManager)) {
+                const task = startAllProvidersUsageRefreshTask(currentConfig, providerPoolManager, {
+                    usageConcurrency,
+                    groupSize,
+                    groupMinPoolSize
+                });
+                logUsageRequestDebug(debugEnabled, 'GET /api/usage cache miss switched to async task', {
+                    taskId: task.id,
+                    providerPoolCount: getUsageProviderPoolCount(currentConfig, providerPoolManager),
+                    syncThreshold: resolveUsageSyncQueryMaxProviderCount(currentConfig),
+                    durationMs: Date.now() - startedAt
+                });
+                res.writeHead(202, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    taskId: task.id,
+                    status: task.status,
+                    type: task.type,
+                    pollIntervalMs: USAGE_TASK_DEFAULT_POLL_INTERVAL_MS,
+                    progress: task.progress
+                }));
+                return true;
             }
         }
         
         if (!usageResults) {
             // 缓存不存在或需要刷新，重新查询
             logger.info('[Usage API] Fetching fresh usage data');
+            logUsageRequestDebug(debugEnabled, 'GET /api/usage fresh query started');
+            const freshQueryStartedAt = Date.now();
             usageResults = await getAllProvidersUsage(currentConfig, providerPoolManager, {
                 usageConcurrency,
                 groupSize,
                 groupMinPoolSize
             });
+            logUsageRequestDebug(debugEnabled, 'GET /api/usage fresh query completed', {
+                durationMs: Date.now() - freshQueryStartedAt,
+                ...getUsageSummaryPayload(usageResults)
+            });
             // 写入缓存
+            const cacheWriteStartedAt = Date.now();
             await writeUsageCache(usageResults);
+            logUsageRequestDebug(debugEnabled, 'GET /api/usage cache write completed', {
+                durationMs: Date.now() - cacheWriteStartedAt
+            });
         }
         
         // Always include current server time
@@ -1217,11 +1567,20 @@ export async function handleGetUsage(req, res, currentConfig, providerPoolManage
             ...usageResults,
             serverTime: new Date().toISOString()
         };
+
+        logUsageRequestDebug(debugEnabled, 'GET /api/usage completed', {
+            durationMs: Date.now() - startedAt,
+            ...getUsageSummaryPayload(finalResults)
+        });
         
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(finalResults));
         return true;
     } catch (error) {
+        logUsageRequestDebug(debugEnabled, 'GET /api/usage failed', {
+            durationMs: Date.now() - startedAt,
+            message: error?.message || String(error)
+        }, 'warn');
         logger.error('[UI API] Failed to get usage:', error);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
@@ -1237,6 +1596,9 @@ export async function handleGetUsage(req, res, currentConfig, providerPoolManage
  * 获取特定提供商类型的用量限制
  */
 export async function handleGetProviderUsage(req, res, currentConfig, providerPoolManager, providerType) {
+    const debugEnabled = isUsageDebugEnabled(req, currentConfig);
+    const startedAt = Date.now();
+
     try {
         // 解析查询参数，检查是否需要强制刷新
         const url = new URL(req.url, `http://${req.headers.host}`);
@@ -1246,11 +1608,27 @@ export async function handleGetProviderUsage(req, res, currentConfig, providerPo
         const groupSize = parsePositiveInt(url.searchParams.get('groupSize'));
         const groupMinPoolSize = parsePositiveInt(url.searchParams.get('groupMinPoolSize'));
 
+        logUsageRequestDebug(debugEnabled, `GET /api/usage/${providerType} started`, {
+            providerType,
+            refresh,
+            useAsyncTask,
+            usageConcurrency,
+            groupSize,
+            groupMinPoolSize
+        });
+
         if (refresh && useAsyncTask) {
             const task = startProviderUsageRefreshTask(currentConfig, providerPoolManager, providerType, {
                 usageConcurrency,
                 groupSize,
                 groupMinPoolSize
+            });
+            logUsageRequestDebug(debugEnabled, `GET /api/usage/${providerType} async task started`, {
+                providerType,
+                taskId: task.id,
+                status: task.status,
+                pollIntervalMs: USAGE_TASK_DEFAULT_POLL_INTERVAL_MS,
+                durationMs: Date.now() - startedAt
             });
             res.writeHead(202, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
@@ -1268,7 +1646,13 @@ export async function handleGetProviderUsage(req, res, currentConfig, providerPo
         
         if (!refresh) {
             // Prefer reading from cache
+            const cacheLookupStartedAt = Date.now();
             const cachedData = await readProviderUsageCache(providerType);
+            logUsageRequestDebug(debugEnabled, `GET /api/usage/${providerType} cache lookup completed`, {
+                providerType,
+                hit: Boolean(cachedData),
+                durationMs: Date.now() - cacheLookupStartedAt
+            });
             if (cachedData) {
                 logger.debug(`[Usage API] Returning cached usage data for ${providerType}`);
                 usageResults = { ...cachedData, fromCache: true };
@@ -1278,13 +1662,32 @@ export async function handleGetProviderUsage(req, res, currentConfig, providerPo
         if (!usageResults) {
             // Cache does not exist or refresh required, re-query
             logger.info(`[Usage API] Fetching fresh usage data for ${providerType}`);
+            logUsageRequestDebug(debugEnabled, `GET /api/usage/${providerType} fresh query started`, {
+                providerType
+            });
+            const freshQueryStartedAt = Date.now();
             usageResults = await getProviderTypeUsage(providerType, currentConfig, providerPoolManager, {
                 usageConcurrency,
                 groupSize,
                 groupMinPoolSize
             });
+            logUsageRequestDebug(debugEnabled, `GET /api/usage/${providerType} fresh query completed`, {
+                providerType,
+                durationMs: Date.now() - freshQueryStartedAt,
+                instanceCount: getUsageInstanceCount(usageResults),
+                totalCount: Number(usageResults?.totalCount || 0),
+                successCount: Number(usageResults?.successCount || 0),
+                errorCount: Number(usageResults?.errorCount || 0),
+                timestamp: usageResults?.timestamp || null,
+                fromCache: usageResults?.fromCache === true
+            });
             // 更新缓存
+            const cacheWriteStartedAt = Date.now();
             await updateProviderUsageCache(providerType, usageResults);
+            logUsageRequestDebug(debugEnabled, `GET /api/usage/${providerType} cache write completed`, {
+                providerType,
+                durationMs: Date.now() - cacheWriteStartedAt
+            });
         }
         
         // Always include current server time
@@ -1292,11 +1695,27 @@ export async function handleGetProviderUsage(req, res, currentConfig, providerPo
             ...usageResults,
             serverTime: new Date().toISOString()
         };
+
+        logUsageRequestDebug(debugEnabled, `GET /api/usage/${providerType} completed`, {
+            providerType,
+            durationMs: Date.now() - startedAt,
+            instanceCount: getUsageInstanceCount(finalResults),
+            totalCount: Number(finalResults?.totalCount || 0),
+            successCount: Number(finalResults?.successCount || 0),
+            errorCount: Number(finalResults?.errorCount || 0),
+            timestamp: finalResults?.timestamp || null,
+            fromCache: finalResults?.fromCache === true
+        });
         
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(finalResults));
         return true;
     } catch (error) {
+        logUsageRequestDebug(debugEnabled, `GET /api/usage/${providerType} failed`, {
+            providerType,
+            durationMs: Date.now() - startedAt,
+            message: error?.message || String(error)
+        }, 'warn');
         logger.error(`[UI API] Failed to get usage for ${providerType}:`, error);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({

@@ -71,6 +71,76 @@ class AuthManager {
     }
 }
 
+const UI_DEBUG_STORAGE_KEY = 'aiclient.ui_debug';
+const UI_DEBUG_QUERY_KEY = 'ui_debug';
+const UI_DEBUG_HEADER = 'X-UI-Debug';
+const UI_DEBUG_SLOW_REQUEST_MS = 3000;
+
+function syncUiDebugModeFromUrl() {
+    try {
+        const searchParams = new URLSearchParams(window.location.search);
+        const uiDebugValue = searchParams.get(UI_DEBUG_QUERY_KEY);
+        if (uiDebugValue === '1' || uiDebugValue === 'true') {
+            localStorage.setItem(UI_DEBUG_STORAGE_KEY, '1');
+            return;
+        }
+
+        if (uiDebugValue === '0' || uiDebugValue === 'false') {
+            localStorage.removeItem(UI_DEBUG_STORAGE_KEY);
+        }
+    } catch (error) {
+        console.warn('[UI Debug] Failed to sync debug mode from URL:', error);
+    }
+}
+
+function isUiDebugModeEnabled() {
+    syncUiDebugModeFromUrl();
+    if (typeof window.__AICLIENT_FORCE_UI_DEBUG__ === 'boolean') {
+        return window.__AICLIENT_FORCE_UI_DEBUG__;
+    }
+    return localStorage.getItem(UI_DEBUG_STORAGE_KEY) === '1';
+}
+
+function buildUiDebugHeaders() {
+    return isUiDebugModeEnabled() ? { [UI_DEBUG_HEADER]: '1' } : {};
+}
+
+function logUiDebug(message, payload = null, level = 'log') {
+    if (!isUiDebugModeEnabled()) {
+        return;
+    }
+
+    const consoleMethod = typeof console[level] === 'function' ? console[level] : console.log;
+    if (payload !== null && payload !== undefined) {
+        consoleMethod.call(console, `[UI Debug] ${message}`, payload);
+        return;
+    }
+
+    consoleMethod.call(console, `[UI Debug] ${message}`);
+}
+
+function startUiDebugPendingTimer(method, endpoint) {
+    if (!isUiDebugModeEnabled()) {
+        return null;
+    }
+
+    return window.setTimeout(() => {
+        logUiDebug(`${method} ${endpoint} still pending`, {
+            thresholdMs: UI_DEBUG_SLOW_REQUEST_MS
+        }, 'warn');
+    }, UI_DEBUG_SLOW_REQUEST_MS);
+}
+
+function clearUiDebugPendingTimer(timerId) {
+    if (timerId) {
+        window.clearTimeout(timerId);
+    }
+}
+
+syncUiDebugModeFromUrl();
+window.isUiDebugModeEnabled = isUiDebugModeEnabled;
+window.logUiDebug = logUiDebug;
+
 /**
  * API调用封装类
  */
@@ -85,11 +155,14 @@ class ApiClient {
      */
     getAuthHeaders() {
         const token = this.authManager.getToken();
+        const debugHeaders = buildUiDebugHeaders();
         return token ? {
             'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            ...debugHeaders
         } : {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            ...debugHeaders
         };
     }
 
@@ -108,16 +181,22 @@ class ApiClient {
         const url = `${this.baseURL}/api${endpoint}`;
         const headers = {
             ...this.getAuthHeaders(),
-            ...options.headers
+            ...options.headers,
+            ...buildUiDebugHeaders()
         };
 
         const config = {
             ...options,
             headers
         };
+        const method = (config.method || 'GET').toUpperCase();
+        const startedAt = Date.now();
+        const pendingTimer = startUiDebugPendingTimer(method, endpoint);
+        logUiDebug(`${method} ${endpoint} started`, { url });
 
         try {
             const response = await fetch(url, config);
+            clearUiDebugPendingTimer(pendingTimer);
             
             // 如果是401错误，重定向到登录页
             if (response.status === 401) {
@@ -126,16 +205,29 @@ class ApiClient {
             }
 
             const contentType = response.headers.get('content-type');
+            logUiDebug(`${method} ${endpoint} completed`, {
+                status: response.status,
+                durationMs: Date.now() - startedAt,
+                contentType
+            });
             if (contentType && contentType.includes('application/json')) {
                 return await response.json();
             } else {
                 return await response.text();
             }
         } catch (error) {
+            clearUiDebugPendingTimer(pendingTimer);
             if (error.message === '未授权访问') {
                 // 已经在handleUnauthorized中处理了重定向
+                logUiDebug(`${method} ${endpoint} unauthorized`, {
+                    durationMs: Date.now() - startedAt
+                }, 'warn');
                 throw error;
             }
+            logUiDebug(`${method} ${endpoint} failed`, {
+                durationMs: Date.now() - startedAt,
+                error: error.message
+            }, 'error');
             console.error('API请求错误:', error);
             throw error;
         }
@@ -185,7 +277,9 @@ class ApiClient {
         
         // 获取认证token
         const token = this.authManager.getToken();
-        const headers = {};
+        const headers = {
+            ...buildUiDebugHeaders()
+        };
         
         // 如果有token，添加Authorization头部
         if (token) {
@@ -198,9 +292,13 @@ class ApiClient {
             headers,
             body: formData
         };
+        const startedAt = Date.now();
+        const pendingTimer = startUiDebugPendingTimer('POST', endpoint);
+        logUiDebug(`POST ${endpoint} upload started`, { url });
 
         try {
             const response = await fetch(url, config);
+            clearUiDebugPendingTimer(pendingTimer);
             
             // 如果是401错误，重定向到登录页
             if (response.status === 401) {
@@ -209,16 +307,28 @@ class ApiClient {
             }
 
             const contentType = response.headers.get('content-type');
+            logUiDebug(`POST ${endpoint} upload completed`, {
+                status: response.status,
+                durationMs: Date.now() - startedAt,
+                contentType
+            });
             if (contentType && contentType.includes('application/json')) {
                 return await response.json();
             } else {
                 return await response.text();
             }
         } catch (error) {
+            clearUiDebugPendingTimer(pendingTimer);
             if (error.message === '未授权访问') {
-                // 已经在handleUnauthorized中处理了重定向
+                logUiDebug(`POST ${endpoint} upload unauthorized`, {
+                    durationMs: Date.now() - startedAt
+                }, 'warn');
                 throw error;
             }
+            logUiDebug(`POST ${endpoint} upload failed`, {
+                durationMs: Date.now() - startedAt,
+                error: error.message
+            }, 'error');
             console.error('API请求错误:', error);
             throw error;
         }
@@ -263,19 +373,29 @@ async function logout() {
  * 登录函数（供登录页面使用）
  */
 async function login(password, rememberMe = false) {
+    const startedAt = Date.now();
+    const pendingTimer = startUiDebugPendingTimer('POST', '/login');
     try {
+        logUiDebug('POST /login started');
         const response = await fetch('/api/login', {
             method: 'POST',
             headers: {
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                ...buildUiDebugHeaders()
             },
             body: JSON.stringify({
             password,
             rememberMe
             })
         });
+        clearUiDebugPendingTimer(pendingTimer);
 
         const data = await response.json();
+        logUiDebug('POST /login completed', {
+            status: response.status,
+            durationMs: Date.now() - startedAt,
+            success: data.success === true
+        });
 
         if (data.success) {
             // 保存token
@@ -286,6 +406,11 @@ async function login(password, rememberMe = false) {
             return { success: false, message: data.message };
         }
     } catch (error) {
+        clearUiDebugPendingTimer(pendingTimer);
+        logUiDebug('POST /login failed', {
+            durationMs: Date.now() - startedAt,
+            error: error.message
+        }, 'error');
         console.error('登录错误:', error);
         return { success: false, message: '登录失败，请检查网络连接' };
     }

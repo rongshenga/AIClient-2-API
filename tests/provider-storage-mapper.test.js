@@ -56,6 +56,45 @@ describe('provider-storage-mapper', () => {
         expect(record.fileIndex).toBeNull();
     });
 
+    test('should generate distinct provider ids for different credential paths and inline secrets', () => {
+        const credentialA = splitProviderConfig('openai-codex-oauth', {
+            customName: 'Codex Node',
+            OPENAI_BASE_URL: 'https://api.example.com/v1',
+            CODEX_OAUTH_CREDS_FILE_PATH: 'configs/codex/a.json'
+        });
+        const credentialB = splitProviderConfig('openai-codex-oauth', {
+            customName: 'Codex Node',
+            OPENAI_BASE_URL: 'https://api.example.com/v1',
+            CODEX_OAUTH_CREDS_FILE_PATH: 'configs/codex/b.json'
+        });
+        const secretA = splitProviderConfig('grok-custom', {
+            customName: 'Grok Node',
+            GROK_BASE_URL: 'https://grok.example.com',
+            GROK_COOKIE_TOKEN: 'cookie-a'
+        });
+        const secretB = splitProviderConfig('grok-custom', {
+            customName: 'Grok Node',
+            GROK_BASE_URL: 'https://grok.example.com',
+            GROK_COOKIE_TOKEN: 'cookie-b'
+        });
+
+        expect(credentialA.providerId).not.toBe(credentialB.providerId);
+        expect(secretA.providerId).not.toBe(secretB.providerId);
+    });
+
+    test('should fall back to routing uuid when no credential or secret discriminator exists', () => {
+        const first = splitProviderConfig('forward', {
+            uuid: 'forward-1',
+            FORWARD_BASE_URL: 'https://forward.example.com'
+        });
+        const second = splitProviderConfig('forward', {
+            uuid: 'forward-2',
+            FORWARD_BASE_URL: 'https://forward.example.com'
+        });
+
+        expect(first.providerId).not.toBe(second.providerId);
+    });
+
     test('should split provider configs into registration runtime secrets and credential references', () => {
         const result = splitProviderConfig('openai-codex-oauth', {
             uuid: 'provider-uuid-1',

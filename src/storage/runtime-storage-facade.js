@@ -47,6 +47,10 @@ class UsageStorageDomainFacade extends StorageDomainFacade {
         return await this.storage.loadUsageCacheSnapshot();
     }
 
+    async loadCacheSummary() {
+        return await this.storage.loadUsageCacheSummary();
+    }
+
     async replaceCacheSnapshot(usageCache = null) {
         return await this.storage.replaceUsageCacheSnapshot(usageCache);
     }
@@ -240,6 +244,10 @@ export class RuntimeStorageFacade {
 
     async loadUsageCacheSnapshot() {
         return await this.usage.loadCacheSnapshot();
+    }
+
+    async loadUsageCacheSummary() {
+        return await this.usage.loadCacheSummary();
     }
 
     async replaceUsageCacheSnapshot(usageCache = null) {

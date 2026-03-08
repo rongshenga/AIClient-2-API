@@ -15,33 +15,19 @@ function initNavigation() {
         item.addEventListener('click', (e) => {
             e.preventDefault();
             const sectionId = item.dataset.section;
-
-            // 更新导航状态
-            elements.navItems.forEach(nav => nav.classList.remove('active'));
-            item.classList.add('active');
-
-            // 显示对应章节
-            elements.sections.forEach(section => {
-                section.classList.remove('active');
-                if (section.id === sectionId) {
-                    section.classList.add('active');
-                    
-                    // 如果是日志页面，默认滚动到底部
-                    if (sectionId === 'logs') {
-                        setTimeout(() => {
-                            const logsContainer = document.getElementById('logsContainer');
-                            if (logsContainer) {
-                                logsContainer.scrollTop = logsContainer.scrollHeight;
-                            }
-                        }, 100);
-                    }
-                }
-            });
-
-            // 滚动到顶部
-            scrollToTop();
+            switchToSection(sectionId);
         });
     });
+}
+
+function emitSectionActivated(sectionId) {
+    if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function' || typeof CustomEvent !== 'function') {
+        return;
+    }
+
+    window.dispatchEvent(new CustomEvent('ui:section-activated', {
+        detail: { sectionId }
+    }));
 }
 
 /**
@@ -77,6 +63,7 @@ function switchToSection(sectionId) {
 
     // 滚动到顶部
     scrollToTop();
+    emitSectionActivated(sectionId);
 }
 
 /**

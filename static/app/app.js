@@ -92,61 +92,111 @@ function loadInitialData() {
     // showToast('数据已刷新', 'success');
 }
 
+const APP_INIT_STATE = {
+    IDLE: 'idle',
+    RUNNING: 'running',
+    COMPLETED: 'completed'
+};
+
+let appInitState = APP_INIT_STATE.IDLE;
+let timeDisplayTimer = null;
+let providerRefreshTimer = null;
+
+function hasRenderedUiComponents() {
+    const sidebarContainer = document.getElementById('sidebar-container');
+    const contentContainer = document.getElementById('content-container');
+    if (!sidebarContainer || !contentContainer) {
+        return false;
+    }
+
+    return sidebarContainer.children.length > 0 || contentContainer.children.length > 0;
+}
+
+function areUiComponentsReady() {
+    return window.__AICLIENT_UI_COMPONENTS_READY === true || hasRenderedUiComponents();
+}
+
+function runInitStep(stepName, fn) {
+    try {
+        fn();
+        console.log(`[UI App] ${stepName} initialized`);
+    } catch (error) {
+        console.error(`[UI App] ${stepName} initialization failed:`, error);
+    }
+}
+
 /**
  * 初始化应用
  */
 function initApp() {
-    // 设置数据加载器
-    setDataLoaders(loadInitialData, saveConfiguration);
-    
-    // 设置reloadConfig函数
-    setReloadConfig(reloadConfig);
-    
-    // 设置提供商加载器
-    setProviderLoaders(loadProviders, refreshProviderConfig);
-    
-    // 设置配置加载器
-    setConfigLoaders(loadConfigList);
-    
-    // 初始化各个模块
-    initNavigation();
-    initEventListeners();
-    initEventStream();
-    initFileUpload(); // 初始化文件上传功能
-    initRoutingExamples(); // 初始化路径路由示例功能
-    initUploadConfigManager(); // 初始化配置管理功能
-    initUsageManager(); // 初始化用量管理功能
-    initPluginManager(); // 初始化插件管理功能
-    initTutorialManager(); // 初始化教程管理功能
-    initMobileMenu(); // 初始化移动端菜单
-    loadInitialData();
-    
-    // 显示欢迎消息
-    showToast(t('common.success'), t('common.welcome'), 'success');
-    
-    // 每5秒更新服务器时间显示
-    setInterval(() => {
-        updateTimeDisplay();
-    }, 5000);
-    
-    // 定期刷新系统信息
-    setInterval(() => {
-        loadProviders();
+    if (appInitState === APP_INIT_STATE.RUNNING || appInitState === APP_INIT_STATE.COMPLETED) {
+        return;
+    }
 
-        if (providerStats.activeProviders > 0) {
-            const stats = getProviderStats(providerStats);
-            console.log('=== 提供商统计报告 ===');
-            console.log(`活跃提供商: ${stats.activeProviders}`);
-            console.log(`健康提供商: ${stats.healthyProviders} (${stats.healthRatio})`);
-            console.log(`总账户数: ${stats.totalAccounts}`);
-            console.log(`总请求数: ${stats.totalRequests}`);
-            console.log(`总错误数: ${stats.totalErrors}`);
-            console.log(`成功率: ${stats.successRate}`);
-            console.log(`平均每提供商请求数: ${stats.avgUsagePerProvider}`);
-            console.log('========================');
+    appInitState = APP_INIT_STATE.RUNNING;
+    console.log('[UI App] initApp starting');
+
+    try {
+        runInitStep('data loaders', () => setDataLoaders(loadInitialData, saveConfiguration));
+        runInitStep('reload config hook', () => setReloadConfig(reloadConfig));
+        runInitStep('provider loaders', () => setProviderLoaders(loadProviders, refreshProviderConfig));
+        runInitStep('config loaders', () => setConfigLoaders(loadConfigList));
+
+        runInitStep('navigation', initNavigation);
+        runInitStep('event listeners', initEventListeners);
+        runInitStep('event stream', initEventStream);
+        runInitStep('file upload', initFileUpload);
+        runInitStep('routing examples', initRoutingExamples);
+        runInitStep('upload config manager', initUploadConfigManager);
+        runInitStep('usage manager', initUsageManager);
+        runInitStep('plugin manager', initPluginManager);
+        runInitStep('tutorial manager', initTutorialManager);
+        runInitStep('mobile menu', initMobileMenu);
+        runInitStep('initial data', loadInitialData);
+
+        showToast(t('common.success'), t('common.welcome'), 'success');
+
+        if (!timeDisplayTimer) {
+            timeDisplayTimer = setInterval(() => {
+                updateTimeDisplay();
+            }, 5000);
         }
-    }, REFRESH_INTERVALS.SYSTEM_INFO);
 
+        if (!providerRefreshTimer) {
+            providerRefreshTimer = setInterval(() => {
+                loadProviders();
+
+                if (providerStats.activeProviders > 0) {
+                    const stats = getProviderStats(providerStats);
+                    console.log('=== 提供商统计报告 ===');
+                    console.log(`活跃提供商: ${stats.activeProviders}`);
+                    console.log(`健康提供商: ${stats.healthyProviders} (${stats.healthRatio})`);
+                    console.log(`总账户数: ${stats.totalAccounts}`);
+                    console.log(`总请求数: ${stats.totalRequests}`);
+                    console.log(`总错误数: ${stats.totalErrors}`);
+                    console.log(`成功率: ${stats.successRate}`);
+                    console.log(`平均每提供商请求数: ${stats.avgUsagePerProvider}`);
+                    console.log('========================');
+                }
+            }, REFRESH_INTERVALS.SYSTEM_INFO);
+        }
+
+        appInitState = APP_INIT_STATE.COMPLETED;
+        console.log('[UI App] initApp completed');
+    } catch (error) {
+        appInitState = APP_INIT_STATE.IDLE;
+        console.error('[UI App] initApp failed:', error);
+    }
+}
+
+function tryInitApp(trigger = 'unknown') {
+    if (!areUiComponentsReady()) {
+        console.log(`[UI App] skip initApp (${trigger}): components not ready`);
+        return;
+    }
+
+    console.log(`[UI App] try initApp from ${trigger}`);
+    initApp();
 }
 
 /**
@@ -198,26 +248,16 @@ function initMobileMenu() {
 
 // 等待组件加载完成后初始化应用
 // 组件加载器会在所有组件加载完成后触发 'componentsLoaded' 事件
-window.addEventListener('componentsLoaded', initApp);
-
-// 如果组件已经加载完成（例如页面刷新后），也需要初始化
-// 检查是否有组件已经存在
-document.addEventListener('DOMContentLoaded', () => {
-    // 如果 sidebar 和 content 已经有内容，说明组件已加载
-    const sidebarContainer = document.getElementById('sidebar-container');
-    const contentContainer = document.getElementById('content-container');
-    
-    // 如果容器不存在或为空，说明使用的是组件加载方式，等待 componentsLoaded 事件
-    // 如果容器已有内容，说明是静态 HTML，直接初始化
-    if (sidebarContainer && contentContainer) {
-        const hasContent = sidebarContainer.children.length > 0 || contentContainer.children.length > 0;
-        if (hasContent) {
-            // 静态 HTML 方式，直接初始化
-            initApp();
-        }
-        // 否则等待 componentsLoaded 事件
-    }
+window.addEventListener('componentsLoaded', () => {
+    tryInitApp('componentsLoaded');
 });
+
+// 如果组件已经加载完成（例如 app.js 在 componentsLoaded 之后才完成加载），也需要兜底初始化
+document.addEventListener('DOMContentLoaded', () => {
+    tryInitApp('DOMContentLoaded');
+});
+
+tryInitApp('module-load');
 
 // 导出全局函数供其他模块使用
 window.loadProviders = loadProviders;

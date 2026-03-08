@@ -28,6 +28,14 @@ let providersSectionLoadingCount = 0;
 let providerDetailsGlobalLoadingCount = 0;
 let providerDetailsGlobalLoadingEl = null;
 
+function logProviderDebug(message, payload = null, level = 'log') {
+    if (typeof window === 'undefined' || typeof window.logUiDebug !== 'function') {
+        return;
+    }
+
+    window.logUiDebug(message, payload, level);
+}
+
 /**
  * 设置提供商池列表区域 loading 状态
  * @param {boolean} isLoading - 是否显示 loading
@@ -481,8 +489,16 @@ function hideProviderGlobalLoading() {
  * 加载系统信息
  */
 async function loadSystemInfo() {
+    const startedAt = Date.now();
+    logProviderDebug('loadSystemInfo started');
+
     try {
         const data = await window.apiClient.get('/system');
+        logProviderDebug('loadSystemInfo system payload loaded', {
+            durationMs: Date.now() - startedAt,
+            appVersion: data.appVersion || '--',
+            runtimeStorageBackend: data?.runtimeStorage?.backend || '--'
+        });
 
         const appVersionEl = document.getElementById('appVersion');
         const nodeVersionEl = document.getElementById('nodeVersion');
@@ -518,8 +534,15 @@ async function loadSystemInfo() {
         });
         const runtimeStoragePanel = renderRuntimeStorageDiagnostics(runtimeStorageViewModel);
         bindRuntimeStorageDiagnosticsActions(runtimeStoragePanel, runtimeStorageViewModel);
+        logProviderDebug('loadSystemInfo completed', {
+            durationMs: Date.now() - startedAt
+        });
 
     } catch (error) {
+        logProviderDebug('loadSystemInfo failed', {
+            durationMs: Date.now() - startedAt,
+            error: error.message
+        }, 'error');
         console.error('Failed to load system info:', error);
         const runtimeStorageViewModel = buildRuntimeStorageDiagnosticsViewModel({}, {
             error,
@@ -534,8 +557,16 @@ async function loadSystemInfo() {
  * 加载服务运行模式信息
  */
 async function loadServiceModeInfo() {
+    const startedAt = Date.now();
+    logProviderDebug('loadServiceModeInfo started');
+
     try {
         const data = await window.apiClient.get('/service-mode');
+        logProviderDebug('loadServiceModeInfo payload loaded', {
+            durationMs: Date.now() - startedAt,
+            mode: data.mode || '--',
+            pid: data.pid || '--'
+        });
         
         const serviceModeEl = document.getElementById('serviceMode');
         const processPidEl = document.getElementById('processPid');
@@ -571,8 +602,16 @@ async function loadServiceModeInfo() {
             };
             platformInfoEl.textContent = platformMap[data.platform] || data.platform || '--';
         }
+
+        logProviderDebug('loadServiceModeInfo completed', {
+            durationMs: Date.now() - startedAt
+        });
         
     } catch (error) {
+        logProviderDebug('loadServiceModeInfo failed', {
+            durationMs: Date.now() - startedAt,
+            error: error.message
+        }, 'error');
         console.error('Failed to load service mode info:', error);
     }
 }
@@ -650,6 +689,8 @@ function updateTimeDisplay() {
 async function loadProviders() {
     let loadingTimer = null;
     let hasDisplayedSectionLoading = false;
+    const startedAt = Date.now();
+    logProviderDebug('loadProviders started');
 
     try {
         loadingTimer = window.setTimeout(() => {
@@ -660,10 +701,18 @@ async function loadProviders() {
         }, PROVIDERS_LIST_LOADING_DELAY_MS);
 
         const providers = await window.apiClient.get('/providers/summary');
+        logProviderDebug('loadProviders summary loaded', {
+            durationMs: Date.now() - startedAt,
+            providerTypeCount: Object.keys(providers || {}).length
+        });
 
         // 动态更新其他模块的提供商信息，只需更新一次
         if (!isStaticProviderConfigsUpdated) {
             cachedSupportedProviders = await window.apiClient.get('/providers/supported');
+            logProviderDebug('loadProviders supported loaded', {
+                durationMs: Date.now() - startedAt,
+                supportedProviderCount: Array.isArray(cachedSupportedProviders) ? cachedSupportedProviders.length : 0
+            });
             const providerConfigs = getProviderConfigs(cachedSupportedProviders);
             
             // 动态更新凭据文件管理的提供商类型筛选项
@@ -688,7 +737,14 @@ async function loadProviders() {
         }
 
         renderProviders(providers, cachedSupportedProviders);
+        logProviderDebug('loadProviders completed', {
+            durationMs: Date.now() - startedAt
+        });
     } catch (error) {
+        logProviderDebug('loadProviders failed', {
+            durationMs: Date.now() - startedAt,
+            error: error.message
+        }, 'error');
         console.error('Failed to load providers:', error);
     } finally {
         if (loadingTimer) {

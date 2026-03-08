@@ -45,6 +45,7 @@ function annotateSqliteCliError(error, context = {}) {
         attempt: context.attempt,
         maxAttempts: context.maxAttempts,
         busyTimeoutMs: context.busyTimeoutMs,
+        timeoutMs: context.timeoutMs,
         retryDelayMs: context.retryDelayMs,
         jsonMode: context.json === true,
         stderr: context.stderr || undefined
@@ -175,6 +176,8 @@ ${schemaSql}
         if (options.json) {
             args.push('-json');
         }
+        args.push('-cmd', 'PRAGMA foreign_keys = ON;');
+        args.push('-cmd', `.timeout ${this.busyTimeoutMs}`);
         args.push(this.dbPath);
 
         return await new Promise((resolve, reject) => {
@@ -184,6 +187,16 @@ ${schemaSql}
 
             let stdout = '';
             let stderr = '';
+            let timedOut = false;
+            const timeoutMs = Number(options.timeoutMs || 0);
+            let killTimer = null;
+
+            if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+                killTimer = setTimeout(() => {
+                    timedOut = true;
+                    child.kill('SIGKILL');
+                }, timeoutMs);
+            }
 
             child.stdout.on('data', (chunk) => {
                 stdout += chunk.toString();
@@ -194,11 +207,25 @@ ${schemaSql}
             });
 
             child.on('error', (error) => {
+                if (killTimer) {
+                    clearTimeout(killTimer);
+                }
                 error.stderr = stderr.trim();
                 reject(error);
             });
 
             child.on('close', (code) => {
+                if (killTimer) {
+                    clearTimeout(killTimer);
+                }
+                if (timedOut) {
+                    const failure = new Error(`sqlite3 query timed out after ${timeoutMs}ms`);
+                    failure.stderr = stderr.trim();
+                    failure.code = 'SQLITE_TIMEOUT';
+                    failure.retryable = false;
+                    reject(failure);
+                    return;
+                }
                 if (code !== 0) {
                     const failure = new Error(stderr.trim() || `sqlite3 exited with code ${code}`);
                     failure.stderr = stderr.trim();

@@ -319,6 +319,18 @@ export class DualWriteRuntimeStorage {
         });
     }
 
+    async loadUsageCacheSummary() {
+        return await executePrimary(this.primaryStorage, 'loadUsageCacheSummary', 'read', async (storage) => {
+            if (typeof storage.loadUsageCacheSummary === 'function') {
+                return await storage.loadUsageCacheSummary();
+            }
+            return await storage.loadUsageCacheSnapshot();
+        }, {
+            replaySafe: true,
+            replayBoundary: 'usage_cache_summary_read'
+        });
+    }
+
     async replaceUsageCacheSnapshot(usageCache = null) {
         return await executeMirroredWrite(
             this,

@@ -437,7 +437,9 @@ export function buildCredentialAssetRecord({
 }
 
 function buildStableProviderIdentitySource(providerConfig = {}) {
-    const stableConfig = {};
+    const staticConfig = {};
+    const credentialPaths = {};
+    const inlineSecretFingerprints = {};
 
     for (const [key, value] of Object.entries(providerConfig || {})) {
         if (key === 'uuid' || key === '__providerId') {
@@ -453,29 +455,48 @@ function buildStableProviderIdentitySource(providerConfig = {}) {
             continue;
         }
         if (isCredentialPathField(key)) {
+            const normalizedPath = normalizeStoredPath(value);
+            if (normalizedPath) {
+                credentialPaths[key] = normalizedPath;
+            }
             continue;
         }
         if (isInlineSecretField(key)) {
+            inlineSecretFingerprints[key] = stableHash(stableSerialize(value));
             continue;
         }
 
-        stableConfig[key] = value;
+        staticConfig[key] = value;
     }
 
-    return sortObject(stableConfig);
+    return sortObject({
+        staticConfig,
+        credentialPaths,
+        inlineSecretFingerprints
+    });
 }
 
-function buildIdentitySeed(providerType, providerConfig, sanitizedConfig) {
-    const preferredKeys = Object.keys(sanitizedConfig || {})
-        .filter((key) => key.endsWith('_FILE_PATH') || key.endsWith('_CREDS_FILE_PATH') || key.endsWith('_TOKEN_FILE_PATH') || key.endsWith('_BASE_URL'))
-        .sort()
-        .map((key) => `${key}:${sanitizedConfig[key]}`);
+function buildIdentitySeed(providerType, providerConfig, identitySource) {
+    const normalizedIdentitySource = identitySource && typeof identitySource === 'object'
+        ? identitySource
+        : {};
+    const identityDiscriminator = {
+        customName: providerConfig?.customName || '',
+        staticConfig: normalizedIdentitySource.staticConfig || {},
+        credentialPaths: normalizedIdentitySource.credentialPaths || {},
+        inlineSecretFingerprints: normalizedIdentitySource.inlineSecretFingerprints || {}
+    };
+
+    const hasStrongDiscriminator = Object.keys(identityDiscriminator.credentialPaths).length > 0
+        || Object.keys(identityDiscriminator.inlineSecretFingerprints).length > 0;
+
+    if (!hasStrongDiscriminator && providerConfig?.uuid) {
+        identityDiscriminator.routingUuid = providerConfig.uuid;
+    }
 
     return [
         providerType,
-        providerConfig?.customName || '',
-        preferredKeys.join('|'),
-        stableSerialize(sanitizedConfig)
+        stableSerialize(identityDiscriminator)
     ].join('::');
 }
 

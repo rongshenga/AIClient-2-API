@@ -1546,6 +1546,8 @@ async function clearUsageDomain(client) {
 BEGIN IMMEDIATE;
 DELETE FROM usage_refresh_tasks;
 DELETE FROM usage_snapshots;
+DELETE FROM runtime_settings
+WHERE scope = 'usage_cache' AND key = 'timestamp';
 COMMIT;
     `);
 }
@@ -1566,11 +1568,13 @@ DELETE FROM potluck_api_keys;
 DELETE FROM potluck_user_credentials;
 DELETE FROM potluck_users;
 DELETE FROM potluck_config;
-DELETE FROM runtime_settings WHERE scope IN (
-    'compat_export',
-    'potluck_api_key_legacy',
-    'migration_manifest'
-);
+DELETE FROM runtime_settings
+WHERE scope = 'potluck_api_key_legacy'
+   OR scope = 'migration_manifest'
+   OR (scope = 'compat_export' AND key IN (
+        'api-potluck-data',
+        'api-potluck-keys'
+   ));
 COMMIT;
     `);
 }
@@ -1670,49 +1674,18 @@ INSERT INTO credential_bindings (
     await client.exec(statements.join('\n'));
 }
 
+function createSqliteRuntimeStorageView(client) {
+    const storage = new SqliteRuntimeStorage({
+        RUNTIME_STORAGE_DB_PATH: client?.dbPath || 'configs/runtime/runtime-storage.sqlite'
+    });
+    storage.client = client;
+    storage.initialized = true;
+    return storage;
+}
+
 async function importUsageCache(client, usageCache, timestamp) {
-    const statements = ['BEGIN IMMEDIATE;'];
-
-    for (const [providerType, usageData] of Object.entries(usageCache.providers || {})) {
-        const normalizedUsage = normalizeProviderUsage(providerType, usageData, usageCache.timestamp);
-        statements.push(`
-INSERT INTO usage_snapshots (
-    id,
-    provider_type,
-    provider_id,
-    snapshot_at,
-    total_count,
-    success_count,
-    error_count,
-    payload_json
-) VALUES (
-    ${sqlValue(createStableId('usage', [providerType, normalizedUsage.timestamp]))},
-    ${sqlValue(providerType)},
-    NULL,
-    ${sqlValue(normalizedUsage.timestamp || timestamp)},
-    ${sqlValue(normalizedUsage.totalCount)},
-    ${sqlValue(normalizedUsage.successCount)},
-    ${sqlValue(normalizedUsage.errorCount)},
-    ${sqlValue(JSON.stringify(sortObject(normalizedUsage)))}
-);
-        `);
-    }
-
-    statements.push(`
-INSERT INTO runtime_settings (scope, key, value_json, updated_at)
-VALUES (
-    'compat_export',
-    'usage-cache',
-    ${sqlValue(JSON.stringify(sortObject(usageCache)))},
-    ${sqlValue(timestamp)}
-)
-ON CONFLICT(scope, key) DO UPDATE SET
-    value_json = excluded.value_json,
-    updated_at = excluded.updated_at;
-    `);
-    statements.push('COMMIT;');
-
-    await client.exec(statements.join('\n'));
+    const storage = createSqliteRuntimeStorageView(client);
+    await storage.replaceUsageCacheSnapshot(normalizeUsageCache(usageCache));
 }
 
 async function importTokenStore(client, tokenStore, timestamp) {
@@ -2011,42 +1984,9 @@ ORDER BY user_id ASC, credential_asset_id ASC;
 }
 
 async function exportUsageCacheFromDb(client) {
-    const compatRow = await client.query(`
-SELECT value_json
-FROM runtime_settings
-WHERE scope = 'compat_export' AND key = 'usage-cache'
-LIMIT 1;
-    `);
-
-    if (compatRow[0]?.value_json) {
-        return normalizeUsageCache(parseJsonSafe(compatRow[0].value_json, null));
-    }
-
-    const rows = await client.query(`
-SELECT provider_type, snapshot_at, total_count, success_count, error_count, payload_json
-FROM usage_snapshots
-ORDER BY provider_type ASC, snapshot_at DESC;
-    `);
-
-    const providers = {};
-    let latestTimestamp = null;
-
-    for (const row of rows) {
-        if (providers[row.provider_type]) {
-            continue;
-        }
-
-        const payload = parseJsonSafe(row.payload_json, {});
-        providers[row.provider_type] = normalizeProviderUsage(row.provider_type, payload, row.snapshot_at);
-        latestTimestamp = latestTimestamp && latestTimestamp > row.snapshot_at
-            ? latestTimestamp
-            : row.snapshot_at;
-    }
-
-    return normalizeUsageCache({
-        timestamp: latestTimestamp || nowIso(),
-        providers
-    });
+    const storage = createSqliteRuntimeStorageView(client);
+    const usageCache = await storage.loadUsageCacheSnapshot();
+    return normalizeUsageCache(usageCache);
 }
 
 function buildAdminSessionsSummary(sessions = []) {
@@ -2630,7 +2570,9 @@ function normalizeCutoverPolicy(options = {}) {
     const blockedAnomalyCodes = Array.isArray(options.blockedAnomalyCodes)
         ? options.blockedAnomalyCodes.map((item) => String(item).trim()).filter(Boolean)
         : [];
-    const parsedMaxAnomalyCount = Number(options.maxAnomalyCount);
+    const rawMaxAnomalyCount = options.maxAnomalyCount;
+    const hasMaxAnomalyCount = rawMaxAnomalyCount !== undefined && rawMaxAnomalyCount !== null && rawMaxAnomalyCount !== '';
+    const parsedMaxAnomalyCount = hasMaxAnomalyCount ? Number(rawMaxAnomalyCount) : NaN;
 
     return {
         blockedAnomalyCodes,
@@ -3401,7 +3343,11 @@ WHERE run_id = ${sqlValue(runId)};
                 itemType: 'provider_registry',
                 execute: async () => {
                     await storage.replaceProviderPoolsSnapshot(sourceBundle.providerPools, {
-                        sourceKind: 'legacy_migration'
+                        sourceKind: 'legacy_migration',
+                        progressInterval: options.progressInterval,
+                        credentialProgressInterval: options.credentialProgressInterval,
+                        prepareConcurrency: options.prepareConcurrency,
+                        insertBatchSize: options.insertBatchSize
                     });
 
                     return Object.entries(sourceBundle.providerPools || {}).map(([providerType, providers]) => ({
@@ -3509,16 +3455,24 @@ WHERE run_id = ${sqlValue(runId)};
         const totalBatchCount = pendingSteps.length === 0 ? 0 : Math.ceil(pendingSteps.length / stepBatchSize);
 
         let executedBatchCount = 0;
+        logger.info(`[RuntimeStorageMigration] Run ${runId} starting execute mode: ${pendingSteps.length} step(s), batchSize=${stepBatchSize}, totalBatches=${totalBatchCount}`);
         for (let batchIndex = 0; batchIndex < pendingSteps.length; batchIndex += stepBatchSize) {
             const batchSteps = pendingSteps.slice(batchIndex, batchIndex + stepBatchSize);
             const batchItems = [];
+            const batchNumber = executedBatchCount + 1;
+            logger.info(`[RuntimeStorageMigration] Run ${runId} starting batch ${batchNumber}/${totalBatchCount}: ${batchSteps.map((step) => step.itemType).join(', ')}`);
 
             for (const step of batchSteps) {
-                batchItems.push(...await step.execute());
+                const stepStartedAt = Date.now();
+                logger.info(`[RuntimeStorageMigration] Run ${runId} step started: ${step.itemType}`);
+                const stepItems = await step.execute();
+                batchItems.push(...stepItems);
+                logger.info(`[RuntimeStorageMigration] Run ${runId} step completed: ${step.itemType} (${Date.now() - stepStartedAt}ms, items=${stepItems.length})`);
             }
 
             await insertMigrationItems(storage.client, runId, batchItems);
             executedBatchCount += 1;
+            logger.info(`[RuntimeStorageMigration] Run ${runId} finished batch ${executedBatchCount}/${totalBatchCount}`);
 
             if (stopAfterBatch !== null && executedBatchCount >= stopAfterBatch && batchIndex + stepBatchSize < pendingSteps.length) {
                 const pausedSummary = {
@@ -3549,11 +3503,13 @@ WHERE run_id = ${sqlValue(runId)};
             }
         }
 
+        logger.info(`[RuntimeStorageMigration] Run ${runId} exporting legacy snapshot for verification`);
         const exportedBundle = await exportLegacyRuntimeStorage(config, {
             ...options,
             outputDir: artifactPaths.exportDir,
             domains: ['provider-pools', 'usage-cache', 'api-potluck-data', 'api-potluck-keys']
         });
+        logger.info(`[RuntimeStorageMigration] Run ${runId} verifying migrated runtime storage`);
         const report = await verifyRuntimeStorageMigration(config, {
             ...options,
             runId,
@@ -3581,6 +3537,7 @@ WHERE run_id = ${sqlValue(runId)};
 
         manifest.result = summary;
         await writeJsonFile(artifactPaths.manifestPath, manifest);
+        logger.info(`[RuntimeStorageMigration] Run ${runId} completed with validation status ${report.validationStatus}`);
         await updateMigrationRun(
             storage.client,
             runId,

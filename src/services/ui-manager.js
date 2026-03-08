@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'fs';
 import path from 'path';
+import logger from '../utils/logger.js';
 
 // Import UI modules
 import * as auth from '../ui-modules/auth.js';
@@ -16,12 +17,79 @@ import * as eventBroadcast from '../ui-modules/event-broadcast.js';
 // Re-export from event-broadcast module
 export { broadcastEvent, initializeUIManagement, handleUploadOAuthCredentials, upload } from '../ui-modules/event-broadcast.js';
 
+function normalizeUiDebugFlag(value) {
+    if (typeof value !== 'string') {
+        return false;
+    }
+
+    return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+function shouldEnableUiDebugLogging(req, currentConfig = {}) {
+    if (process.env.NODE_ENV === 'test' || currentConfig?.UI_DEBUG_LOGGING === true) {
+        return true;
+    }
+
+    const headerValue = req?.headers?.['x-ui-debug'];
+    if (Array.isArray(headerValue)) {
+        if (headerValue.some((item) => normalizeUiDebugFlag(item))) {
+            return true;
+        }
+    } else if (normalizeUiDebugFlag(headerValue)) {
+        return true;
+    }
+
+    try {
+        const requestUrl = new URL(req?.url || '/', 'http://127.0.0.1');
+        return normalizeUiDebugFlag(requestUrl.searchParams.get('ui_debug'));
+    } catch {
+        return false;
+    }
+}
+
+function logUiDebug(enabled, message, payload = null) {
+    if (!enabled) {
+        return;
+    }
+
+    if (payload) {
+        logger.info(`[UI Debug] ${message}`, payload);
+        return;
+    }
+
+    logger.info(`[UI Debug] ${message}`);
+}
+
+async function traceUiHandler(enabled, requestLabel, handlerName, executor) {
+    const startedAt = Date.now();
+    logUiDebug(enabled, `${requestLabel} -> ${handlerName} started`);
+
+    try {
+        const result = await executor();
+        logUiDebug(enabled, `${requestLabel} -> ${handlerName} completed`, {
+            durationMs: Date.now() - startedAt
+        });
+        return result;
+    } catch (error) {
+        logger.error(`[UI Debug] ${requestLabel} -> ${handlerName} failed`, {
+            durationMs: Date.now() - startedAt,
+            error: error.message
+        });
+        throw error;
+    }
+}
+
+function injectUiRuntimeFlags(content, currentConfig = {}) {
+    const uiDebugEnabled = currentConfig?.UI_DEBUG_LOGGING === true ? 'true' : 'false';
+    return content.replaceAll('__AICLIENT_UI_DEBUG_FLAG__', uiDebugEnabled);
+}
+
 /**
  * Serve static files for the UI
  * @param {string} path - The request path
  * @param {http.ServerResponse} res - The HTTP response object
  */
-export async function serveStaticFiles(pathParam, res) {
+export async function serveStaticFiles(pathParam, res, currentConfig = {}) {
     const filePath = path.join(process.cwd(), 'static', pathParam === '/' || pathParam === '/index.html' ? 'index.html' : pathParam.replace('/static/', ''));
 
     if (existsSync(filePath)) {
@@ -35,8 +103,18 @@ export async function serveStaticFiles(pathParam, res) {
             '.ico': 'image/x-icon'
         }[ext] || 'text/plain';
 
-        res.writeHead(200, { 'Content-Type': contentType });
-        res.end(readFileSync(filePath));
+        let responseBody = readFileSync(filePath);
+        if (ext === '.html') {
+            responseBody = injectUiRuntimeFlags(readFileSync(filePath, 'utf8'), currentConfig);
+        }
+
+        res.writeHead(200, {
+            'Content-Type': contentType,
+            'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0'
+        });
+        res.end(responseBody);
         return true;
     }
     return false;
@@ -53,20 +131,32 @@ export async function serveStaticFiles(pathParam, res) {
  * @returns {Promise<boolean>} - True if the request was handled by UI API
  */
 export async function handleUIApiRequests(method, pathParam, req, res, currentConfig, providerPoolManager) {
+    const uiDebugEnabled = shouldEnableUiDebugLogging(req, currentConfig);
+    const requestLabel = `${method} ${pathParam}`;
+
     // 处理登录接口
     if (method === 'POST' && pathParam === '/api/login') {
-        return await auth.handleLoginRequest(req, res);
+        return await traceUiHandler(uiDebugEnabled, requestLabel, 'login', async () => await auth.handleLoginRequest(req, res));
     }
 
     // 健康检查接口（用于前端token验证）
     if (method === 'GET' && pathParam === '/api/health') {
-        return await systemApi.handleHealthCheck(req, res);
+        return await traceUiHandler(uiDebugEnabled, requestLabel, 'health', async () => await systemApi.handleHealthCheck(req, res));
     }
     
     // Handle UI management API requests (需要token验证，除了登录接口、健康检查和Events接口)
     if (pathParam.startsWith('/api/') && pathParam !== '/api/login' && pathParam !== '/api/health' && pathParam !== '/api/events' && pathParam !== '/api/grok/assets') {
+        const authStartedAt = Date.now();
+        logUiDebug(uiDebugEnabled, `${requestLabel} -> auth started`);
+
         // 检查token验证
-        const isAuth = await auth.checkAuth(req);
+        const isAuth = await auth.checkAuth(req, {
+            debugEnabled: uiDebugEnabled,
+            requestLabel
+        });
+        logUiDebug(uiDebugEnabled, `${requestLabel} -> auth ${isAuth ? 'passed' : 'failed'}`, {
+            durationMs: Date.now() - authStartedAt
+        });
         if (!isAuth) {
             res.writeHead(401, {
                 'Content-Type': 'application/json',
@@ -97,7 +187,7 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
 
     // Get configuration
     if (method === 'GET' && pathParam === '/api/config') {
-        return await configApi.handleGetConfig(req, res, currentConfig);
+        return await traceUiHandler(uiDebugEnabled, requestLabel, 'config.get', async () => await configApi.handleGetConfig(req, res, currentConfig));
     }
 
     // Update configuration
@@ -107,7 +197,7 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
 
     // Get system information
     if (method === 'GET' && pathParam === '/api/system') {
-        return await systemApi.handleGetSystem(req, res);
+        return await traceUiHandler(uiDebugEnabled, requestLabel, 'system', async () => await systemApi.handleGetSystem(req, res));
     }
 
     // Download today's log file
@@ -127,12 +217,12 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
 
     // Get compact provider pools summary for list page
     if (method === 'GET' && pathParam === '/api/providers/summary') {
-        return await providerApi.handleGetProvidersSummary(req, res, currentConfig, providerPoolManager);
+        return await traceUiHandler(uiDebugEnabled, requestLabel, 'providers.summary', async () => await providerApi.handleGetProvidersSummary(req, res, currentConfig, providerPoolManager));
     }
 
     // Get supported provider types based on registered adapters
     if (method === 'GET' && pathParam === '/api/providers/supported') {
-        return await providerApi.handleGetSupportedProviders(req, res);
+        return await traceUiHandler(uiDebugEnabled, requestLabel, 'providers.supported', async () => await providerApi.handleGetSupportedProviders(req, res));
     }
 
     // Get specific provider type details
@@ -333,7 +423,7 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
 
     // Get service mode information
     if (method === 'GET' && pathParam === '/api/service-mode') {
-        return await systemApi.handleGetServiceMode(req, res);
+        return await traceUiHandler(uiDebugEnabled, requestLabel, 'service-mode', async () => await systemApi.handleGetServiceMode(req, res));
     }
 
     // Batch import Kiro refresh tokens with SSE (real-time progress)

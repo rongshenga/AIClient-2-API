@@ -497,6 +497,52 @@ describe('Runtime storage foundation', () => {
         });
     });
 
+    test('should fail fast with readable conflict when provider identities collide', async () => {
+        const tempDir = await createTempDir('runtime-storage-provider-id-conflict-');
+        const dbPath = path.join(tempDir, 'runtime.sqlite');
+        const providerPoolsPath = path.join(tempDir, 'provider_pools.json');
+
+        await fs.mkdir(path.join(tempDir, 'configs', 'codex'), { recursive: true });
+        const credentialPath = path.join(tempDir, 'configs', 'codex', 'shared.json');
+        await fs.writeFile(credentialPath, JSON.stringify({ refresh_token: 'shared-token' }, null, 2), 'utf8');
+
+        const storage = createRuntimeStorage({
+            RUNTIME_STORAGE_BACKEND: 'db',
+            RUNTIME_STORAGE_DB_PATH: dbPath,
+            PROVIDER_POOLS_FILE_PATH: providerPoolsPath
+        });
+
+        await storage.initialize();
+
+        await expect(storage.replaceProviderPoolsSnapshot({
+            'openai-codex-oauth': [
+                {
+                    uuid: 'codex-1',
+                    customName: 'Shared Codex',
+                    CODEX_OAUTH_CREDS_FILE_PATH: credentialPath,
+                    OPENAI_BASE_URL: 'https://api.example.com/v1'
+                },
+                {
+                    uuid: 'codex-2',
+                    customName: 'Shared Codex',
+                    CODEX_OAUTH_CREDS_FILE_PATH: credentialPath,
+                    OPENAI_BASE_URL: 'https://api.example.com/v1'
+                }
+            ]
+        })).rejects.toMatchObject({
+            code: 'runtime_storage_provider_identity_conflict',
+            classification: 'constraint_conflict',
+            phase: 'write',
+            details: expect.objectContaining({
+                providerId: expect.any(String),
+                previousProviderType: 'openai-codex-oauth',
+                currentProviderType: 'openai-codex-oauth'
+            })
+        });
+
+        await storage.close();
+    });
+
     test('should preserve previous provider snapshot when sqlite replace write fails', async () => {
         const tempDir = await createTempDir('runtime-storage-rollback-');
         const dbPath = path.join(tempDir, 'runtime.sqlite');

@@ -113,8 +113,13 @@ async function initializeComponents() {
         await loadComponents(sectionComponents);
         
         console.log('All components loaded successfully');
+        window.__AICLIENT_UI_COMPONENTS_READY = true;
         // 触发组件加载完成事件
-        window.dispatchEvent(new CustomEvent('componentsLoaded'));
+        window.dispatchEvent(new CustomEvent('componentsLoaded', {
+            detail: {
+                source: 'component-loader'
+            }
+        }));
         
     } catch (error) {
         console.error('Failed to initialize components:', error);

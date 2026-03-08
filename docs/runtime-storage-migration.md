@@ -70,6 +70,24 @@ npm run runtime-storage:admin -- migrate \
   --force
 ```
 
+如果要把十万级 provider 导入压得更狠一点，可追加性能参数：
+
+```bash
+npm run runtime-storage:admin -- migrate \
+  --config configs/config.json \
+  --execute \
+  --prepare-concurrency 8 \
+  --insert-batch-size 400 \
+  --progress-interval 1000
+```
+
+说明：
+
+- `--prepare-concurrency` 用于并发预读 credential 文件；默认会按约 `80%` 逻辑 CPU 核数取值
+- `--insert-batch-size` 用于控制多行 `INSERT` 的批大小；数据量很大时通常比逐条 `INSERT` 快得多
+- 看到 `Provider snapshot progress: N/N` 后，如果紧接着出现 `Executing provider snapshot SQL payload`，说明已经进入 SQLite 批量写入/提交阶段，不是卡死
+- 不带 `--execute` 的 `migrate` 仍是 `dry-run` 预演，只生成制品和校验报告，不写入数据库
+
 ### 3. 校验与差异报告
 
 ```bash

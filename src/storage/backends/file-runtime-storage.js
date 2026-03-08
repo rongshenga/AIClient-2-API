@@ -292,6 +292,35 @@ export class FileRuntimeStorage {
         return snapshot && typeof snapshot === 'object' ? snapshot : null;
     }
 
+    async loadUsageCacheSummary() {
+        const usageCache = await this.loadUsageCacheSnapshot();
+        if (!usageCache?.providers || typeof usageCache.providers !== 'object') {
+            return null;
+        }
+
+        const providers = {};
+        for (const [providerType, snapshot] of Object.entries(usageCache.providers)) {
+            const normalizedSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : {};
+            providers[providerType] = {
+                providerType,
+                timestamp: normalizedSnapshot.timestamp || usageCache.timestamp || new Date().toISOString(),
+                totalCount: Number(normalizedSnapshot.totalCount ?? 0),
+                successCount: Number(normalizedSnapshot.successCount ?? 0),
+                errorCount: Number(normalizedSnapshot.errorCount ?? 0),
+                processedCount: Number.isFinite(normalizedSnapshot.processedCount)
+                    ? normalizedSnapshot.processedCount
+                    : (Array.isArray(normalizedSnapshot.instances) ? normalizedSnapshot.instances.length : Number(normalizedSnapshot.totalCount ?? 0)),
+                instances: [],
+                detailsLoaded: false
+            };
+        }
+
+        return {
+            timestamp: usageCache.timestamp || new Date().toISOString(),
+            providers
+        };
+    }
+
     async replaceUsageCacheSnapshot(usageCache = null) {
         if (!usageCache) {
             if (fs.existsSync(this.usageCacheFile)) {

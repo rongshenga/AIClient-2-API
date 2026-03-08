@@ -371,6 +371,42 @@ describe('Provider API runtime storage compatibility', () => {
         });
     });
 
+    test('should fall back to in-memory provider pools when compat export is empty during zip download', async () => {
+        const tempDir = await createTempDir('provider-api-download-fallback-');
+        const configsDir = path.join(tempDir, 'configs');
+        await fs.mkdir(configsDir, { recursive: true });
+        await fs.writeFile(path.join(configsDir, 'config.json'), JSON.stringify({ ok: true }), 'utf8');
+        process.chdir(tempDir);
+
+        const currentConfig = {
+            LOG_OUTPUT_MODE: 'none',
+            providerPools: {
+                'grok-custom': [
+                    {
+                        uuid: 'grok-fallback-1',
+                        customName: 'Fallback Grok',
+                        GROK_COOKIE_TOKEN: 'fallback-token',
+                        isHealthy: true
+                    }
+                ]
+            }
+        };
+
+        const res = createMockRes();
+        await handleDownloadAllConfigs({}, res, currentConfig);
+
+        expect(res.statusCode).toBe(200);
+        const zip = new AdmZip(res.body);
+        const providerPoolsEntry = zip.getEntry('provider_pools.json');
+        expect(providerPoolsEntry).toBeTruthy();
+        const providerPools = JSON.parse(providerPoolsEntry.getData().toString('utf8'));
+        expect(providerPools['grok-custom'][0]).toMatchObject({
+            uuid: 'grok-fallback-1',
+            customName: 'Fallback Grok',
+            GROK_COOKIE_TOKEN: 'fallback-token'
+        });
+    });
+
     test('should reject missing provider payloads and invalid batch token input', async () => {
         const { currentConfig } = await createDbConfig();
 

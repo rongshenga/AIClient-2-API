@@ -19,6 +19,7 @@ const OPERATION_META = {
     flushProviderRuntimeState: { phase: 'flush', domain: 'provider', trackKey: 'lastFlush' },
     updateProviderRoutingUuid: { phase: 'flush', domain: 'provider', trackKey: 'lastFlush' },
     loadUsageCacheSnapshot: { phase: 'read', domain: 'usage' },
+    loadUsageCacheSummary: { phase: 'read', domain: 'usage' },
     replaceUsageCacheSnapshot: { phase: 'write', domain: 'usage' },
     loadProviderUsageSnapshot: { phase: 'read', domain: 'usage' },
     upsertProviderUsageSnapshot: { phase: 'write', domain: 'usage' },

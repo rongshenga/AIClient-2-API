@@ -187,6 +187,36 @@ describe('SqliteRuntimeStorage DAO SQL', () => {
         expect(sql.trim().endsWith('COMMIT;')).toBe(true);
     });
 
+
+    test('should skip synchronous last_seen write for recently seen admin sessions', async () => {
+        const now = new Date().toISOString();
+        mockClient.query
+            .mockResolvedValueOnce([{ count: 1 }])
+            .mockResolvedValueOnce([
+                {
+                    id: 'session-token-1',
+                    subject: 'admin',
+                    expires_at: new Date(Date.now() + 60_000).toISOString(),
+                    created_at: now,
+                    last_seen_at: now,
+                    source_ip: '127.0.0.1',
+                    user_agent: 'jest-session-read',
+                    meta_json: JSON.stringify({
+                        username: 'admin',
+                        loginTime: Date.now() - 1_000,
+                        expiryTime: Date.now() + 60_000
+                    })
+                }
+            ]);
+
+        await expect(storage.getAdminSession('token-1')).resolves.toMatchObject({
+            username: 'admin',
+            sourceIp: '127.0.0.1',
+            userAgent: 'jest-session-read'
+        });
+        expect(mockClient.exec).not.toHaveBeenCalled();
+    });
+
     test('should return null without querying when credential asset match conditions are missing', async () => {
         await expect(storage.findCredentialAsset('grok-custom', {})).resolves.toBeNull();
         expect(mockClient.query).not.toHaveBeenCalled();

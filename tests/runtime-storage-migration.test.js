@@ -112,7 +112,7 @@ async function createRuntimeMigrationFixture(prefix = 'runtime-storage-fixture-'
             fixture_admin_token: {
                 username: 'admin',
                 loginTime: Date.parse('2026-03-06T10:00:00.000Z'),
-                expiryTime: Date.parse('2026-03-07T12:00:00.000Z'),
+                expiryTime: Date.parse('2099-03-07T12:00:00.000Z'),
                 sourceIp: '127.0.0.1',
                 userAgent: 'jest-runtime-fixture'
             }
@@ -406,7 +406,7 @@ describe('Runtime storage migration service', () => {
                 admin_token_1: {
                     username: 'admin',
                     loginTime: Date.parse('2026-03-06T10:00:00.000Z'),
-                    expiryTime: Date.parse('2026-03-07T12:00:00.000Z'),
+                    expiryTime: Date.parse('2099-03-07T12:00:00.000Z'),
                     sourceIp: '127.0.0.1',
                     userAgent: 'jest-migration-test'
                 }
@@ -656,6 +656,67 @@ WHERE meta_key = 'schema_version';
         expect(rerunMigrationResult.report.overallStatus).toBe('pass');
     });
 
+    test('should preserve usage cache compat export when potluck migration clears plugin domain', async () => {
+        const fixture = await createRuntimeMigrationFixture('runtime-storage-usage-compat-preserve-', {
+            usageCache: {
+                timestamp: '2026-03-01T10:31:00.000Z',
+                providers: {
+                    'grok-custom': {
+                        providerType: 'grok-custom',
+                        timestamp: '2026-03-01T10:30:00.000Z',
+                        totalCount: 3,
+                        successCount: 2,
+                        errorCount: 1,
+                        processedCount: 3,
+                        instances: [
+                            {
+                                uuid: 'grok-fixture-1',
+                                success: true,
+                                lastRefreshedAt: '2026-03-01T10:30:00.000Z'
+                            }
+                        ]
+                    },
+                    'gemini-cli-oauth': {
+                        providerType: 'gemini-cli-oauth',
+                        timestamp: '2026-03-01T10:29:30.000Z',
+                        totalCount: 1,
+                        successCount: 1,
+                        errorCount: 0,
+                        processedCount: 1,
+                        instances: []
+                    }
+                }
+            },
+            apiPotluckData: {
+                config: {
+                    defaultDailyLimit: 500
+                },
+                users: {}
+            },
+            apiPotluckKeys: {
+                keys: {}
+            }
+        });
+
+        const result = await migrateLegacyRuntimeStorage(fixture.config, {
+            execute: true,
+            force: true
+        });
+        const exportedUsageCache = await readJson(path.join(result.artifactPaths.exportDir, 'usage-cache.json'));
+
+        expect(result.report.overallStatus).toBe('pass');
+        expect(result.report.domains.usagePlugin).toMatchObject({
+            status: 'pass',
+            subdomains: {
+                usageCache: {
+                    status: 'pass'
+                }
+            }
+        });
+        expect(exportedUsageCache.timestamp).toBe(fixture.sourceUsageCache.timestamp);
+        expect(exportedUsageCache.providers).toEqual(fixture.sourceUsageCache.providers);
+    });
+
     test('should throw diff report when failOnDiff detects mismatched source bundle', async () => {
         const tempDir = await createTempDir('runtime-storage-verify-fail-');
         const dbPath = path.join(tempDir, 'runtime.sqlite');
@@ -868,7 +929,7 @@ WHERE meta_key = 'schema_version';
                     active_token: {
                         username: 'runtime-admin',
                         loginTime: Date.parse('2026-03-06T10:00:00.000Z'),
-                        expiryTime: Date.parse('2026-03-07T10:00:00.000Z'),
+                        expiryTime: Date.parse('2099-03-07T10:00:00.000Z'),
                         sourceIp: '10.0.0.1'
                     }
                 }
@@ -1040,6 +1101,33 @@ WHERE meta_key = 'schema_version';
 
         const runDetail = await getRuntimeStorageMigrationRun(fixture.config, 'anomaly_policy_run');
         expect(runDetail.status).toBe('failed');
+    });
+
+    test('should not treat omitted anomaly threshold as zero during execute migration', async () => {
+        const fixture = await createRuntimeMigrationFixture('runtime-storage-anomaly-default-', {
+            providerPools: {
+                'gemini-cli-oauth': []
+            },
+            apiPotluckData: {
+                config: {},
+                users: {}
+            }
+        });
+
+        const result = await migrateLegacyRuntimeStorage(fixture.config, {
+            execute: true
+        });
+        const manifest = await readJson(path.join(fixture.artifactRoot, result.runId, 'manifest.json'));
+
+        expect(result.runId).toBeTruthy();
+        expect(manifest.preflight.anomalyPolicy).toMatchObject({
+            status: 'pass',
+            maxAnomalyCount: null,
+            totalAnomalies: 1,
+            codeCounts: {
+                orphan_credential_file: 1
+            }
+        });
     });
 
     test('should preserve db read-write-export-rollback-reimport closed loop after migration', async () => {

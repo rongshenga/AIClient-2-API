@@ -96,6 +96,85 @@ function createDiagnosticsContainer() {
     };
 }
 
+function matchesClassSelector(element, selector) {
+    if (!element || typeof selector !== 'string' || !selector.startsWith('.')) {
+        return false;
+    }
+
+    const targetClass = selector.slice(1);
+    const classNames = String(element.className || '').split(/\s+/).filter(Boolean);
+    return classNames.includes(targetClass);
+}
+
+function findFirstClassMatch(root, selector) {
+    const children = Array.isArray(root?.children) ? root.children : [];
+    for (const child of children) {
+        if (matchesClassSelector(child, selector)) {
+            return child;
+        }
+        const nested = findFirstClassMatch(child, selector);
+        if (nested) {
+            return nested;
+        }
+    }
+    return null;
+}
+
+function createTreeElement(initial = {}) {
+    const element = createMockElement(initial);
+    const virtualNodes = new Map();
+
+    element.querySelector = jest.fn((selector) => {
+        const actualMatch = findFirstClassMatch(element, selector);
+        if (actualMatch) {
+            return actualMatch;
+        }
+
+        if (virtualNodes.has(selector)) {
+            return virtualNodes.get(selector);
+        }
+
+        if (selector === '.usage-group-title' && String(element.innerHTML || '').includes('usage-group-title')) {
+            const node = createTreeElement({ className: 'usage-group-title' });
+            virtualNodes.set(selector, node);
+            return node;
+        }
+
+        if (selector === '.btn-toggle-cards' && String(element.innerHTML || '').includes('btn-toggle-cards')) {
+            const iconNode = createTreeElement();
+            const buttonNode = createTreeElement({ className: 'btn-toggle-cards' });
+            buttonNode.querySelector = jest.fn((childSelector) => childSelector === 'i' ? iconNode : null);
+            virtualNodes.set(selector, buttonNode);
+            return buttonNode;
+        }
+
+        if (selector === 'i' && String(element.innerHTML || '').includes('<i')) {
+            const iconNode = createTreeElement();
+            virtualNodes.set(selector, iconNode);
+            return iconNode;
+        }
+
+        return null;
+    });
+
+    element.querySelectorAll = jest.fn((selector) => {
+        const matches = [];
+        const walk = (node) => {
+            const children = Array.isArray(node?.children) ? node.children : [];
+            for (const child of children) {
+                if (matchesClassSelector(child, selector)) {
+                    matches.push(child);
+                }
+                walk(child);
+            }
+        };
+        walk(element);
+        return matches;
+    });
+
+    return element;
+}
+
 describe('frontend event stream and usage manager', () => {
     let showToast;
     let loadProviders;
@@ -297,6 +376,55 @@ describe('frontend event stream and usage manager', () => {
         expect(showToast).not.toHaveBeenCalled();
     });
 
+    test('should hide provider groups with zero instances from the usage list', async () => {
+        const originalCreateElement = global.document.createElement;
+        global.document.createElement = jest.fn(() => createTreeElement());
+        global.fetch = jest.fn(async (url) => {
+            fetchCalls.push(String(url));
+            if (String(url) === '/api/usage') {
+                return {
+                    ok: true,
+                    status: 200,
+                    statusText: 'OK',
+                    json: async () => ({
+                        providers: {
+                            'claude-kiro-oauth': {
+                                totalCount: 0,
+                                successCount: 0,
+                                errorCount: 0,
+                                processedCount: 0,
+                                instances: []
+                            },
+                            'gemini-cli-oauth': {
+                                totalCount: 1,
+                                successCount: 1,
+                                errorCount: 0,
+                                processedCount: 1,
+                                instances: [
+                                    {
+                                        uuid: 'gemini-1',
+                                        name: 'Gemini One',
+                                        success: true,
+                                        usage: { usageBreakdown: [] }
+                                    }
+                                ]
+                            }
+                        },
+                        timestamp: '2026-03-06T10:00:00.000Z',
+                        serverTime: '2026-03-06T10:00:01.000Z'
+                    })
+                };
+            }
+            throw new Error(`Unexpected fetch: ${url}`);
+        });
+
+        await usageManagerModule.loadUsage();
+
+        expect(usageContent.children).toHaveLength(1);
+        expect(usageContent.children[0].dataset.providerType).toBe('gemini-cli-oauth');
+        global.document.createElement = originalCreateElement;
+    });
+
     test('should expose loading helpers and show usage fetch errors in the UI', async () => {
         usageManagerModule.setUsageLoadingText(usageLoading, '刷新中');
         expect(usageLoadingText.textContent).toBe('刷新中');
@@ -316,6 +444,80 @@ describe('frontend event stream and usage manager', () => {
         expect(fetchCalls).toContain('/api/usage');
         expect(usageError.style.display).toBe('block');
         expect(usageErrorMessage.textContent).toBe('HTTP 503: Service Unavailable');
+    });
+
+    test('should lazy load provider usage details without appendChild errors when summary has no prebuilt grid', async () => {
+        const originalCreateElement = global.document.createElement;
+        global.document.createElement = jest.fn(() => createTreeElement());
+        global.fetch = jest.fn(async (url) => {
+            fetchCalls.push(String(url));
+            if (String(url) === '/api/usage') {
+                return {
+                    ok: true,
+                    status: 200,
+                    statusText: 'OK',
+                    json: async () => ({
+                        providers: {
+                            'gemini-cli-oauth': {
+                                totalCount: 1,
+                                successCount: 1,
+                                errorCount: 0,
+                                processedCount: 1,
+                                timestamp: '2026-03-06T10:00:00.000Z',
+                                instances: []
+                            }
+                        },
+                        timestamp: '2026-03-06T10:00:00.000Z',
+                        serverTime: '2026-03-06T10:00:01.000Z'
+                    })
+                };
+            }
+            if (String(url) === '/api/usage/gemini-cli-oauth') {
+                return {
+                    ok: true,
+                    status: 200,
+                    statusText: 'OK',
+                    json: async () => ({
+                        totalCount: 1,
+                        successCount: 1,
+                        errorCount: 0,
+                        processedCount: 1,
+                        timestamp: '2026-03-06T10:00:00.000Z',
+                        instances: [
+                            {
+                                uuid: 'gemini-1',
+                                name: 'Gemini Account 1',
+                                success: true,
+                                isHealthy: true,
+                                isDisabled: false,
+                                usage: {
+                                    usageBreakdown: [],
+                                    user: {},
+                                    subscription: {}
+                                }
+                            }
+                        ]
+                    })
+                };
+            }
+            throw new Error(`Unexpected fetch: ${url}`);
+        });
+
+        await usageManagerModule.loadUsage();
+
+        const groupContainer = usageContent.children[0];
+        groupContainer.classList.add('collapsed');
+        const header = groupContainer.children[0];
+        const titleDiv = header.querySelector('.usage-group-title');
+        await titleDiv.trigger('click');
+
+        expect(fetchCalls).toContain('/api/usage/gemini-cli-oauth');
+        expect(groupContainer.dataset.detailsLoaded).toBe('true');
+
+        const content = groupContainer.querySelector('.usage-group-content');
+        expect(content.children.some((child) => String(child.className || '').includes('usage-cards-grid'))).toBe(true);
+
+        global.document.createElement = originalCreateElement;
     });
 
     test('should toggle loading state and button disablement during successful usage refresh', async () => {
@@ -378,6 +580,76 @@ describe('frontend event stream and usage manager', () => {
         expect(usageLoadingText.textContent).toBe('加载中');
         expect(showToast).toHaveBeenCalledWith('提示', '任务已开始', 'info');
         expect(showToast).toHaveBeenCalledWith('成功', '刷新完成', 'success');
+        expect(serverTimeValue.textContent).toBeTruthy();
+    });
+
+    test('should poll bootstrap task when initial usage request returns 202', async () => {
+        usageSection.classList.add('active');
+        let usageFetchCount = 0;
+        let taskStatusPollCount = 0;
+
+        global.fetch = jest.fn(async (url) => {
+            fetchCalls.push(String(url));
+            if (String(url) === '/api/usage') {
+                usageFetchCount += 1;
+                if (usageFetchCount === 1) {
+                    return {
+                        ok: true,
+                        status: 202,
+                        statusText: 'Accepted',
+                        json: async () => ({
+                            taskId: 'bootstrap-task-1',
+                            pollIntervalMs: 1
+                        })
+                    };
+                }
+
+                return {
+                    ok: true,
+                    status: 200,
+                    statusText: 'OK',
+                    json: async () => ({
+                        providers: {},
+                        totalCount: 0,
+                        successCount: 0,
+                        errorCount: 0,
+                        timestamp: '2026-03-06T10:00:00.000Z',
+                        serverTime: '2026-03-06T10:00:01.000Z'
+                    })
+                };
+            }
+
+            if (String(url) === '/api/usage/tasks/bootstrap-task-1') {
+                taskStatusPollCount += 1;
+                return {
+                    ok: true,
+                    json: async () => taskStatusPollCount === 1
+                        ? {
+                            status: 'running',
+                            providerType: 'grok-custom',
+                            pollIntervalMs: 1,
+                            progress: {
+                                currentProvider: 'grok-custom',
+                                processedInstances: 1,
+                                totalInstances: 2,
+                                percent: 50
+                            }
+                        }
+                        : {
+                            status: 'completed',
+                            providerType: 'grok-custom'
+                        }
+                };
+            }
+
+            throw new Error(`Unexpected fetch: ${url}`);
+        });
+
+        await usageManagerModule.loadUsage();
+
+        expect(fetchCalls.filter((url) => url === '/api/usage')).toHaveLength(2);
+        expect(fetchCalls).toContain('/api/usage/tasks/bootstrap-task-1');
+        expect(usageLoading.style.display).toBe('none');
         expect(serverTimeValue.textContent).toBeTruthy();
     });
 });

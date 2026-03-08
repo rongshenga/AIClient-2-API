@@ -77,7 +77,7 @@ describe('SqliteCliClient', () => {
             operation: 'unit_query'
         })).resolves.toEqual([]);
         expect(mockSpawn).toHaveBeenCalledTimes(2);
-        expect(mockSpawn.mock.calls[0][1]).toEqual(['-json', '/tmp/runtime-storage-test.sqlite']);
+        expect(mockSpawn.mock.calls[0][1]).toEqual(['-json', '-cmd', 'PRAGMA foreign_keys = ON;', '-cmd', '.timeout 5000', '/tmp/runtime-storage-test.sqlite']);
     });
 
     test('should surface sqlite json parse failures without retrying', async () => {

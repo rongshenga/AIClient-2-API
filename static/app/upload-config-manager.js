@@ -7,6 +7,12 @@ let allConfigs = []; // 存储所有配置数据
 let filteredConfigs = []; // 存储过滤后的配置数据
 let isLoadingConfigs = false; // 防止重复加载配置
 
+function logUploadConfigUiDebug(message, payload = null, level = 'log') {
+    if (typeof window.logUiDebug === 'function') {
+        window.logUiDebug(`[upload-config] ${message}`, payload, level);
+    }
+}
+
 /**
  * 搜索配置
  * @param {string} searchTerm - 搜索关键词
@@ -455,15 +461,27 @@ function updateStats() {
 async function loadConfigList(searchTerm = '', statusFilter = '', providerFilter = '') {
     // 防止重复加载
     if (isLoadingConfigs) {
+        logUploadConfigUiDebug('loadConfigList skipped because a request is already running', {
+            searchTerm,
+            statusFilter,
+            providerFilter
+        }, 'warn');
         console.log('正在加载配置列表，跳过重复调用');
         return;
     }
 
+    const startedAt = Date.now();
     isLoadingConfigs = true;
+    logUploadConfigUiDebug('loadConfigList started', {
+        searchTerm,
+        statusFilter,
+        providerFilter
+    });
     console.log('开始加载配置列表...');
     
     try {
         const result = await window.apiClient.get('/upload-configs');
+        const fetchedAt = Date.now();
         allConfigs = sortConfigs(result);
         
         // 如果提供了过滤参数，则执行搜索过滤，否则显示全部
@@ -475,8 +493,18 @@ async function loadConfigList(searchTerm = '', statusFilter = '', providerFilter
             updateStats();
         }
         
+        logUploadConfigUiDebug('loadConfigList completed', {
+            resultCount: Array.isArray(allConfigs) ? allConfigs.length : 0,
+            filteredCount: Array.isArray(filteredConfigs) ? filteredConfigs.length : 0,
+            fetchDurationMs: fetchedAt - startedAt,
+            totalDurationMs: Date.now() - startedAt
+        });
         console.log('配置列表加载成功，共', allConfigs.length, '个项目');
     } catch (error) {
+        logUploadConfigUiDebug('loadConfigList failed', {
+            durationMs: Date.now() - startedAt,
+            message: error?.message || String(error)
+        }, 'error');
         console.error('加载配置列表失败:', error);
         showToast(t('common.error'), t('common.error') + ': ' + error.message, 'error');
         
@@ -487,6 +515,9 @@ async function loadConfigList(searchTerm = '', statusFilter = '', providerFilter
         updateStats();
     } finally {
         isLoadingConfigs = false;
+        logUploadConfigUiDebug('loadConfigList finalized', {
+            totalDurationMs: Date.now() - startedAt
+        });
         console.log('配置列表加载完成');
     }
 }

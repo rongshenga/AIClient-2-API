@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
 import * as fs from 'fs';
 import { promises as pfs } from 'fs';
+import os from 'os';
 import * as path from 'path';
 import logger from '../../utils/logger.js';
 import {
@@ -105,6 +106,398 @@ async function readCredentialAssetRecord(providerType, rawPath, sourceKind, time
         sourceKind,
         timestamp
     });
+}
+
+function summarizeProviderPools(providerPools = {}) {
+    const providerTypeEntries = Object.entries(providerPools || {}).filter(([, providers]) => Array.isArray(providers));
+    return {
+        providerTypeCount: providerTypeEntries.length,
+        providerCount: providerTypeEntries.reduce((total, [, providers]) => total + providers.length, 0)
+    };
+}
+
+function buildProviderIdentityConflictEntry(providerType, providerIndex, normalizedProvider) {
+    return {
+        providerType,
+        providerIndex,
+        providerId: normalizedProvider.providerId,
+        routingUuid: normalizedProvider.registration?.routingUuid || null,
+        displayName: normalizedProvider.registration?.displayName || null,
+        credentialPaths: (normalizedProvider.credentialReferences || []).map((item) => item.filePath),
+        inlineSecretKinds: (normalizedProvider.inlineSecrets || []).map((item) => item.secretKind).sort()
+    };
+}
+
+function flattenProviderIdentityConflictEntry(prefix, entry = {}) {
+    return {
+        [`${prefix}ProviderType`]: entry.providerType || null,
+        [`${prefix}ProviderIndex`]: entry.providerIndex ?? null,
+        [`${prefix}RoutingUuid`]: entry.routingUuid || null,
+        [`${prefix}DisplayName`]: entry.displayName || null,
+        [`${prefix}CredentialPaths`]: Array.isArray(entry.credentialPaths) ? entry.credentialPaths.join(', ') : '',
+        [`${prefix}InlineSecretKinds`]: Array.isArray(entry.inlineSecretKinds) ? entry.inlineSecretKinds.join(', ') : ''
+    };
+}
+
+function assertUniqueProviderIdentity(seenProviderIds, entry, sourceKind) {
+    const previousEntry = seenProviderIds.get(entry.providerId);
+    if (!previousEntry) {
+        seenProviderIds.set(entry.providerId, entry);
+        return;
+    }
+
+    throw wrapRuntimeStorageError(new Error(`Duplicate provider identity detected for ${entry.providerType} (${entry.providerId})`), {
+        code: 'runtime_storage_provider_identity_conflict',
+        classification: 'constraint_conflict',
+        phase: 'write',
+        domain: 'provider',
+        backend: 'db',
+        operation: 'replaceProviderPoolsSnapshot',
+        details: {
+            sourceKind: sourceKind || null,
+            providerId: entry.providerId,
+            ...flattenProviderIdentityConflictEntry('previous', previousEntry),
+            ...flattenProviderIdentityConflictEntry('current', entry)
+        }
+    });
+}
+
+function getAvailableParallelism() {
+    if (typeof os.availableParallelism === 'function') {
+        return Math.max(1, os.availableParallelism());
+    }
+
+    const cpuList = typeof os.cpus === 'function' ? os.cpus() : [];
+    return Math.max(1, Array.isArray(cpuList) ? cpuList.length : 1);
+}
+
+function resolvePrepareConcurrency(requestedConcurrency) {
+    const cpuTargetConcurrency = Math.max(1, Math.floor(getAvailableParallelism() * 0.8));
+    return Math.max(1, normalizePositiveInt(requestedConcurrency, cpuTargetConcurrency));
+}
+
+function buildCredentialReferenceCacheKey(providerType, filePath) {
+    const normalizedPath = normalizeProjectRelativePath(filePath);
+    return normalizedPath ? `${providerType}::${normalizedPath}` : null;
+}
+
+function reinsertMapEntry(targetMap, key, value) {
+    if (targetMap.has(key)) {
+        targetMap.delete(key);
+    }
+    targetMap.set(key, value);
+}
+
+async function mapWithConcurrency(items, concurrency, iterator, onProgress = null) {
+    if (!Array.isArray(items) || items.length === 0) {
+        return [];
+    }
+
+    const total = items.length;
+    const workerCount = Math.max(1, Math.min(total, normalizePositiveInt(concurrency, total)));
+    const results = new Array(total);
+    let nextIndex = 0;
+    let completedCount = 0;
+
+    const runWorker = async () => {
+        while (true) {
+            const currentIndex = nextIndex;
+            nextIndex += 1;
+            if (currentIndex >= total) {
+                return;
+            }
+
+            results[currentIndex] = await iterator(items[currentIndex], currentIndex);
+            completedCount += 1;
+            if (typeof onProgress === 'function') {
+                onProgress({
+                    completedCount,
+                    totalCount: total,
+                    item: items[currentIndex],
+                    itemIndex: currentIndex
+                });
+            }
+        }
+    };
+
+    await Promise.all(Array.from({ length: workerCount }, async () => await runWorker()));
+    return results;
+}
+
+function appendInsertBatchStatements(statements, tableName, columns, rows = [], options = {}) {
+    if (!Array.isArray(rows) || rows.length === 0) {
+        return 0;
+    }
+
+    const batchSize = Math.max(1, normalizePositiveInt(options.batchSize, 250));
+    const suffix = options.suffix
+        ? `
+${String(options.suffix).trim().replace(/;\s*$/, '')}`
+        : '';
+
+    for (let index = 0; index < rows.length; index += batchSize) {
+        const batchRows = rows.slice(index, index + batchSize);
+        const valuesSql = batchRows
+            .map((row) => `(${columns.map((column) => sqlValue(row[column])).join(', ')})`)
+            .join(',\n');
+
+        statements.push(`
+INSERT INTO ${tableName} (
+    ${columns.join(',\n    ')}
+) VALUES
+${valuesSql}${suffix};
+        `);
+    }
+
+    return rows.length;
+}
+
+function appendCredentialFileIndexResetStatements(statements, credentialAssetIds = [], timestamp, batchSize) {
+    const uniqueAssetIds = [...new Set((credentialAssetIds || []).filter(Boolean))];
+    for (let index = 0; index < uniqueAssetIds.length; index += batchSize) {
+        const batchIds = uniqueAssetIds.slice(index, index + batchSize);
+        const batchSql = buildSqlInList(batchIds);
+        if (!batchSql) {
+            continue;
+        }
+
+        statements.push(`
+UPDATE credential_file_index
+SET is_primary = 0,
+    updated_at = ${sqlValue(timestamp)}
+WHERE credential_asset_id IN (${batchSql});
+        `);
+    }
+}
+
+function appendCredentialFileIndexDeleteStatements(statements, filePaths = [], batchSize) {
+    const uniquePaths = [...new Set((filePaths || []).filter(Boolean))];
+    for (let index = 0; index < uniquePaths.length; index += batchSize) {
+        const batchPaths = uniquePaths.slice(index, index + batchSize);
+        const batchSql = buildSqlInList(batchPaths);
+        if (!batchSql) {
+            continue;
+        }
+
+        statements.push(`
+DELETE FROM credential_file_index
+WHERE file_path IN (${batchSql});
+        `);
+    }
+}
+
+async function prepareProviderPoolsSnapshotImport(providerPools = {}, options = {}) {
+    const sourceKind = options.sourceKind || 'provider_pools_json';
+    const { providerTypeCount, providerCount } = summarizeProviderPools(providerPools);
+    const seenProviderIds = new Map();
+    const progressInterval = Math.max(1, normalizePositiveInt(options.progressInterval, 2000));
+    const prepareConcurrency = resolvePrepareConcurrency(options.prepareConcurrency);
+    const credentialProgressInterval = Math.max(1, normalizePositiveInt(options.credentialProgressInterval, 1000));
+    const normalizedProviderRows = [];
+    const credentialRequests = new Map();
+    let processedProviders = 0;
+    let credentialReferenceCount = 0;
+
+    logger.info(`[RuntimeStorage:db] Replacing provider pools snapshot from ${sourceKind}: ${providerTypeCount} types / ${providerCount} providers`);
+    logger.info(`[RuntimeStorage:db] Preparing provider snapshot import with target concurrency ${prepareConcurrency} (~80% CPU budget)`);
+
+    for (const [providerType, providers] of Object.entries(providerPools || {})) {
+        if (!Array.isArray(providers)) {
+            continue;
+        }
+
+        logger.info(`[RuntimeStorage:db] Importing provider type ${providerType}: ${providers.length} providers`);
+
+        for (let providerIndex = 0; providerIndex < providers.length; providerIndex += 1) {
+            const providerConfig = providers[providerIndex];
+            const normalized = splitProviderConfig(providerType, providerConfig);
+            const identityEntry = buildProviderIdentityConflictEntry(providerType, providerIndex, normalized);
+            assertUniqueProviderIdentity(seenProviderIds, identityEntry, sourceKind);
+
+            const credentialCacheKeys = [];
+            for (const credentialReference of normalized.credentialReferences || []) {
+                const cacheKey = buildCredentialReferenceCacheKey(providerType, credentialReference.filePath);
+                if (!cacheKey) {
+                    continue;
+                }
+
+                credentialReferenceCount += 1;
+                credentialCacheKeys.push(cacheKey);
+                if (!credentialRequests.has(cacheKey)) {
+                    credentialRequests.set(cacheKey, {
+                        cacheKey,
+                        providerType,
+                        filePath: credentialReference.filePath
+                    });
+                }
+            }
+
+            normalizedProviderRows.push({
+                providerType,
+                normalized,
+                credentialCacheKeys
+            });
+
+            processedProviders += 1;
+            if (processedProviders === providerCount || processedProviders % progressInterval === 0) {
+                logger.info(`[RuntimeStorage:db] Provider snapshot progress: ${processedProviders}/${providerCount}`);
+            }
+        }
+    }
+
+    const credentialRequestList = Array.from(credentialRequests.values());
+    logger.info(`[RuntimeStorage:db] Preparing credential asset cache: ${credentialRequestList.length} unique file(s) from ${credentialReferenceCount} reference(s)`);
+
+    const credentialResults = await mapWithConcurrency(
+        credentialRequestList,
+        prepareConcurrency,
+        async (request) => await readCredentialAssetRecord(
+            request.providerType,
+            request.filePath,
+            sourceKind,
+            options.timestamp
+        ),
+        ({ completedCount, totalCount }) => {
+            if (completedCount === totalCount || completedCount % credentialProgressInterval === 0) {
+                logger.info(`[RuntimeStorage:db] Credential preload progress: ${completedCount}/${totalCount}`);
+            }
+        }
+    );
+
+    const assetRecordByCacheKey = new Map();
+    for (let index = 0; index < credentialRequestList.length; index += 1) {
+        assetRecordByCacheKey.set(credentialRequestList[index].cacheKey, credentialResults[index] || null);
+    }
+
+    const registrations = [];
+    const runtimeStates = [];
+    const inlineSecrets = [];
+    const latestAssetRecords = new Map();
+    const latestBindingAssetIds = new Map();
+
+    for (const providerRow of normalizedProviderRows) {
+        const registration = providerRow.normalized.registration;
+        const runtimeState = providerRow.normalized.runtimeState;
+
+        registrations.push({
+            provider_id: registration.providerId,
+            provider_type: registration.providerType,
+            routing_uuid: registration.routingUuid,
+            display_name: registration.displayName,
+            check_model: registration.checkModel,
+            project_id: registration.projectId,
+            base_url: registration.baseUrl,
+            config_json: registration.configJson,
+            source_kind: sourceKind,
+            created_at: options.timestamp,
+            updated_at: options.timestamp
+        });
+
+        runtimeStates.push({
+            provider_id: runtimeState.providerId,
+            is_healthy: runtimeState.isHealthy,
+            is_disabled: runtimeState.isDisabled,
+            usage_count: runtimeState.usageCount,
+            error_count: runtimeState.errorCount,
+            last_used_at: runtimeState.lastUsed,
+            last_health_check_at: runtimeState.lastHealthCheckTime,
+            last_health_check_model: runtimeState.lastHealthCheckModel,
+            last_error_time: runtimeState.lastErrorTime,
+            last_error_message: runtimeState.lastErrorMessage,
+            scheduled_recovery_at: runtimeState.scheduledRecoveryTime,
+            refresh_count: runtimeState.refreshCount,
+            last_selection_seq: runtimeState.lastSelectionSeq,
+            updated_at: options.timestamp
+        });
+
+        for (const secret of providerRow.normalized.inlineSecrets || []) {
+            inlineSecrets.push({
+                provider_id: secret.providerId,
+                secret_kind: secret.secretKind,
+                secret_payload: secret.secretPayload,
+                protection_mode: secret.protectionMode,
+                updated_at: options.timestamp
+            });
+        }
+
+        for (const cacheKey of providerRow.credentialCacheKeys) {
+            const assetRecord = assetRecordByCacheKey.get(cacheKey);
+            if (!assetRecord?.asset?.id) {
+                continue;
+            }
+
+            reinsertMapEntry(latestAssetRecords, assetRecord.asset.id, assetRecord);
+            latestBindingAssetIds.set(providerRow.normalized.providerId, assetRecord.asset.id);
+        }
+    }
+
+    const credentialAssets = [];
+    const credentialFileIndexes = [];
+    for (const assetRecord of latestAssetRecords.values()) {
+        const asset = assetRecord.asset;
+        credentialAssets.push({
+            id: asset.id,
+            provider_type: asset.providerType,
+            identity_key: asset.identityKey,
+            dedupe_key: asset.dedupeKey,
+            email: asset.email,
+            account_id: asset.accountId,
+            external_user_id: asset.externalUserId,
+            source_kind: asset.sourceKind,
+            source_path: asset.sourcePath,
+            source_checksum: asset.sourceChecksum,
+            storage_mode: asset.storageMode,
+            is_active: asset.isActive,
+            last_imported_at: asset.lastImportedAt,
+            last_refreshed_at: asset.lastRefreshedAt,
+            created_at: asset.createdAt,
+            updated_at: asset.updatedAt
+        });
+
+        if (assetRecord.fileIndex) {
+            credentialFileIndexes.push({
+                id: assetRecord.fileIndex.id,
+                credential_asset_id: assetRecord.fileIndex.credentialAssetId,
+                file_path: assetRecord.fileIndex.filePath,
+                file_name: assetRecord.fileIndex.fileName,
+                file_size: assetRecord.fileIndex.fileSize,
+                checksum: assetRecord.fileIndex.checksum,
+                mtime: assetRecord.fileIndex.mtime,
+                is_primary: assetRecord.fileIndex.isPrimary,
+                created_at: assetRecord.fileIndex.createdAt,
+                updated_at: assetRecord.fileIndex.updatedAt
+            });
+        }
+    }
+
+    const credentialBindings = [];
+    for (const [providerId, credentialAssetId] of latestBindingAssetIds.entries()) {
+        credentialBindings.push({
+            id: buildCredentialBindingId('provider_registration', providerId, credentialAssetId),
+            credential_asset_id: credentialAssetId,
+            binding_type: 'provider_registration',
+            binding_target_id: providerId,
+            binding_status: 'active',
+            created_at: options.timestamp,
+            updated_at: options.timestamp
+        });
+    }
+
+    logger.info(`[RuntimeStorage:db] Prepared provider snapshot payload: registrations=${registrations.length}, runtimeStates=${runtimeStates.length}, secrets=${inlineSecrets.length}, credentialAssets=${credentialAssets.length}, credentialBindings=${credentialBindings.length}`);
+
+    return {
+        providerTypeCount,
+        providerCount,
+        prepareConcurrency,
+        credentialReferenceCount,
+        uniqueCredentialReferenceCount: credentialRequestList.length,
+        registrations,
+        runtimeStates,
+        inlineSecrets,
+        credentialAssets,
+        credentialFileIndexes,
+        credentialBindings
+    };
 }
 
 function pushProviderStatements(statements, normalizedProvider, sourceKind, timestamp) {
@@ -369,6 +762,458 @@ function buildUsageSnapshotId(providerType, providerId = 'all') {
     return `usage_${hashValue(`${providerType}::${providerId}`).slice(0, 24)}`;
 }
 
+function buildUsageSnapshotInstanceKey(instance = {}, index = 0) {
+    if (instance.uuid) {
+        return String(instance.uuid);
+    }
+
+    if (instance.name) {
+        return `${String(instance.name)}::${index}`;
+    }
+
+    return `instance_${index}`;
+}
+
+function buildUsageSnapshotInstanceId(providerType, instanceKey) {
+    return `usage_inst_${hashValue(`${providerType}::${instanceKey}`).slice(0, 24)}`;
+}
+
+function buildUsageSnapshotBreakdownId(instanceId, breakdownIndex) {
+    return `usage_brk_${hashValue(`${instanceId}::${breakdownIndex}`).slice(0, 24)}`;
+}
+
+function buildUsageSnapshotFreeTrialId(breakdownId) {
+    return `usage_ft_${hashValue(breakdownId).slice(0, 24)}`;
+}
+
+function buildUsageSnapshotBonusId(breakdownId, bonusIndex) {
+    return `usage_bonus_${hashValue(`${breakdownId}::${bonusIndex}`).slice(0, 24)}`;
+}
+
+function normalizeNumberOrNull(value) {
+    if (value === undefined || value === null || value === '') {
+        return null;
+    }
+
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeUsageFreeTrialRecord(freeTrial = null) {
+    if (!freeTrial || typeof freeTrial !== 'object') {
+        return null;
+    }
+
+    return {
+        status: freeTrial.status || null,
+        currentUsage: normalizeNumberOrNull(freeTrial.currentUsage),
+        usageLimit: normalizeNumberOrNull(freeTrial.usageLimit),
+        expiresAt: normalizeIsoOrNull(freeTrial.expiresAt)
+    };
+}
+
+function normalizeUsageBonusRecord(bonus = null) {
+    if (!bonus || typeof bonus !== 'object') {
+        return null;
+    }
+
+    return {
+        code: bonus.code || null,
+        displayName: bonus.displayName || null,
+        description: bonus.description || null,
+        status: bonus.status || null,
+        currentUsage: normalizeNumberOrNull(bonus.currentUsage),
+        usageLimit: normalizeNumberOrNull(bonus.usageLimit),
+        redeemedAt: normalizeIsoOrNull(bonus.redeemedAt),
+        expiresAt: normalizeIsoOrNull(bonus.expiresAt)
+    };
+}
+
+function normalizeUsageBreakdownRecord(breakdown = {}) {
+    const rateLimit = breakdown?.rateLimit && typeof breakdown.rateLimit === 'object'
+        ? breakdown.rateLimit
+        : null;
+    const primaryWindow = rateLimit?.primary_window && typeof rateLimit.primary_window === 'object'
+        ? rateLimit.primary_window
+        : null;
+    const secondaryWindow = rateLimit?.secondary_window && typeof rateLimit.secondary_window === 'object'
+        ? rateLimit.secondary_window
+        : null;
+
+    return {
+        resourceType: breakdown.resourceType || null,
+        displayName: breakdown.displayName || null,
+        displayNamePlural: breakdown.displayNamePlural || null,
+        unit: breakdown.unit || null,
+        currency: breakdown.currency || null,
+        currentUsage: normalizeNumberOrNull(breakdown.currentUsage),
+        usageLimit: normalizeNumberOrNull(breakdown.usageLimit),
+        currentOverages: normalizeNumberOrNull(breakdown.currentOverages),
+        overageCap: normalizeNumberOrNull(breakdown.overageCap),
+        overageRate: normalizeNumberOrNull(breakdown.overageRate),
+        overageCharges: normalizeNumberOrNull(breakdown.overageCharges),
+        nextDateReset: normalizeIsoOrNull(breakdown.nextDateReset || breakdown.resetTime),
+        modelName: breakdown.modelName || null,
+        remaining: normalizeNumberOrNull(breakdown.remaining),
+        remainingPercent: normalizeNumberOrNull(breakdown.remainingPercent),
+        resetTime: breakdown.resetTime || null,
+        resetTimeRaw: breakdown.resetTimeRaw == null ? null : String(breakdown.resetTimeRaw),
+        rateLimitAllowed: rateLimit?.allowed === undefined ? null : (rateLimit.allowed ? 1 : 0),
+        rateLimitReached: rateLimit?.limit_reached === undefined ? null : (rateLimit.limit_reached ? 1 : 0),
+        primaryLimitWindowSeconds: normalizeNumberOrNull(primaryWindow?.limit_window_seconds),
+        primaryResetAfterSeconds: normalizeNumberOrNull(primaryWindow?.reset_after_seconds),
+        primaryResetAt: normalizeNumberOrNull(primaryWindow?.reset_at),
+        primaryUsedPercent: normalizeNumberOrNull(primaryWindow?.used_percent),
+        secondaryLimitWindowSeconds: normalizeNumberOrNull(secondaryWindow?.limit_window_seconds),
+        secondaryResetAfterSeconds: normalizeNumberOrNull(secondaryWindow?.reset_after_seconds),
+        secondaryResetAt: normalizeNumberOrNull(secondaryWindow?.reset_at),
+        secondaryUsedPercent: normalizeNumberOrNull(secondaryWindow?.used_percent),
+        freeTrial: normalizeUsageFreeTrialRecord(breakdown.freeTrial),
+        bonuses: Array.isArray(breakdown.bonuses)
+            ? breakdown.bonuses.map((bonus) => normalizeUsageBonusRecord(bonus)).filter(Boolean)
+            : []
+    };
+}
+
+function normalizeUsageInstanceRecord(instance = {}, index = 0, fallbackTimestamp = null) {
+    const usage = instance?.usage && typeof instance.usage === 'object' ? instance.usage : null;
+    const subscription = usage?.subscription && typeof usage.subscription === 'object' ? usage.subscription : null;
+    const user = usage?.user && typeof usage.user === 'object' ? usage.user : null;
+
+    return {
+        instanceKey: buildUsageSnapshotInstanceKey(instance, index),
+        uuid: instance.uuid || null,
+        name: instance.name || instance.uuid || `instance_${index}`,
+        success: instance.success === true,
+        error: instance.error ? String(instance.error) : null,
+        isDisabled: instance.isDisabled === true,
+        isHealthy: instance.isHealthy === undefined ? null : Boolean(instance.isHealthy),
+        lastRefreshedAt: normalizeIsoOrNull(instance.lastRefreshedAt || instance.timestamp || instance.cachedAt || fallbackTimestamp) || fallbackTimestamp,
+        subscriptionTitle: subscription?.title || null,
+        subscriptionType: subscription?.type || null,
+        subscriptionUpgradeCapability: subscription?.upgradeCapability || null,
+        subscriptionOverageCapability: subscription?.overageCapability || null,
+        userEmail: user?.email || null,
+        userId: user?.userId || null,
+        usageBreakdown: Array.isArray(usage?.usageBreakdown)
+            ? usage.usageBreakdown.map((breakdown) => normalizeUsageBreakdownRecord(breakdown))
+            : []
+    };
+}
+
+function normalizeUsageSnapshotRecord(providerType, snapshot = {}, fallbackTimestamp = null) {
+    const normalizedSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : {};
+    const timestamp = normalizeIsoOrNull(normalizedSnapshot.timestamp || fallbackTimestamp) || nowIso();
+    const instances = Array.isArray(normalizedSnapshot.instances)
+        ? normalizedSnapshot.instances.map((instance, index) => normalizeUsageInstanceRecord(instance, index, timestamp))
+        : [];
+
+    return {
+        providerType,
+        timestamp,
+        totalCount: Number(normalizedSnapshot.totalCount ?? instances.length ?? 0),
+        successCount: Number(normalizedSnapshot.successCount ?? instances.filter((instance) => instance.success).length ?? 0),
+        errorCount: Number(normalizedSnapshot.errorCount ?? instances.filter((instance) => !instance.success).length ?? 0),
+        processedCount: Number.isFinite(normalizedSnapshot.processedCount)
+            ? normalizedSnapshot.processedCount
+            : instances.length,
+        instances
+    };
+}
+
+function buildUsageSnapshotSummaryRecord(row = {}) {
+    return {
+        providerType: row.provider_type || null,
+        timestamp: normalizeIsoOrNull(row.snapshot_at) || nowIso(),
+        totalCount: Number(row.total_count ?? 0),
+        successCount: Number(row.success_count ?? 0),
+        errorCount: Number(row.error_count ?? 0),
+        processedCount: Number(row.processed_count ?? row.total_count ?? 0)
+    };
+}
+
+function buildLegacyUsageSnapshotFromRow(row = {}) {
+    const payload = parseJsonField(row.payload_json, {}) || {};
+    return {
+        ...payload,
+        providerType: payload.providerType || row.provider_type,
+        timestamp: normalizeIsoOrNull(payload.timestamp || row.snapshot_at) || nowIso(),
+        totalCount: Number(row.total_count ?? payload.totalCount ?? 0),
+        successCount: Number(row.success_count ?? payload.successCount ?? 0),
+        errorCount: Number(row.error_count ?? payload.errorCount ?? 0),
+        processedCount: Number.isFinite(payload.processedCount)
+            ? payload.processedCount
+            : Number(row.processed_count ?? row.total_count ?? 0)
+    };
+}
+
+function buildUsageSnapshotPersistenceRows(providerType, snapshot = {}, fallbackTimestamp = null) {
+    const normalizedSnapshot = normalizeUsageSnapshotRecord(providerType, snapshot, fallbackTimestamp);
+    const snapshotId = buildUsageSnapshotId(providerType);
+    const snapshotRow = {
+        id: snapshotId,
+        provider_type: providerType,
+        provider_id: null,
+        snapshot_at: normalizedSnapshot.timestamp,
+        total_count: Number(normalizedSnapshot.totalCount ?? 0),
+        success_count: Number(normalizedSnapshot.successCount ?? 0),
+        error_count: Number(normalizedSnapshot.errorCount ?? 0),
+        processed_count: Number(normalizedSnapshot.processedCount ?? normalizedSnapshot.instances.length ?? 0),
+        payload_json: null
+    };
+
+    const instanceRows = [];
+    const breakdownRows = [];
+    const freeTrialRows = [];
+    const bonusRows = [];
+
+    normalizedSnapshot.instances.forEach((instance, instanceIndex) => {
+        const instanceId = buildUsageSnapshotInstanceId(providerType, instance.instanceKey);
+        instanceRows.push({
+            id: instanceId,
+            snapshot_id: snapshotId,
+            instance_key: instance.instanceKey,
+            uuid: instance.uuid,
+            display_name: instance.name && instance.name !== instance.uuid ? instance.name : null,
+            success: instance.success === true,
+            error_message: instance.error || null,
+            is_disabled: instance.isDisabled === true,
+            is_healthy: instance.isHealthy === null || instance.isHealthy === undefined ? null : (instance.isHealthy === true),
+            last_refreshed_at: normalizeIsoOrNull(instance.lastRefreshedAt) || normalizedSnapshot.timestamp,
+            subscription_title: instance.subscriptionTitle || null,
+            subscription_type: instance.subscriptionType || null,
+            subscription_upgrade_capability: instance.subscriptionUpgradeCapability || null,
+            subscription_overage_capability: instance.subscriptionOverageCapability || null,
+            user_email: instance.userEmail || null,
+            user_id: instance.userId || null,
+            instance_order: instanceIndex
+        });
+
+        instance.usageBreakdown.forEach((breakdown, breakdownIndex) => {
+            const breakdownId = buildUsageSnapshotBreakdownId(instanceId, breakdownIndex);
+            breakdownRows.push({
+                id: breakdownId,
+                instance_id: instanceId,
+                breakdown_order: breakdownIndex,
+                resource_type: breakdown.resourceType || null,
+                display_name: breakdown.displayName || null,
+                display_name_plural: breakdown.displayNamePlural || null,
+                unit: breakdown.unit || null,
+                currency: breakdown.currency || null,
+                current_usage: breakdown.currentUsage,
+                usage_limit: breakdown.usageLimit,
+                current_overages: breakdown.currentOverages,
+                overage_cap: breakdown.overageCap,
+                overage_rate: breakdown.overageRate,
+                overage_charges: breakdown.overageCharges,
+                next_date_reset: breakdown.nextDateReset || null,
+                model_name: breakdown.modelName || null,
+                remaining: breakdown.remaining,
+                remaining_percent: breakdown.remainingPercent,
+                reset_time: breakdown.resetTime || null,
+                reset_time_raw: breakdown.resetTimeRaw || null,
+                rate_limit_allowed: breakdown.rateLimitAllowed,
+                rate_limit_reached: breakdown.rateLimitReached,
+                primary_limit_window_seconds: breakdown.primaryLimitWindowSeconds,
+                primary_reset_after_seconds: breakdown.primaryResetAfterSeconds,
+                primary_reset_at: breakdown.primaryResetAt,
+                primary_used_percent: breakdown.primaryUsedPercent,
+                secondary_limit_window_seconds: breakdown.secondaryLimitWindowSeconds,
+                secondary_reset_after_seconds: breakdown.secondaryResetAfterSeconds,
+                secondary_reset_at: breakdown.secondaryResetAt,
+                secondary_used_percent: breakdown.secondaryUsedPercent
+            });
+
+            if (breakdown.freeTrial) {
+                freeTrialRows.push({
+                    id: buildUsageSnapshotFreeTrialId(breakdownId),
+                    breakdown_id: breakdownId,
+                    status: breakdown.freeTrial.status || null,
+                    current_usage: breakdown.freeTrial.currentUsage,
+                    usage_limit: breakdown.freeTrial.usageLimit,
+                    expires_at: breakdown.freeTrial.expiresAt || null
+                });
+            }
+
+            breakdown.bonuses.forEach((bonus, bonusIndex) => {
+                bonusRows.push({
+                    id: buildUsageSnapshotBonusId(breakdownId, bonusIndex),
+                    breakdown_id: breakdownId,
+                    bonus_order: bonusIndex,
+                    code: bonus.code || null,
+                    display_name: bonus.displayName || null,
+                    description: bonus.description || null,
+                    status: bonus.status || null,
+                    current_usage: bonus.currentUsage,
+                    usage_limit: bonus.usageLimit,
+                    redeemed_at: bonus.redeemedAt || null,
+                    expires_at: bonus.expiresAt || null
+                });
+            });
+        });
+    });
+
+    return {
+        normalizedSnapshot,
+        snapshotRow,
+        instanceRows,
+        breakdownRows,
+        freeTrialRows,
+        bonusRows
+    };
+}
+
+function parseSqliteBoolean(value) {
+    if (value === undefined || value === null || value === '') {
+        return null;
+    }
+
+    return Number(value) !== 0;
+}
+
+function hasAnyMeaningfulValue(values = []) {
+    return values.some((value) => value !== undefined && value !== null && value !== '');
+}
+
+function buildUsageBreakdownFromStructuredRow(row = {}, freeTrialRow = null, bonusRows = []) {
+    const breakdown = {
+        resourceType: row.resource_type || null,
+        displayName: row.display_name || null,
+        displayNamePlural: row.display_name_plural || null,
+        unit: row.unit || null,
+        currency: row.currency || null,
+        currentUsage: normalizeNumberOrNull(row.current_usage),
+        usageLimit: normalizeNumberOrNull(row.usage_limit),
+        currentOverages: normalizeNumberOrNull(row.current_overages),
+        overageCap: normalizeNumberOrNull(row.overage_cap),
+        overageRate: normalizeNumberOrNull(row.overage_rate),
+        overageCharges: normalizeNumberOrNull(row.overage_charges),
+        nextDateReset: normalizeIsoOrNull(row.next_date_reset),
+        modelName: row.model_name || null,
+        remaining: normalizeNumberOrNull(row.remaining),
+        remainingPercent: normalizeNumberOrNull(row.remaining_percent),
+        resetTime: row.reset_time || null,
+        resetTimeRaw: row.reset_time_raw || null,
+        bonuses: Array.isArray(bonusRows)
+            ? bonusRows.map((bonusRow) => ({
+                code: bonusRow.code || null,
+                displayName: bonusRow.display_name || null,
+                description: bonusRow.description || null,
+                status: bonusRow.status || null,
+                currentUsage: normalizeNumberOrNull(bonusRow.current_usage),
+                usageLimit: normalizeNumberOrNull(bonusRow.usage_limit),
+                redeemedAt: normalizeIsoOrNull(bonusRow.redeemed_at),
+                expiresAt: normalizeIsoOrNull(bonusRow.expires_at)
+            }))
+            : []
+    };
+
+    const hasRateLimit = hasAnyMeaningfulValue([
+        row.rate_limit_allowed,
+        row.rate_limit_reached,
+        row.primary_limit_window_seconds,
+        row.primary_reset_after_seconds,
+        row.primary_reset_at,
+        row.primary_used_percent,
+        row.secondary_limit_window_seconds,
+        row.secondary_reset_after_seconds,
+        row.secondary_reset_at,
+        row.secondary_used_percent
+    ]);
+    if (hasRateLimit) {
+        breakdown.rateLimit = {
+            allowed: parseSqliteBoolean(row.rate_limit_allowed),
+            limit_reached: parseSqliteBoolean(row.rate_limit_reached),
+            primary_window: {
+                limit_window_seconds: normalizeNumberOrNull(row.primary_limit_window_seconds),
+                reset_after_seconds: normalizeNumberOrNull(row.primary_reset_after_seconds),
+                reset_at: normalizeNumberOrNull(row.primary_reset_at),
+                used_percent: normalizeNumberOrNull(row.primary_used_percent)
+            },
+            secondary_window: {
+                limit_window_seconds: normalizeNumberOrNull(row.secondary_limit_window_seconds),
+                reset_after_seconds: normalizeNumberOrNull(row.secondary_reset_after_seconds),
+                reset_at: normalizeNumberOrNull(row.secondary_reset_at),
+                used_percent: normalizeNumberOrNull(row.secondary_used_percent)
+            }
+        };
+    }
+
+    if (freeTrialRow) {
+        breakdown.freeTrial = {
+            status: freeTrialRow.status || null,
+            currentUsage: normalizeNumberOrNull(freeTrialRow.current_usage),
+            usageLimit: normalizeNumberOrNull(freeTrialRow.usage_limit),
+            expiresAt: normalizeIsoOrNull(freeTrialRow.expires_at)
+        };
+    }
+
+    return breakdown;
+}
+
+function buildUsageInstanceFromStructuredRow(row = {}, breakdowns = []) {
+    const instance = {
+        success: parseSqliteBoolean(row.success) === true
+    };
+
+    if (row.uuid) {
+        instance.uuid = row.uuid;
+    }
+
+    if (row.display_name) {
+        instance.name = row.display_name;
+    }
+
+    if (row.error_message) {
+        instance.error = row.error_message;
+    }
+
+    if (parseSqliteBoolean(row.is_disabled) === true) {
+        instance.isDisabled = true;
+    }
+
+    const isHealthy = parseSqliteBoolean(row.is_healthy);
+    if (isHealthy !== null) {
+        instance.isHealthy = isHealthy;
+    }
+
+    const lastRefreshedAt = normalizeIsoOrNull(row.last_refreshed_at);
+    if (lastRefreshedAt) {
+        instance.lastRefreshedAt = lastRefreshedAt;
+    }
+
+    const usage = {
+        usageBreakdown: breakdowns
+    };
+
+    if (hasAnyMeaningfulValue([
+        row.subscription_title,
+        row.subscription_type,
+        row.subscription_upgrade_capability,
+        row.subscription_overage_capability
+    ])) {
+        usage.subscription = {
+            title: row.subscription_title || null,
+            type: row.subscription_type || null,
+            upgradeCapability: row.subscription_upgrade_capability || null,
+            overageCapability: row.subscription_overage_capability || null
+        };
+    }
+
+    if (hasAnyMeaningfulValue([row.user_email, row.user_id])) {
+        usage.user = {
+            email: row.user_email || null,
+            userId: row.user_id || null
+        };
+    }
+
+    if (breakdowns.length > 0 || usage.subscription || usage.user) {
+        instance.usage = usage;
+    }
+
+    return instance;
+}
+
 function buildAdminSessionId(token) {
     return `admin_sess_${hashValue(token).slice(0, 24)}`;
 }
@@ -445,6 +1290,12 @@ export class SqliteRuntimeStorage {
         this.fileStorage = new FileRuntimeStorage(config);
         this.kind = 'db';
         this.initialized = false;
+        const configuredAdminSessionTouchIntervalMs = Number.parseInt(config.RUNTIME_STORAGE_ADMIN_SESSION_TOUCH_INTERVAL_MS, 10);
+        this.adminSessionTouchIntervalMs = Number.isFinite(configuredAdminSessionTouchIntervalMs)
+            ? Math.max(0, configuredAdminSessionTouchIntervalMs)
+            : 5 * 60 * 1000;
+        this.adminSessionTouchTimestamps = new Map();
+        this.adminSessionTouchInFlight = new Map();
     }
 
     getInfo() {
@@ -465,6 +1316,7 @@ export class SqliteRuntimeStorage {
 
         await pfs.mkdir(path.dirname(this.dbPath), { recursive: true });
         await this.client.initialize(this.#buildSchemaSql());
+        await this.#ensureUsageSchemaUpgrade();
         await this.client.exec(`
 INSERT INTO runtime_storage_meta (meta_key, meta_value, updated_at)
 VALUES
@@ -603,46 +1455,140 @@ ORDER BY b.binding_target_id ASC, b.updated_at DESC;
     async replaceProviderPoolsSnapshot(providerPools = {}, options = {}) {
         await this.initialize();
 
-        const statements = [];
         const timestamp = nowIso();
         const sourceKind = options.sourceKind || 'provider_pools_json';
+        const insertBatchSize = Math.max(1, normalizePositiveInt(options.insertBatchSize, 250));
+        const preparedImport = await prepareProviderPoolsSnapshotImport(providerPools, {
+            sourceKind,
+            timestamp,
+            progressInterval: options.progressInterval,
+            credentialProgressInterval: options.credentialProgressInterval,
+            prepareConcurrency: options.prepareConcurrency
+        });
 
+        const statements = [];
         statements.push('BEGIN IMMEDIATE;');
         statements.push(`DELETE FROM credential_bindings WHERE binding_type = 'provider_registration';`);
         statements.push('DELETE FROM provider_inline_secrets;');
         statements.push('DELETE FROM provider_runtime_state;');
         statements.push('DELETE FROM provider_registrations;');
 
-        for (const [providerType, providers] of Object.entries(providerPools || {})) {
-            if (!Array.isArray(providers)) {
-                continue;
-            }
+        appendInsertBatchStatements(statements, 'provider_registrations', [
+            'provider_id',
+            'provider_type',
+            'routing_uuid',
+            'display_name',
+            'check_model',
+            'project_id',
+            'base_url',
+            'config_json',
+            'source_kind',
+            'created_at',
+            'updated_at'
+        ], preparedImport.registrations, {
+            batchSize: insertBatchSize
+        });
 
-            for (const providerConfig of providers) {
-                const normalized = splitProviderConfig(providerType, providerConfig);
-                pushProviderStatements(statements, normalized, sourceKind, timestamp);
+        appendInsertBatchStatements(statements, 'provider_runtime_state', [
+            'provider_id',
+            'is_healthy',
+            'is_disabled',
+            'usage_count',
+            'error_count',
+            'last_used_at',
+            'last_health_check_at',
+            'last_health_check_model',
+            'last_error_time',
+            'last_error_message',
+            'scheduled_recovery_at',
+            'refresh_count',
+            'last_selection_seq',
+            'updated_at'
+        ], preparedImport.runtimeStates, {
+            batchSize: insertBatchSize
+        });
 
-                for (const credentialReference of normalized.credentialReferences || []) {
-                    const assetRecord = await readCredentialAssetRecord(
-                        providerType,
-                        credentialReference.filePath,
-                        sourceKind,
-                        timestamp
-                    );
-                    if (!assetRecord?.asset?.id) {
-                        continue;
-                    }
+        appendInsertBatchStatements(statements, 'provider_inline_secrets', [
+            'provider_id',
+            'secret_kind',
+            'secret_payload',
+            'protection_mode',
+            'updated_at'
+        ], preparedImport.inlineSecrets, {
+            batchSize: insertBatchSize
+        });
 
-                    pushCredentialAssetStatements(statements, assetRecord, timestamp);
-                    pushCredentialBindingStatements(
-                        statements,
-                        normalized.providerId,
-                        assetRecord.asset.id,
-                        timestamp
-                    );
-                }
-            }
-        }
+        appendInsertBatchStatements(statements, 'credential_assets', [
+            'id',
+            'provider_type',
+            'identity_key',
+            'dedupe_key',
+            'email',
+            'account_id',
+            'external_user_id',
+            'source_kind',
+            'source_path',
+            'source_checksum',
+            'storage_mode',
+            'is_active',
+            'last_imported_at',
+            'last_refreshed_at',
+            'created_at',
+            'updated_at'
+        ], preparedImport.credentialAssets, {
+            batchSize: insertBatchSize,
+            suffix: `ON CONFLICT(id) DO UPDATE SET
+    identity_key = COALESCE(excluded.identity_key, credential_assets.identity_key),
+    dedupe_key = excluded.dedupe_key,
+    email = COALESCE(excluded.email, credential_assets.email),
+    account_id = COALESCE(excluded.account_id, credential_assets.account_id),
+    external_user_id = COALESCE(excluded.external_user_id, credential_assets.external_user_id),
+    source_kind = excluded.source_kind,
+    source_path = COALESCE(excluded.source_path, credential_assets.source_path),
+    source_checksum = COALESCE(excluded.source_checksum, credential_assets.source_checksum),
+    storage_mode = excluded.storage_mode,
+    is_active = excluded.is_active,
+    last_imported_at = COALESCE(excluded.last_imported_at, credential_assets.last_imported_at),
+    updated_at = excluded.updated_at`
+        });
+
+        appendCredentialFileIndexResetStatements(
+            statements,
+            preparedImport.credentialFileIndexes.map((row) => row.credential_asset_id),
+            timestamp,
+            insertBatchSize
+        );
+        appendCredentialFileIndexDeleteStatements(
+            statements,
+            preparedImport.credentialFileIndexes.map((row) => row.file_path),
+            insertBatchSize
+        );
+        appendInsertBatchStatements(statements, 'credential_file_index', [
+            'id',
+            'credential_asset_id',
+            'file_path',
+            'file_name',
+            'file_size',
+            'checksum',
+            'mtime',
+            'is_primary',
+            'created_at',
+            'updated_at'
+        ], preparedImport.credentialFileIndexes, {
+            batchSize: insertBatchSize
+        });
+
+        appendInsertBatchStatements(statements, 'credential_bindings', [
+            'id',
+            'credential_asset_id',
+            'binding_type',
+            'binding_target_id',
+            'binding_status',
+            'created_at',
+            'updated_at'
+        ], preparedImport.credentialBindings, {
+            batchSize: insertBatchSize
+        });
 
         statements.push(`
 INSERT INTO runtime_storage_meta (meta_key, meta_value, updated_at)
@@ -651,7 +1597,11 @@ ON CONFLICT(meta_key) DO UPDATE SET meta_value = excluded.meta_value, updated_at
         `);
         statements.push('COMMIT;');
 
-        await this.client.exec(statements.join('\n'));
+        logger.info(`[RuntimeStorage:db] Executing provider snapshot SQL payload with insertBatchSize=${insertBatchSize} (${statements.length} statement group(s))`);
+        await this.client.exec(statements.join('\n'), {
+            operation: 'replaceProviderPoolsSnapshot'
+        });
+        logger.info(`[RuntimeStorage:db] Replaced provider pools snapshot from ${sourceKind}: ${preparedImport.providerTypeCount} types / ${preparedImport.providerCount} providers`);
         return await this.exportProviderPoolsSnapshot();
     }
 
@@ -976,28 +1926,29 @@ COMMIT;
     }
 
 
-    async loadUsageCacheSnapshot() {
+        async loadUsageCacheSummary() {
         await this.initialize();
-
-        const countRows = await this.client.query(`
-SELECT COUNT(*) AS count
-FROM usage_snapshots
-WHERE provider_id IS NULL;
-        `);
-        const snapshotCount = Number(countRows[0]?.count || 0);
-
-        if (snapshotCount === 0) {
-            const legacyCache = await this.fileStorage.loadUsageCacheSnapshot();
-            if (legacyCache?.providers && Object.keys(legacyCache.providers).length > 0) {
-                await this.replaceUsageCacheSnapshot(legacyCache);
-                logger.info('[RuntimeStorage:db] Imported legacy usage cache into sqlite runtime storage');
-            }
-        }
+        await this.#ensureUsageCacheSeeded();
 
         const rows = await this.client.query(`
-SELECT provider_type, snapshot_at, total_count, success_count, error_count, payload_json
-FROM usage_snapshots
-WHERE provider_id IS NULL
+SELECT id, provider_type, snapshot_at, total_count, success_count, error_count, processed_count
+FROM (
+    SELECT
+        id,
+        provider_type,
+        snapshot_at,
+        total_count,
+        success_count,
+        error_count,
+        processed_count,
+        ROW_NUMBER() OVER (
+            PARTITION BY provider_type
+            ORDER BY snapshot_at DESC, id DESC
+        ) AS row_rank
+    FROM usage_snapshots
+    WHERE provider_id IS NULL
+)
+WHERE row_rank = 1
 ORDER BY provider_type ASC;
         `);
 
@@ -1009,25 +1960,76 @@ ORDER BY provider_type ASC;
         let latestTimestamp = null;
 
         for (const row of rows) {
-            const payload = parseJsonField(row.payload_json, {}) || {};
-            const timestamp = normalizeIsoOrNull(payload.timestamp || row.snapshot_at) || nowIso();
-            latestTimestamp = !latestTimestamp || timestamp > latestTimestamp ? timestamp : latestTimestamp;
-
+            const summary = buildUsageSnapshotSummaryRecord(row);
+            latestTimestamp = !latestTimestamp || summary.timestamp > latestTimestamp
+                ? summary.timestamp
+                : latestTimestamp;
             providers[row.provider_type] = {
-                ...payload,
-                providerType: payload.providerType || row.provider_type,
-                timestamp,
-                totalCount: Number(row.total_count ?? payload.totalCount ?? 0),
-                successCount: Number(row.success_count ?? payload.successCount ?? 0),
-                errorCount: Number(row.error_count ?? payload.errorCount ?? 0),
-                processedCount: Number.isFinite(payload.processedCount)
-                    ? payload.processedCount
-                    : (Array.isArray(payload.instances) ? payload.instances.length : Number(row.total_count ?? 0))
+                ...summary,
+                instances: []
             };
         }
 
+        const cacheTimestamp = await this.#loadUsageCacheTimestamp(latestTimestamp || nowIso());
         return {
-            timestamp: latestTimestamp || nowIso(),
+            timestamp: cacheTimestamp,
+            providers
+        };
+    }
+
+    async loadUsageCacheSnapshot() {
+        await this.initialize();
+        await this.#ensureUsageCacheSeeded();
+
+        const rows = await this.client.query(`
+SELECT id, provider_type, snapshot_at, total_count, success_count, error_count, processed_count, payload_json
+FROM (
+    SELECT
+        id,
+        provider_type,
+        snapshot_at,
+        total_count,
+        success_count,
+        error_count,
+        processed_count,
+        payload_json,
+        ROW_NUMBER() OVER (
+            PARTITION BY provider_type
+            ORDER BY snapshot_at DESC, id DESC
+        ) AS row_rank
+    FROM usage_snapshots
+    WHERE provider_id IS NULL
+)
+WHERE row_rank = 1
+ORDER BY provider_type ASC;
+        `);
+
+        if (rows.length === 0) {
+            return null;
+        }
+
+        const providers = {};
+        let latestTimestamp = null;
+
+        for (const row of rows) {
+            const snapshot = await this.#loadProviderUsageSnapshotFromRow(row);
+            if (!snapshot) {
+                continue;
+            }
+
+            latestTimestamp = !latestTimestamp || snapshot.timestamp > latestTimestamp
+                ? snapshot.timestamp
+                : latestTimestamp;
+            providers[row.provider_type] = snapshot;
+        }
+
+        if (Object.keys(providers).length === 0) {
+            return null;
+        }
+
+        const cacheTimestamp = await this.#loadUsageCacheTimestamp(latestTimestamp || nowIso());
+        return {
+            timestamp: cacheTimestamp,
             providers
         };
     }
@@ -1038,95 +2040,176 @@ ORDER BY provider_type ASC;
         const providers = usageCache?.providers && typeof usageCache.providers === 'object'
             ? usageCache.providers
             : {};
-        const normalizedCache = usageCache && typeof usageCache === 'object'
-            ? usageCache
-            : { timestamp: nowIso(), providers: {} };
-        const timestamp = nowIso();
-        const statements = [
-            'BEGIN IMMEDIATE;',
-            'DELETE FROM usage_snapshots WHERE provider_id IS NULL;'
-        ];
+        const fallbackTimestamp = normalizeIsoOrNull(usageCache?.timestamp) || nowIso();
+        const snapshotRows = [];
+        const instanceRows = [];
+        const breakdownRows = [];
+        const freeTrialRows = [];
+        const bonusRows = [];
+        const normalizedProviders = {};
 
         for (const [providerType, snapshot] of Object.entries(providers)) {
-            const normalizedSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : {};
-            const snapshotAt = normalizeIsoOrNull(normalizedSnapshot.timestamp || usageCache?.timestamp) || timestamp;
-            statements.push(`
-INSERT INTO usage_snapshots (
-    id,
-    provider_type,
-    provider_id,
-    snapshot_at,
-    total_count,
-    success_count,
-    error_count,
-    payload_json
-) VALUES (
-    ${sqlValue(buildUsageSnapshotId(providerType))},
-    ${sqlValue(providerType)},
-    NULL,
-    ${sqlValue(snapshotAt)},
-    ${sqlValue(Number(normalizedSnapshot.totalCount ?? 0))},
-    ${sqlValue(Number(normalizedSnapshot.successCount ?? 0))},
-    ${sqlValue(Number(normalizedSnapshot.errorCount ?? 0))},
-    ${sqlValue(JSON.stringify(normalizedSnapshot))}
-);
-            `);
+            const preparedRows = buildUsageSnapshotPersistenceRows(providerType, snapshot, fallbackTimestamp);
+            normalizedProviders[providerType] = preparedRows.normalizedSnapshot;
+            snapshotRows.push(preparedRows.snapshotRow);
+            instanceRows.push(...preparedRows.instanceRows);
+            breakdownRows.push(...preparedRows.breakdownRows);
+            freeTrialRows.push(...preparedRows.freeTrialRows);
+            bonusRows.push(...preparedRows.bonusRows);
         }
+
+        const statements = [
+            'BEGIN IMMEDIATE;',
+            "DELETE FROM runtime_settings WHERE scope = 'compat_export' AND key = 'usage-cache';",
+            'DELETE FROM usage_snapshots WHERE provider_id IS NULL;'
+        ];
 
         statements.push(`
 INSERT INTO runtime_settings (scope, key, value_json, updated_at)
 VALUES (
-    'compat_export',
-    'usage-cache',
-    ${sqlValue(JSON.stringify(normalizedCache))},
-    ${sqlValue(timestamp)}
+    'usage_cache',
+    'timestamp',
+    ${sqlValue(JSON.stringify(fallbackTimestamp))},
+    ${sqlValue(nowIso())}
 )
 ON CONFLICT(scope, key) DO UPDATE SET
     value_json = excluded.value_json,
     updated_at = excluded.updated_at;
         `);
 
+        appendInsertBatchStatements(statements, 'usage_snapshots', [
+            'id',
+            'provider_type',
+            'provider_id',
+            'snapshot_at',
+            'total_count',
+            'success_count',
+            'error_count',
+            'processed_count',
+            'payload_json'
+        ], snapshotRows, {
+            suffix: `
+ON CONFLICT(id) DO UPDATE SET
+    provider_type = excluded.provider_type,
+    provider_id = excluded.provider_id,
+    snapshot_at = excluded.snapshot_at,
+    total_count = excluded.total_count,
+    success_count = excluded.success_count,
+    error_count = excluded.error_count,
+    processed_count = excluded.processed_count,
+    payload_json = excluded.payload_json`
+        });
+        appendInsertBatchStatements(statements, 'usage_snapshot_instances', [
+            'id',
+            'snapshot_id',
+            'instance_key',
+            'uuid',
+            'display_name',
+            'success',
+            'error_message',
+            'is_disabled',
+            'is_healthy',
+            'last_refreshed_at',
+            'subscription_title',
+            'subscription_type',
+            'subscription_upgrade_capability',
+            'subscription_overage_capability',
+            'user_email',
+            'user_id',
+            'instance_order'
+        ], instanceRows);
+        appendInsertBatchStatements(statements, 'usage_snapshot_breakdowns', [
+            'id',
+            'instance_id',
+            'breakdown_order',
+            'resource_type',
+            'display_name',
+            'display_name_plural',
+            'unit',
+            'currency',
+            'current_usage',
+            'usage_limit',
+            'current_overages',
+            'overage_cap',
+            'overage_rate',
+            'overage_charges',
+            'next_date_reset',
+            'model_name',
+            'remaining',
+            'remaining_percent',
+            'reset_time',
+            'reset_time_raw',
+            'rate_limit_allowed',
+            'rate_limit_reached',
+            'primary_limit_window_seconds',
+            'primary_reset_after_seconds',
+            'primary_reset_at',
+            'primary_used_percent',
+            'secondary_limit_window_seconds',
+            'secondary_reset_after_seconds',
+            'secondary_reset_at',
+            'secondary_used_percent'
+        ], breakdownRows);
+        appendInsertBatchStatements(statements, 'usage_snapshot_free_trials', [
+            'id',
+            'breakdown_id',
+            'status',
+            'current_usage',
+            'usage_limit',
+            'expires_at'
+        ], freeTrialRows);
+        appendInsertBatchStatements(statements, 'usage_snapshot_bonuses', [
+            'id',
+            'breakdown_id',
+            'bonus_order',
+            'code',
+            'display_name',
+            'description',
+            'status',
+            'current_usage',
+            'usage_limit',
+            'redeemed_at',
+            'expires_at'
+        ], bonusRows);
+
         statements.push('COMMIT;');
         await this.client.exec(statements.join('\n'));
-        return usageCache;
+        return {
+            timestamp: fallbackTimestamp,
+            providers: normalizedProviders
+        };
     }
 
     async loadProviderUsageSnapshot(providerType) {
         await this.initialize();
+        await this.#ensureUsageCacheSeeded();
 
         const row = (await this.client.query(`
-SELECT provider_type, snapshot_at, total_count, success_count, error_count, payload_json
+SELECT id, provider_type, snapshot_at, total_count, success_count, error_count, processed_count, payload_json
 FROM usage_snapshots
 WHERE provider_id IS NULL AND provider_type = ${sqlValue(providerType)}
+ORDER BY snapshot_at DESC, id DESC
 LIMIT 1;
         `))[0];
 
         if (!row) {
-            const usageCache = await this.loadUsageCacheSnapshot();
-            return usageCache?.providers?.[providerType] || null;
+            return null;
         }
 
-        const payload = parseJsonField(row.payload_json, {}) || {};
-        return {
-            ...payload,
-            providerType: payload.providerType || row.provider_type,
-            timestamp: normalizeIsoOrNull(payload.timestamp || row.snapshot_at) || nowIso(),
-            totalCount: Number(row.total_count ?? payload.totalCount ?? 0),
-            successCount: Number(row.success_count ?? payload.successCount ?? 0),
-            errorCount: Number(row.error_count ?? payload.errorCount ?? 0),
-            processedCount: Number.isFinite(payload.processedCount)
-                ? payload.processedCount
-                : (Array.isArray(payload.instances) ? payload.instances.length : Number(row.total_count ?? 0))
-        };
+        return await this.#loadProviderUsageSnapshotFromRow(row);
     }
 
     async upsertProviderUsageSnapshot(providerType, snapshot = {}) {
         await this.initialize();
 
-        const normalizedSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : {};
-        const snapshotAt = normalizeIsoOrNull(normalizedSnapshot.timestamp) || nowIso();
-        await this.client.exec(`
-BEGIN IMMEDIATE;
+        const preparedRows = buildUsageSnapshotPersistenceRows(providerType, snapshot, nowIso());
+        const { normalizedSnapshot, snapshotRow, instanceRows, breakdownRows, freeTrialRows, bonusRows } = preparedRows;
+
+        const cacheTimestamp = normalizeIsoOrNull(normalizedSnapshot.timestamp) || nowIso();
+        const statements = [
+            'BEGIN IMMEDIATE;',
+            `DELETE FROM usage_snapshots WHERE provider_id IS NULL AND provider_type = ${sqlValue(providerType)} AND id <> ${sqlValue(snapshotRow.id)};`,
+            `
 INSERT INTO usage_snapshots (
     id,
     provider_type,
@@ -1135,16 +2218,18 @@ INSERT INTO usage_snapshots (
     total_count,
     success_count,
     error_count,
+    processed_count,
     payload_json
 ) VALUES (
-    ${sqlValue(buildUsageSnapshotId(providerType))},
-    ${sqlValue(providerType)},
-    NULL,
-    ${sqlValue(snapshotAt)},
-    ${sqlValue(Number(normalizedSnapshot.totalCount ?? 0))},
-    ${sqlValue(Number(normalizedSnapshot.successCount ?? 0))},
-    ${sqlValue(Number(normalizedSnapshot.errorCount ?? 0))},
-    ${sqlValue(JSON.stringify(normalizedSnapshot))}
+    ${sqlValue(snapshotRow.id)},
+    ${sqlValue(snapshotRow.provider_type)},
+    ${sqlValue(snapshotRow.provider_id)},
+    ${sqlValue(snapshotRow.snapshot_at)},
+    ${sqlValue(snapshotRow.total_count)},
+    ${sqlValue(snapshotRow.success_count)},
+    ${sqlValue(snapshotRow.error_count)},
+    ${sqlValue(snapshotRow.processed_count)},
+    ${sqlValue(snapshotRow.payload_json)}
 )
 ON CONFLICT(id) DO UPDATE SET
     provider_type = excluded.provider_type,
@@ -1153,26 +2238,100 @@ ON CONFLICT(id) DO UPDATE SET
     total_count = excluded.total_count,
     success_count = excluded.success_count,
     error_count = excluded.error_count,
+    processed_count = excluded.processed_count,
     payload_json = excluded.payload_json;
-COMMIT;
-        `);
-
-        const latestCache = await this.loadUsageCacheSnapshot();
-        await this.client.exec(`
-BEGIN IMMEDIATE;
+            `,
+            `DELETE FROM usage_snapshot_instances WHERE snapshot_id = ${sqlValue(snapshotRow.id)};`,
+            "DELETE FROM runtime_settings WHERE scope = 'compat_export' AND key = 'usage-cache';",
+            `
 INSERT INTO runtime_settings (scope, key, value_json, updated_at)
 VALUES (
-    'compat_export',
-    'usage-cache',
-    ${sqlValue(JSON.stringify(latestCache || { timestamp: nowIso(), providers: {} }))},
+    'usage_cache',
+    'timestamp',
+    ${sqlValue(JSON.stringify(cacheTimestamp))},
     ${sqlValue(nowIso())}
 )
 ON CONFLICT(scope, key) DO UPDATE SET
     value_json = excluded.value_json,
     updated_at = excluded.updated_at;
-COMMIT;
-        `);
+            `
+        ];
 
+        appendInsertBatchStatements(statements, 'usage_snapshot_instances', [
+            'id',
+            'snapshot_id',
+            'instance_key',
+            'uuid',
+            'display_name',
+            'success',
+            'error_message',
+            'is_disabled',
+            'is_healthy',
+            'last_refreshed_at',
+            'subscription_title',
+            'subscription_type',
+            'subscription_upgrade_capability',
+            'subscription_overage_capability',
+            'user_email',
+            'user_id',
+            'instance_order'
+        ], instanceRows);
+        appendInsertBatchStatements(statements, 'usage_snapshot_breakdowns', [
+            'id',
+            'instance_id',
+            'breakdown_order',
+            'resource_type',
+            'display_name',
+            'display_name_plural',
+            'unit',
+            'currency',
+            'current_usage',
+            'usage_limit',
+            'current_overages',
+            'overage_cap',
+            'overage_rate',
+            'overage_charges',
+            'next_date_reset',
+            'model_name',
+            'remaining',
+            'remaining_percent',
+            'reset_time',
+            'reset_time_raw',
+            'rate_limit_allowed',
+            'rate_limit_reached',
+            'primary_limit_window_seconds',
+            'primary_reset_after_seconds',
+            'primary_reset_at',
+            'primary_used_percent',
+            'secondary_limit_window_seconds',
+            'secondary_reset_after_seconds',
+            'secondary_reset_at',
+            'secondary_used_percent'
+        ], breakdownRows);
+        appendInsertBatchStatements(statements, 'usage_snapshot_free_trials', [
+            'id',
+            'breakdown_id',
+            'status',
+            'current_usage',
+            'usage_limit',
+            'expires_at'
+        ], freeTrialRows);
+        appendInsertBatchStatements(statements, 'usage_snapshot_bonuses', [
+            'id',
+            'breakdown_id',
+            'bonus_order',
+            'code',
+            'display_name',
+            'description',
+            'status',
+            'current_usage',
+            'usage_limit',
+            'redeemed_at',
+            'expires_at'
+        ], bonusRows);
+
+        statements.push('COMMIT;');
+        await this.client.exec(statements.join('\n'));
         return normalizedSnapshot;
     }
 
@@ -1278,6 +2437,248 @@ COMMIT;
         return runningRows.length;
     }
 
+    async #ensureUsageSchemaUpgrade() {
+        const usageSnapshotColumns = await this.client.query('PRAGMA table_info(usage_snapshots);');
+        const usageSnapshotColumnNames = new Set(
+            usageSnapshotColumns.map((column) => String(column.name || '').toLowerCase())
+        );
+
+        if (!usageSnapshotColumnNames.has('processed_count')) {
+            await this.client.exec(`
+ALTER TABLE usage_snapshots ADD COLUMN processed_count INTEGER NOT NULL DEFAULT 0;
+UPDATE usage_snapshots
+SET processed_count = total_count
+WHERE processed_count IS NULL OR processed_count = 0;
+            `);
+        }
+    }
+
+    async #ensureUsageCacheSeeded() {
+        const countRows = await this.client.query(`
+SELECT COUNT(*) AS count
+FROM usage_snapshots
+WHERE provider_id IS NULL;
+        `);
+        const snapshotCount = Number(countRows[0]?.count || 0);
+        if (snapshotCount > 0) {
+            return snapshotCount;
+        }
+
+        const legacyCache = await this.fileStorage.loadUsageCacheSnapshot();
+        if (legacyCache?.providers && Object.keys(legacyCache.providers).length > 0) {
+            await this.replaceUsageCacheSnapshot(legacyCache);
+            logger.info('[RuntimeStorage:db] Imported legacy usage cache into sqlite runtime storage');
+            return Object.keys(legacyCache.providers).length;
+        }
+
+        return 0;
+    }
+
+    async #loadUsageCacheTimestamp(fallbackTimestamp = null) {
+        const row = (await this.client.query(`
+SELECT value_json
+FROM runtime_settings
+WHERE scope = 'usage_cache' AND key = 'timestamp'
+LIMIT 1;
+        `))[0];
+
+        const cachedTimestamp = normalizeIsoOrNull(parseJsonField(row?.value_json, null));
+        return cachedTimestamp || fallbackTimestamp || nowIso();
+    }
+
+    async #loadProviderUsageSnapshotFromRow(row) {
+        if (!row) {
+            return null;
+        }
+
+        const summary = buildUsageSnapshotSummaryRecord(row);
+        const instanceRows = await this.client.query(`
+SELECT
+    id,
+    snapshot_id,
+    instance_key,
+    uuid,
+    display_name,
+    success,
+    error_message,
+    is_disabled,
+    is_healthy,
+    last_refreshed_at,
+    subscription_title,
+    subscription_type,
+    subscription_upgrade_capability,
+    subscription_overage_capability,
+    user_email,
+    user_id,
+    instance_order
+FROM usage_snapshot_instances
+WHERE snapshot_id = ${sqlValue(row.id)}
+ORDER BY instance_order ASC, id ASC;
+        `);
+
+        if (instanceRows.length === 0) {
+            if (row.payload_json) {
+                return buildLegacyUsageSnapshotFromRow(row);
+            }
+
+            return {
+                ...summary,
+                instances: []
+            };
+        }
+
+        const breakdownRows = await this.client.query(`
+SELECT
+    b.id,
+    b.instance_id,
+    b.breakdown_order,
+    b.resource_type,
+    b.display_name,
+    b.display_name_plural,
+    b.unit,
+    b.currency,
+    b.current_usage,
+    b.usage_limit,
+    b.current_overages,
+    b.overage_cap,
+    b.overage_rate,
+    b.overage_charges,
+    b.next_date_reset,
+    b.model_name,
+    b.remaining,
+    b.remaining_percent,
+    b.reset_time,
+    b.reset_time_raw,
+    b.rate_limit_allowed,
+    b.rate_limit_reached,
+    b.primary_limit_window_seconds,
+    b.primary_reset_after_seconds,
+    b.primary_reset_at,
+    b.primary_used_percent,
+    b.secondary_limit_window_seconds,
+    b.secondary_reset_after_seconds,
+    b.secondary_reset_at,
+    b.secondary_used_percent,
+    i.instance_order
+FROM usage_snapshot_breakdowns b
+INNER JOIN usage_snapshot_instances i ON i.id = b.instance_id
+WHERE i.snapshot_id = ${sqlValue(row.id)}
+ORDER BY i.instance_order ASC, b.breakdown_order ASC, b.id ASC;
+        `);
+
+        const freeTrialRows = breakdownRows.length > 0
+            ? await this.client.query(`
+SELECT
+    f.id,
+    f.breakdown_id,
+    f.status,
+    f.current_usage,
+    f.usage_limit,
+    f.expires_at
+FROM usage_snapshot_free_trials f
+INNER JOIN usage_snapshot_breakdowns b ON b.id = f.breakdown_id
+INNER JOIN usage_snapshot_instances i ON i.id = b.instance_id
+WHERE i.snapshot_id = ${sqlValue(row.id)};
+            `)
+            : [];
+
+        const bonusRows = breakdownRows.length > 0
+            ? await this.client.query(`
+SELECT
+    bo.id,
+    bo.breakdown_id,
+    bo.bonus_order,
+    bo.code,
+    bo.display_name,
+    bo.description,
+    bo.status,
+    bo.current_usage,
+    bo.usage_limit,
+    bo.redeemed_at,
+    bo.expires_at,
+    i.instance_order,
+    b.breakdown_order
+FROM usage_snapshot_bonuses bo
+INNER JOIN usage_snapshot_breakdowns b ON b.id = bo.breakdown_id
+INNER JOIN usage_snapshot_instances i ON i.id = b.instance_id
+WHERE i.snapshot_id = ${sqlValue(row.id)}
+ORDER BY i.instance_order ASC, b.breakdown_order ASC, bo.bonus_order ASC, bo.id ASC;
+            `)
+            : [];
+
+        const freeTrialByBreakdownId = new Map(
+            freeTrialRows.map((freeTrialRow) => [freeTrialRow.breakdown_id, freeTrialRow])
+        );
+        const bonusesByBreakdownId = new Map();
+        for (const bonusRow of bonusRows) {
+            if (!bonusesByBreakdownId.has(bonusRow.breakdown_id)) {
+                bonusesByBreakdownId.set(bonusRow.breakdown_id, []);
+            }
+            bonusesByBreakdownId.get(bonusRow.breakdown_id).push(bonusRow);
+        }
+
+        const breakdownsByInstanceId = new Map();
+        for (const breakdownRow of breakdownRows) {
+            if (!breakdownsByInstanceId.has(breakdownRow.instance_id)) {
+                breakdownsByInstanceId.set(breakdownRow.instance_id, []);
+            }
+            breakdownsByInstanceId.get(breakdownRow.instance_id).push(
+                buildUsageBreakdownFromStructuredRow(
+                    breakdownRow,
+                    freeTrialByBreakdownId.get(breakdownRow.id) || null,
+                    bonusesByBreakdownId.get(breakdownRow.id) || []
+                )
+            );
+        }
+
+        return {
+            ...summary,
+            instances: instanceRows.map((instanceRow) => buildUsageInstanceFromStructuredRow(
+                instanceRow,
+                breakdownsByInstanceId.get(instanceRow.id) || []
+            ))
+        };
+    }
+
+    #scheduleAdminSessionTouch(sessionId, lastSeenAt = null) {
+        if (!sessionId || this.adminSessionTouchIntervalMs <= 0) {
+            return;
+        }
+
+        const cachedTouchedAt = this.adminSessionTouchTimestamps.get(sessionId);
+        const persistedTouchedAt = lastSeenAt ? Date.parse(lastSeenAt) : NaN;
+        const baselineTouchedAt = Number.isFinite(cachedTouchedAt)
+            ? cachedTouchedAt
+            : (Number.isFinite(persistedTouchedAt) ? persistedTouchedAt : 0);
+        const now = Date.now();
+
+        if (baselineTouchedAt > 0 && now - baselineTouchedAt < this.adminSessionTouchIntervalMs) {
+            return;
+        }
+
+        if (this.adminSessionTouchInFlight.has(sessionId)) {
+            return;
+        }
+
+        const touchedAtIso = nowIso();
+        this.adminSessionTouchTimestamps.set(sessionId, now);
+
+        const touchTask = this.client.exec(`
+BEGIN IMMEDIATE;
+UPDATE admin_sessions
+SET last_seen_at = ${sqlValue(touchedAtIso)}
+WHERE id = ${sqlValue(sessionId)};
+COMMIT;
+        `).catch((error) => {
+            this.adminSessionTouchTimestamps.delete(sessionId);
+            logger.warn(`[RuntimeStorage:db] Failed to update admin session last_seen_at for ${sessionId}: ${error.message}`);
+        }).finally(() => {
+            this.adminSessionTouchInFlight.delete(sessionId);
+        });
+
+        this.adminSessionTouchInFlight.set(sessionId, touchTask);
+    }
+
     async getAdminSession(token) {
         await this.initialize();
         await this.#importLegacyAdminSessionsIfNeeded();
@@ -1307,13 +2708,7 @@ LIMIT 1;
         tokenInfo.sourceIp = tokenInfo.sourceIp || row.source_ip || null;
         tokenInfo.userAgent = tokenInfo.userAgent || row.user_agent || null;
 
-        await this.client.exec(`
-BEGIN IMMEDIATE;
-UPDATE admin_sessions
-SET last_seen_at = ${sqlValue(nowIso())}
-WHERE id = ${sqlValue(row.id)};
-COMMIT;
-        `);
+        this.#scheduleAdminSessionTouch(row.id, row.last_seen_at);
 
         return tokenInfo;
     }
@@ -1367,6 +2762,8 @@ COMMIT;
     async deleteAdminSession(token) {
         await this.initialize();
         const tokenHash = hashValue(token);
+        this.adminSessionTouchTimestamps.delete(buildAdminSessionId(token));
+        this.adminSessionTouchInFlight.delete(buildAdminSessionId(token));
         await this.client.exec(`
 BEGIN IMMEDIATE;
 DELETE FROM admin_sessions
@@ -1387,6 +2784,14 @@ WHERE expires_at < ${sqlValue(nowIso())};
         `);
         if (expiredRows.length === 0) {
             return { deletedCount: 0 };
+        }
+
+        for (const row of expiredRows) {
+            if (!row?.id) {
+                continue;
+            }
+            this.adminSessionTouchTimestamps.delete(row.id);
+            this.adminSessionTouchInFlight.delete(row.id);
         }
 
         await this.client.exec(`
@@ -1611,7 +3016,7 @@ INSERT INTO potluck_api_keys (
     ${sqlValue(Number(keyData?.todayUsage ?? 0))},
     ${sqlValue(Number(keyData?.bonusRemaining ?? 0))},
     ${sqlValue(`${lastResetDate}T00:00:00.000Z`)},
-    ${sqlValue(buildPotluckUserId(keyId))},
+    ${sqlValue(keyData?.ownerUserId ? buildPotluckUserId(keyData.ownerUserId) : null)},
     ${sqlValue(createdAt)},
     ${sqlValue(timestamp)}
 )
@@ -1910,12 +3315,105 @@ CREATE TABLE IF NOT EXISTS usage_snapshots (
     total_count INTEGER NOT NULL DEFAULT 0,
     success_count INTEGER NOT NULL DEFAULT 0,
     error_count INTEGER NOT NULL DEFAULT 0,
+    processed_count INTEGER NOT NULL DEFAULT 0,
     payload_json TEXT,
     FOREIGN KEY(provider_id) REFERENCES provider_registrations(provider_id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_snapshots_type_time
     ON usage_snapshots (provider_type, snapshot_at);
+
+CREATE TABLE IF NOT EXISTS usage_snapshot_instances (
+    id TEXT PRIMARY KEY,
+    snapshot_id TEXT NOT NULL,
+    instance_key TEXT NOT NULL,
+    uuid TEXT,
+    display_name TEXT,
+    success INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    is_disabled INTEGER NOT NULL DEFAULT 0,
+    is_healthy INTEGER,
+    last_refreshed_at TEXT,
+    subscription_title TEXT,
+    subscription_type TEXT,
+    subscription_upgrade_capability TEXT,
+    subscription_overage_capability TEXT,
+    user_email TEXT,
+    user_id TEXT,
+    instance_order INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(snapshot_id) REFERENCES usage_snapshots(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_snapshot_instances_snapshot_order
+    ON usage_snapshot_instances (snapshot_id, instance_order);
+
+CREATE TABLE IF NOT EXISTS usage_snapshot_breakdowns (
+    id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL,
+    breakdown_order INTEGER NOT NULL DEFAULT 0,
+    resource_type TEXT,
+    display_name TEXT,
+    display_name_plural TEXT,
+    unit TEXT,
+    currency TEXT,
+    current_usage REAL,
+    usage_limit REAL,
+    current_overages REAL,
+    overage_cap REAL,
+    overage_rate REAL,
+    overage_charges REAL,
+    next_date_reset TEXT,
+    model_name TEXT,
+    remaining REAL,
+    remaining_percent REAL,
+    reset_time TEXT,
+    reset_time_raw TEXT,
+    rate_limit_allowed INTEGER,
+    rate_limit_reached INTEGER,
+    primary_limit_window_seconds REAL,
+    primary_reset_after_seconds REAL,
+    primary_reset_at REAL,
+    primary_used_percent REAL,
+    secondary_limit_window_seconds REAL,
+    secondary_reset_after_seconds REAL,
+    secondary_reset_at REAL,
+    secondary_used_percent REAL,
+    FOREIGN KEY(instance_id) REFERENCES usage_snapshot_instances(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_snapshot_breakdowns_instance_order
+    ON usage_snapshot_breakdowns (instance_id, breakdown_order);
+
+CREATE TABLE IF NOT EXISTS usage_snapshot_free_trials (
+    id TEXT PRIMARY KEY,
+    breakdown_id TEXT NOT NULL,
+    status TEXT,
+    current_usage REAL,
+    usage_limit REAL,
+    expires_at TEXT,
+    FOREIGN KEY(breakdown_id) REFERENCES usage_snapshot_breakdowns(id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_snapshot_free_trials_breakdown
+    ON usage_snapshot_free_trials (breakdown_id);
+
+CREATE TABLE IF NOT EXISTS usage_snapshot_bonuses (
+    id TEXT PRIMARY KEY,
+    breakdown_id TEXT NOT NULL,
+    bonus_order INTEGER NOT NULL DEFAULT 0,
+    code TEXT,
+    display_name TEXT,
+    description TEXT,
+    status TEXT,
+    current_usage REAL,
+    usage_limit REAL,
+    redeemed_at TEXT,
+    expires_at TEXT,
+    FOREIGN KEY(breakdown_id) REFERENCES usage_snapshot_breakdowns(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_snapshot_bonuses_breakdown_order
+    ON usage_snapshot_bonuses (breakdown_id, bonus_order);
 
 CREATE TABLE IF NOT EXISTS usage_refresh_tasks (
     id TEXT PRIMARY KEY,
@@ -2198,6 +3696,12 @@ function buildSqliteOperationDetails(instance, operation, args = []) {
             ])
         };
     }
+    case 'loadUsageCacheSummary':
+        return {
+            replaySafe: true,
+            replayBoundary: 'usage_cache_summary_read',
+            idempotencyKey: 'usage_cache_summary_read'
+        };
     case 'replaceUsageCacheSnapshot': {
         const usageCache = args[0];
         return {
@@ -2285,6 +3789,7 @@ const SQLITE_STORAGE_OPERATION_META = {
     flushProviderRuntimeState: { phase: 'flush', domain: 'provider' },
     updateProviderRoutingUuid: { phase: 'flush', domain: 'provider' },
     loadUsageCacheSnapshot: { phase: 'read', domain: 'usage' },
+    loadUsageCacheSummary: { phase: 'read', domain: 'usage' },
     replaceUsageCacheSnapshot: { phase: 'write', domain: 'usage' },
     loadProviderUsageSnapshot: { phase: 'read', domain: 'usage' },
     upsertProviderUsageSnapshot: { phase: 'write', domain: 'usage' },

@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN" id="html-root">
 <head>
+    <script>window.__AICLIENT_FORCE_UI_DEBUG__ = __AICLIENT_UI_DEBUG_FLAG__;</script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title data-i18n="login.title">登录 - AIClient2API</title>
@@ -222,6 +223,24 @@
 
         // 初始化多语言
         initI18n();
+
+        const forceUiDebug = window.__AICLIENT_FORCE_UI_DEBUG__ === true;
+        const UI_DEBUG_HEADER = 'X-UI-Debug';
+        const loginDebug = (message, payload = null, level = 'log') => {
+            if (!forceUiDebug) return;
+            const consoleMethod = typeof console[level] === 'function' ? console[level] : console.log;
+            if (payload !== null && payload !== undefined) {
+                consoleMethod.call(console, `[UI Debug] ${message}`, payload);
+                return;
+            }
+            consoleMethod.call(console, `[UI Debug] ${message}`);
+        };
+        const buildLoginDebugHeaders = () => forceUiDebug ? { [UI_DEBUG_HEADER]: '1' } : {};
+
+        loginDebug('login page script initialized', {
+            path: window.location.pathname,
+            search: window.location.search
+        });
         
         const loginForm = document.getElementById('loginForm');
         const passwordInput = document.getElementById('password');
@@ -229,6 +248,7 @@
         const loginButton = document.getElementById('loginButton');
 
         // 检查是否已经登录
+        loginDebug('checkLoginStatus start');
         checkLoginStatus();
 
         loginForm.addEventListener('submit', async (e) => {
@@ -247,11 +267,13 @@
             errorMessage.classList.remove('show');
 
             try {
+                loginDebug('POST /api/login started');
                 // 直接使用fetch进行登录请求（登录页面不需要token）
                 const response = await fetch('/api/login', {
                     method: 'POST',
                     headers: {
-                        'Content-Type': 'application/json'
+                        'Content-Type': 'application/json',
+                        ...buildLoginDebugHeaders()
                     },
                     body: JSON.stringify({
                         password
@@ -259,14 +281,24 @@
                 });
 
                 const data = await response.json();
+                loginDebug('POST /api/login completed', {
+                    status: response.status,
+                    ok: response.ok,
+                    success: data?.success === true
+                });
 
                 if (response.ok && data.success) {
+                    loginDebug('login succeeded, redirecting to /');
                     // 登录成功，保存token
                     localStorage.setItem('authToken', data.token);
                     
                     // 跳转到主页
                     window.location.href = '/';
                 } else {
+                    loginDebug('login failed', {
+                        status: response.status,
+                        message: data?.message || null
+                    }, 'warn');
                     showError(data.message || t('login.error.incorrect'));
                     loginButton.disabled = false;
                     loginButton.innerHTML = t('login.button');
@@ -274,6 +306,9 @@
                     passwordInput.focus();
                 }
             } catch (error) {
+                loginDebug('POST /api/login failed', {
+                    message: error?.message || String(error)
+                }, 'error');
                 console.error('登录错误:', error);
                 showError(t('login.error.failed'));
                 loginButton.disabled = false;

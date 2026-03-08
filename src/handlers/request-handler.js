@@ -1,4 +1,3 @@
-import deepmerge from 'deepmerge';
 import logger from '../utils/logger.js';
 import { handleError, getClientIp } from '../utils/common.js';
 import { handleUIApiRequests, serveStaticFiles } from '../services/ui-manager.js';
@@ -38,6 +37,92 @@ function parseRequestBody(req) {
     });
 }
 
+
+function cloneRequestConfigValue(value) {
+    if (value === null || value === undefined) {
+        return value;
+    }
+
+    if (typeof structuredClone === 'function') {
+        return structuredClone(value);
+    }
+
+    return JSON.parse(JSON.stringify(value));
+}
+
+export function createRequestScopedConfig(config = {}) {
+    const currentConfig = {
+        ...config,
+        providerPools: config.providerPools || {}
+    };
+
+    if (Array.isArray(config.DEFAULT_MODEL_PROVIDERS)) {
+        currentConfig.DEFAULT_MODEL_PROVIDERS = [...config.DEFAULT_MODEL_PROVIDERS];
+    }
+
+    if (Array.isArray(config.PROXY_ENABLED_PROVIDERS)) {
+        currentConfig.PROXY_ENABLED_PROVIDERS = [...config.PROXY_ENABLED_PROVIDERS];
+    }
+
+    if (config.providerFallbackChain && typeof config.providerFallbackChain === 'object') {
+        currentConfig.providerFallbackChain = cloneRequestConfigValue(config.providerFallbackChain);
+    }
+
+    if (config.modelFallbackMapping && typeof config.modelFallbackMapping === 'object') {
+        currentConfig.modelFallbackMapping = cloneRequestConfigValue(config.modelFallbackMapping);
+    }
+
+    if (config.RUNTIME_STORAGE_INFO && typeof config.RUNTIME_STORAGE_INFO === 'object') {
+        currentConfig.RUNTIME_STORAGE_INFO = cloneRequestConfigValue(config.RUNTIME_STORAGE_INFO);
+    }
+
+    return currentConfig;
+}
+
+
+function normalizeUiDebugFlag(value) {
+    if (typeof value !== 'string') {
+        return false;
+    }
+
+    return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+export function shouldEnableRequestDebugLogging(req, config = {}) {
+    if (process.env.NODE_ENV === 'test' || config?.UI_DEBUG_LOGGING === true) {
+        return true;
+    }
+
+    const headerValue = req?.headers?.['x-ui-debug'];
+    if (Array.isArray(headerValue)) {
+        if (headerValue.some((item) => normalizeUiDebugFlag(item))) {
+            return true;
+        }
+    } else if (normalizeUiDebugFlag(headerValue)) {
+        return true;
+    }
+
+    try {
+        const requestUrl = new URL(req?.url || '/', 'http://127.0.0.1');
+        return normalizeUiDebugFlag(requestUrl.searchParams.get('ui_debug'));
+    } catch {
+        return false;
+    }
+}
+
+function logRequestDebug(enabled, message, payload = null) {
+    if (!enabled) {
+        return;
+    }
+
+    if (payload) {
+        logger.info(`[UI Debug] ${message}`, payload);
+        return;
+    }
+
+    logger.info(`[UI Debug] ${message}`);
+}
+
 /**
  * Main request handler. It authenticates the request, determines the endpoint type,
  * and delegates to the appropriate specialized handler function.
@@ -58,12 +143,9 @@ export function createRequestHandler(config, providerPoolManager) {
             contextCleared = true;
             logger.clearRequestContext(requestId);
         };
-        // 无论走哪条分支，只要响应结束就清理请求上下文
-        res.once('finish', clearLoggerContext);
-        res.once('close', clearLoggerContext);
 
-        // Deep copy the config for each request to allow dynamic modification
-        const currentConfig = deepmerge({}, config);
+        // 为每个请求创建轻量配置副本，避免深拷贝大型 providerPools 快照
+        const currentConfig = createRequestScopedConfig(config);
         
         // 计算当前请求的基础 URL
         const protocol = req.socket.encrypted || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
@@ -73,6 +155,36 @@ export function createRequestHandler(config, providerPoolManager) {
         const requestUrl = new URL(req.url, `http://${req.headers.host}`);
         let path = requestUrl.pathname;
         const method = req.method;
+        const requestStartedAt = Date.now();
+        const requestDebugEnabled = shouldEnableRequestDebugLogging(req, currentConfig);
+        const requestLabel = `${method} ${path}`;
+        let requestCompletionLogged = false;
+        const logRequestCompletion = (eventName) => {
+            if (requestCompletionLogged) {
+                return;
+            }
+            requestCompletionLogged = true;
+            logRequestDebug(requestDebugEnabled, `${requestLabel} ${eventName}`, {
+                statusCode: res.statusCode || 0,
+                durationMs: Date.now() - requestStartedAt,
+                requestId
+            });
+        };
+
+        // 无论走哪条分支，只要响应结束就清理请求上下文
+        res.once('finish', () => {
+            logRequestCompletion('finished');
+            clearLoggerContext();
+        });
+        res.once('close', () => {
+            logRequestCompletion('closed');
+            clearLoggerContext();
+        });
+
+        logRequestDebug(requestDebugEnabled, `${requestLabel} started`, {
+            requestId,
+            url: req.url
+        });
 
         // Set CORS headers for all requests
         res.setHeader('Access-Control-Allow-Origin', '*');
@@ -92,7 +204,7 @@ export function createRequestHandler(config, providerPoolManager) {
         const pluginManager = getPluginManager();
         const isPluginStatic = pluginManager.isPluginStaticPath(path);
         if (path.startsWith('/static/') || path === '/' || path === '/favicon.ico' || path === '/index.html' || path.startsWith('/app/') || path.startsWith('/components/') || path === '/login.html' || isPluginStatic) {
-            const served = await serveStaticFiles(path, res);
+            const served = await serveStaticFiles(path, res, currentConfig);
             if (served) return;
         }
 

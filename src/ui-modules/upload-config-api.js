@@ -7,16 +7,77 @@ import { broadcastEvent } from './event-broadcast.js';
 import { scanConfigFiles } from './config-scanner.js';
 import { exportProviderPoolsCompatSnapshot } from '../storage/runtime-storage-registry.js';
 
+function normalizeUiDebugFlag(value) {
+    if (typeof value !== 'string') {
+        return false;
+    }
+
+    return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+function isUploadConfigDebugEnabled(req = null, currentConfig = {}) {
+    if (process.env.NODE_ENV === 'test' || currentConfig?.UI_DEBUG_LOGGING === true) {
+        return true;
+    }
+
+    const headerValue = req?.headers?.['x-ui-debug'];
+    if (Array.isArray(headerValue)) {
+        if (headerValue.some((item) => normalizeUiDebugFlag(item))) {
+            return true;
+        }
+    } else if (normalizeUiDebugFlag(headerValue)) {
+        return true;
+    }
+
+    try {
+        const requestUrl = new URL(req?.url || '/', 'http://127.0.0.1');
+        return normalizeUiDebugFlag(requestUrl.searchParams.get('ui_debug'));
+    } catch {
+        return false;
+    }
+}
+
+function logUploadConfigDebug(enabled, message, payload = null, level = 'info') {
+    if (!enabled) {
+        return;
+    }
+
+    const logMethod = typeof logger[level] === 'function' ? logger[level].bind(logger) : logger.info.bind(logger);
+    if (payload !== null && payload !== undefined) {
+        logMethod(`[UI Debug][Upload Config] ${message}`, payload);
+        return;
+    }
+
+    logMethod(`[UI Debug][Upload Config] ${message}`);
+}
+
 /**
  * 获取上传配置文件列表
  */
 export async function handleGetUploadConfigs(req, res, currentConfig, providerPoolManager) {
+    const debugEnabled = isUploadConfigDebugEnabled(req, currentConfig);
+    const startedAt = Date.now();
+
+    logUploadConfigDebug(debugEnabled, 'GET /api/upload-configs started', {
+        path: req?.url || '/api/upload-configs'
+    });
+
     try {
-        const configFiles = await scanConfigFiles(currentConfig, providerPoolManager);
+        const configFiles = await scanConfigFiles(currentConfig, providerPoolManager, {
+            debugEnabled
+        });
+        logUploadConfigDebug(debugEnabled, 'GET /api/upload-configs completed', {
+            count: Array.isArray(configFiles) ? configFiles.length : 0,
+            durationMs: Date.now() - startedAt
+        });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(configFiles));
         return true;
     } catch (error) {
+        logUploadConfigDebug(debugEnabled, 'GET /api/upload-configs failed', {
+            durationMs: Date.now() - startedAt,
+            message: error?.message || String(error)
+        }, 'warn');
         logger.error('[UI API] Failed to scan config files:', error);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
@@ -165,6 +226,14 @@ export async function handleDownloadAllConfigs(req, res, currentConfig) {
                 exportedProviderPools = await exportProviderPoolsCompatSnapshot(currentConfig);
             } catch (error) {
                 logger.warn('[UI API] Failed to export provider pools snapshot for zip backup:', error.message);
+            }
+
+            const inMemoryProviderPools = currentConfig.providerPools;
+            if ((!exportedProviderPools || Object.keys(exportedProviderPools).length === 0)
+                && inMemoryProviderPools
+                && Object.keys(inMemoryProviderPools).length > 0) {
+                exportedProviderPools = inMemoryProviderPools;
+                logger.warn('[UI API] Falling back to in-memory provider pools snapshot for zip backup');
             }
         }
         

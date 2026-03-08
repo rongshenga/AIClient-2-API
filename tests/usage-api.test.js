@@ -37,6 +37,7 @@ const mockGetServiceAdapter = jest.fn((config) => {
 });
 
 const mockReadUsageCache = jest.fn();
+const mockReadUsageCacheSummary = jest.fn();
 const mockWriteUsageCache = jest.fn();
 const mockReadProviderUsageCache = jest.fn();
 const mockUpdateProviderUsageCache = jest.fn();
@@ -101,6 +102,7 @@ describe('Usage API Refresh Cache Strategy', () => {
 
         jest.doMock('../src/ui-modules/usage-cache.js', () => ({
             readUsageCache: mockReadUsageCache,
+            readUsageCacheSummary: mockReadUsageCacheSummary,
             writeUsageCache: mockWriteUsageCache,
             readProviderUsageCache: mockReadProviderUsageCache,
             updateProviderUsageCache: mockUpdateProviderUsageCache
@@ -118,6 +120,8 @@ describe('Usage API Refresh Cache Strategy', () => {
 
     beforeEach(() => {
         mockReadUsageCache.mockReset();
+        mockReadUsageCacheSummary.mockReset();
+        mockReadUsageCacheSummary.mockImplementation((...args) => mockReadUsageCache(...args));
         mockWriteUsageCache.mockReset();
         mockReadProviderUsageCache.mockReset();
         mockUpdateProviderUsageCache.mockReset();
@@ -363,8 +367,104 @@ describe('Usage API Refresh Cache Strategy', () => {
             'grok-custom'
         ]);
     });
-test('should clamp oversized group size and ignore non-positive query overrides', async () => {
-    const providerType = 'gemini-cli-oauth';
+
+    test('should complete provider async refresh even when provider usage cache read stalls', async () => {
+        const providerType = 'gemini-cli-oauth';
+        const providers = buildProviderPool('gemini', 2);
+
+        mockReadUsageCache.mockResolvedValue(null);
+        mockReadProviderUsageCache.mockImplementation(() => new Promise(() => {}));
+        mockUpdateProviderUsageCache.mockResolvedValue(undefined);
+
+        const req = {
+            url: `/api/usage/${encodeURIComponent(providerType)}?refresh=true&async=true`,
+            headers: {
+                host: 'localhost:3000'
+            }
+        };
+        const res = createMockRes();
+        const currentConfig = {
+            providerPools: {
+                [providerType]: providers
+            },
+            PROVIDER_USAGE_CACHE_READ_TIMEOUT_MS: 10
+        };
+        const providerPoolManager = {
+            providerPools: {
+                [providerType]: providers
+            }
+        };
+
+        const handled = await handleGetProviderUsage(req, res, currentConfig, providerPoolManager, providerType);
+        expect(handled).toBe(true);
+        expect(res.statusCode).toBe(202);
+
+        const startPayload = JSON.parse(res.body);
+        const deadline = Date.now() + 3000;
+        let latestTaskStatus = null;
+
+        while (Date.now() < deadline) {
+            const taskRes = createMockRes();
+            const ok = await handleGetUsageRefreshTask({}, taskRes, startPayload.taskId);
+            expect(ok).toBe(true);
+            expect(taskRes.statusCode).toBe(200);
+
+            latestTaskStatus = JSON.parse(taskRes.body);
+            if (latestTaskStatus.status !== 'running') {
+                break;
+            }
+
+            await sleep(5);
+        }
+
+        expect(latestTaskStatus).toBeTruthy();
+        expect(latestTaskStatus.status).toBe('completed');
+        expect(mockReadProviderUsageCache).not.toHaveBeenCalled();
+        expect(mockUpdateProviderUsageCache).toHaveBeenCalled();
+    });
+
+    test('should bootstrap usage refresh asynchronously when cache is missing for a large provider pool', async () => {
+        const providers = buildProviderPool('codex', 600);
+        mockReadUsageCache.mockResolvedValue(null);
+        mockWriteUsageCache.mockResolvedValue(undefined);
+
+        const req = {
+            url: '/api/usage',
+            headers: {
+                host: 'localhost:3000'
+            }
+        };
+        const res = createMockRes();
+        const currentConfig = {
+            providerPools: {
+                'openai-codex-oauth': providers
+            },
+            USAGE_SYNC_QUERY_MAX_PROVIDER_COUNT: 500,
+            USAGE_CACHE_READ_TIMEOUT_MS: 1234
+        };
+        const providerPoolManager = {
+            providerPools: {
+                'openai-codex-oauth': providers
+            }
+        };
+
+        const handled = await handleGetUsage(req, res, currentConfig, providerPoolManager);
+        expect(handled).toBe(true);
+        expect(res.statusCode).toBe(202);
+        expect(mockReadUsageCache).toHaveBeenCalledWith(expect.objectContaining({
+            runtimeReadTimeoutMs: 1234,
+            debugLabel: 'GET /api/usage'
+        }));
+
+        const payload = JSON.parse(res.body);
+        expect(payload).toEqual(expect.objectContaining({
+            taskId: expect.any(String),
+            type: 'all'
+        }));
+    });
+
+	test('should clamp oversized group size and ignore non-positive query overrides', async () => {
+	    const providerType = 'gemini-cli-oauth';
     const providers = buildProviderPool('gemini', 600);
     mockReadUsageCache.mockResolvedValue(null);
     mockReadProviderUsageCache.mockResolvedValue(null);

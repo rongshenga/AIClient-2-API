@@ -74,6 +74,10 @@ Migrate Options:
   --blocked-anomaly-codes <csv>   Block migration when listed anomaly codes appear
   --operator <id>                 Record operator id in migration artifacts
   --report-dir <path>             Override diff report output dir
+  --progress-interval <n>         Provider import progress log interval, default: 2000
+  --credential-progress-interval <n> Credential preload progress interval, default: 1000
+  --prepare-concurrency <n>       Preload credential files concurrently, default: ~80% CPU cores
+  --insert-batch-size <n>         Multi-row sqlite insert batch size, default: 250
 
 Verify Options:
   --run-id <id>                   Migration run id
@@ -166,6 +170,10 @@ async function main() {
             resume: options.resume === true,
             stepBatchSize: parseIntegerOption(options['step-batch-size'], undefined),
             stopAfterBatch: parseIntegerOption(options['stop-after-batch'], undefined),
+            progressInterval: parseIntegerOption(options['progress-interval'], undefined),
+            credentialProgressInterval: parseIntegerOption(options['credential-progress-interval'], undefined),
+            prepareConcurrency: parseIntegerOption(options['prepare-concurrency'], undefined),
+            insertBatchSize: parseIntegerOption(options['insert-batch-size'], undefined),
             maxAnomalyCount: parseIntegerOption(options['max-anomaly-count'], undefined),
             blockedAnomalyCodes: parseDomains(options['blocked-anomaly-codes'], []),
             operator: options.operator || null,

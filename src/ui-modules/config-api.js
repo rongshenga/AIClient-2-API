@@ -9,6 +9,156 @@ import { getRequestBody } from '../utils/common.js';
 import { broadcastEvent } from '../ui-modules/event-broadcast.js';
 import { rollbackRuntimeStorageMigration } from '../storage/runtime-storage-migration-service.js';
 
+const CONFIG_RESPONSE_KEYS = [
+    'REQUIRED_API_KEY',
+    'SERVER_PORT',
+    'HOST',
+    'MODEL_PROVIDER',
+    'DEFAULT_MODEL_PROVIDERS',
+    'SYSTEM_PROMPT_FILE_PATH',
+    'SYSTEM_PROMPT_MODE',
+    'PROMPT_LOG_BASE_NAME',
+    'PROMPT_LOG_MODE',
+    'REQUEST_MAX_RETRIES',
+    'REQUEST_BASE_DELAY',
+    'CREDENTIAL_SWITCH_MAX_RETRIES',
+    'CRON_NEAR_MINUTES',
+    'CRON_REFRESH_TOKEN',
+    'LOGIN_EXPIRY',
+    'PROVIDER_POOLS_FILE_PATH',
+    'MAX_ERROR_COUNT',
+    'POOL_GROUP_SELECTION_ENABLED',
+    'POOL_GROUP_SIZE',
+    'POOL_GROUP_MIN_POOL_SIZE',
+    'POOL_GROUP_UNHEALTHY_RATIO_THRESHOLD',
+    'POOL_GROUP_MIN_HEALTHY',
+    'POOL_GROUP_ROTATE_ON_SELECT',
+    'PERSIST_SELECTION_STATE',
+    'RUNTIME_STORAGE_BACKEND',
+    'RUNTIME_STORAGE_DB_PATH',
+    'RUNTIME_STORAGE_DUAL_WRITE',
+    'RUNTIME_STORAGE_AUTO_IMPORT_PROVIDER_POOLS',
+    'RUNTIME_STORAGE_FALLBACK_TO_FILE',
+    'RUNTIME_STORAGE_SQLITE_BINARY',
+    'RUNTIME_STORAGE_PROVIDER_FLUSH_DEBOUNCE_MS',
+    'RUNTIME_STORAGE_PROVIDER_FLUSH_DIRTY_THRESHOLD',
+    'RUNTIME_STORAGE_PROVIDER_FLUSH_BATCH_SIZE',
+    'RUNTIME_STORAGE_PROVIDER_FLUSH_RETRY_DELAY_MS',
+    'RUNTIME_STORAGE_LARGE_POOL_THRESHOLD',
+    'RUNTIME_STORAGE_COMPAT_EXPORT_PAGE_SIZE',
+    'RUNTIME_STORAGE_STARTUP_RESTORE_PAGE_SIZE',
+    'WARMUP_TARGET',
+    'REFRESH_CONCURRENCY_PER_PROVIDER',
+    'USAGE_QUERY_CONCURRENCY_PER_PROVIDER',
+    'providerFallbackChain',
+    'modelFallbackMapping',
+    'PROXY_URL',
+    'PROXY_ENABLED_PROVIDERS',
+    'LOG_ENABLED',
+    'LOG_OUTPUT_MODE',
+    'LOG_LEVEL',
+    'LOG_DIR',
+    'LOG_INCLUDE_REQUEST_ID',
+    'LOG_INCLUDE_TIMESTAMP',
+    'LOG_MAX_FILE_SIZE',
+    'LOG_MAX_FILES',
+    'TLS_SIDECAR_ENABLED',
+    'TLS_SIDECAR_PORT',
+    'TLS_SIDECAR_BINARY_PATH'
+];
+
+const CONFIG_PERSIST_KEYS = [
+    'REQUIRED_API_KEY',
+    'SERVER_PORT',
+    'HOST',
+    'MODEL_PROVIDER',
+    'SYSTEM_PROMPT_FILE_PATH',
+    'SYSTEM_PROMPT_MODE',
+    'PROMPT_LOG_BASE_NAME',
+    'PROMPT_LOG_MODE',
+    'REQUEST_MAX_RETRIES',
+    'REQUEST_BASE_DELAY',
+    'CREDENTIAL_SWITCH_MAX_RETRIES',
+    'CRON_NEAR_MINUTES',
+    'CRON_REFRESH_TOKEN',
+    'LOGIN_EXPIRY',
+    'PROVIDER_POOLS_FILE_PATH',
+    'MAX_ERROR_COUNT',
+    'POOL_GROUP_SELECTION_ENABLED',
+    'POOL_GROUP_SIZE',
+    'POOL_GROUP_MIN_POOL_SIZE',
+    'POOL_GROUP_UNHEALTHY_RATIO_THRESHOLD',
+    'POOL_GROUP_MIN_HEALTHY',
+    'POOL_GROUP_ROTATE_ON_SELECT',
+    'PERSIST_SELECTION_STATE',
+    'RUNTIME_STORAGE_BACKEND',
+    'RUNTIME_STORAGE_DB_PATH',
+    'RUNTIME_STORAGE_DUAL_WRITE',
+    'RUNTIME_STORAGE_AUTO_IMPORT_PROVIDER_POOLS',
+    'RUNTIME_STORAGE_FALLBACK_TO_FILE',
+    'RUNTIME_STORAGE_SQLITE_BINARY',
+    'RUNTIME_STORAGE_PROVIDER_FLUSH_DEBOUNCE_MS',
+    'RUNTIME_STORAGE_PROVIDER_FLUSH_DIRTY_THRESHOLD',
+    'RUNTIME_STORAGE_PROVIDER_FLUSH_BATCH_SIZE',
+    'RUNTIME_STORAGE_PROVIDER_FLUSH_RETRY_DELAY_MS',
+    'RUNTIME_STORAGE_LARGE_POOL_THRESHOLD',
+    'RUNTIME_STORAGE_COMPAT_EXPORT_PAGE_SIZE',
+    'RUNTIME_STORAGE_STARTUP_RESTORE_PAGE_SIZE',
+    'WARMUP_TARGET',
+    'REFRESH_CONCURRENCY_PER_PROVIDER',
+    'USAGE_QUERY_CONCURRENCY_PER_PROVIDER',
+    'providerFallbackChain',
+    'modelFallbackMapping',
+    'PROXY_URL',
+    'PROXY_ENABLED_PROVIDERS',
+    'LOG_ENABLED',
+    'LOG_OUTPUT_MODE',
+    'LOG_LEVEL',
+    'LOG_DIR',
+    'LOG_INCLUDE_REQUEST_ID',
+    'LOG_INCLUDE_TIMESTAMP',
+    'LOG_MAX_FILE_SIZE',
+    'LOG_MAX_FILES',
+    'TLS_SIDECAR_ENABLED',
+    'TLS_SIDECAR_PORT',
+    'TLS_SIDECAR_BINARY_PATH'
+];
+
+const RUNTIME_ONLY_CONFIG_KEYS = [
+    'providerPools',
+    'SYSTEM_PROMPT_CONTENT',
+    'RUNTIME_STORAGE_INFO'
+];
+
+function pickConfigFields(source = {}, keys = []) {
+    return keys.reduce((result, key) => {
+        if (Object.prototype.hasOwnProperty.call(source, key) && source[key] !== undefined) {
+            result[key] = source[key];
+        }
+        return result;
+    }, {});
+}
+
+function buildUiConfigPayload(currentConfig = {}, options = {}) {
+    return {
+        ...pickConfigFields(currentConfig, CONFIG_RESPONSE_KEYS),
+        systemPrompt: options.systemPrompt || ''
+    };
+}
+
+function buildPersistedConfigPayload(currentConfig = {}, existingConfig = {}) {
+    const configToSave = {
+        ...existingConfig,
+        ...pickConfigFields(currentConfig, CONFIG_PERSIST_KEYS)
+    };
+
+    for (const key of RUNTIME_ONLY_CONFIG_KEYS) {
+        delete configToSave[key];
+    }
+
+    return configToSave;
+}
+
 /**
  * 重载配置文件
  * 动态导入config-manager并重新初始化配置
@@ -65,11 +215,10 @@ export async function handleGetConfig(req, res, currentConfig) {
         }
     }
 
+    const payload = buildUiConfigPayload(currentConfig, { systemPrompt });
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-        ...currentConfig,
-        systemPrompt
-    }));
+    res.end(JSON.stringify(payload));
     return true;
 }
 
@@ -105,6 +254,12 @@ export async function handleUpdateConfig(req, res, currentConfig) {
         if (newConfig.POOL_GROUP_MIN_HEALTHY !== undefined) currentConfig.POOL_GROUP_MIN_HEALTHY = newConfig.POOL_GROUP_MIN_HEALTHY;
         if (newConfig.POOL_GROUP_ROTATE_ON_SELECT !== undefined) currentConfig.POOL_GROUP_ROTATE_ON_SELECT = newConfig.POOL_GROUP_ROTATE_ON_SELECT;
         if (newConfig.PERSIST_SELECTION_STATE !== undefined) currentConfig.PERSIST_SELECTION_STATE = newConfig.PERSIST_SELECTION_STATE;
+        if (newConfig.RUNTIME_STORAGE_BACKEND !== undefined) currentConfig.RUNTIME_STORAGE_BACKEND = newConfig.RUNTIME_STORAGE_BACKEND;
+        if (newConfig.RUNTIME_STORAGE_DB_PATH !== undefined) currentConfig.RUNTIME_STORAGE_DB_PATH = newConfig.RUNTIME_STORAGE_DB_PATH;
+        if (newConfig.RUNTIME_STORAGE_DUAL_WRITE !== undefined) currentConfig.RUNTIME_STORAGE_DUAL_WRITE = newConfig.RUNTIME_STORAGE_DUAL_WRITE;
+        if (newConfig.RUNTIME_STORAGE_AUTO_IMPORT_PROVIDER_POOLS !== undefined) currentConfig.RUNTIME_STORAGE_AUTO_IMPORT_PROVIDER_POOLS = newConfig.RUNTIME_STORAGE_AUTO_IMPORT_PROVIDER_POOLS;
+        if (newConfig.RUNTIME_STORAGE_FALLBACK_TO_FILE !== undefined) currentConfig.RUNTIME_STORAGE_FALLBACK_TO_FILE = newConfig.RUNTIME_STORAGE_FALLBACK_TO_FILE;
+        if (newConfig.RUNTIME_STORAGE_SQLITE_BINARY !== undefined) currentConfig.RUNTIME_STORAGE_SQLITE_BINARY = newConfig.RUNTIME_STORAGE_SQLITE_BINARY;
         if (newConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_DEBOUNCE_MS !== undefined) currentConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_DEBOUNCE_MS = newConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_DEBOUNCE_MS;
         if (newConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_DIRTY_THRESHOLD !== undefined) currentConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_DIRTY_THRESHOLD = newConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_DIRTY_THRESHOLD;
         if (newConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_BATCH_SIZE !== undefined) currentConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_BATCH_SIZE = newConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_BATCH_SIZE;
@@ -161,56 +316,11 @@ export async function handleUpdateConfig(req, res, currentConfig) {
         try {
             const configPath = 'configs/config.json';
             
-            // Create a clean config object for saving (exclude runtime-only properties)
-            const configToSave = {
-                REQUIRED_API_KEY: currentConfig.REQUIRED_API_KEY,
-                SERVER_PORT: currentConfig.SERVER_PORT,
-                HOST: currentConfig.HOST,
-                MODEL_PROVIDER: currentConfig.MODEL_PROVIDER,
-                SYSTEM_PROMPT_FILE_PATH: currentConfig.SYSTEM_PROMPT_FILE_PATH,
-                SYSTEM_PROMPT_MODE: currentConfig.SYSTEM_PROMPT_MODE,
-                PROMPT_LOG_BASE_NAME: currentConfig.PROMPT_LOG_BASE_NAME,
-                PROMPT_LOG_MODE: currentConfig.PROMPT_LOG_MODE,
-                REQUEST_MAX_RETRIES: currentConfig.REQUEST_MAX_RETRIES,
-                REQUEST_BASE_DELAY: currentConfig.REQUEST_BASE_DELAY,
-                CREDENTIAL_SWITCH_MAX_RETRIES: currentConfig.CREDENTIAL_SWITCH_MAX_RETRIES,
-                CRON_NEAR_MINUTES: currentConfig.CRON_NEAR_MINUTES,
-                CRON_REFRESH_TOKEN: currentConfig.CRON_REFRESH_TOKEN,
-                LOGIN_EXPIRY: currentConfig.LOGIN_EXPIRY,
-                PROVIDER_POOLS_FILE_PATH: currentConfig.PROVIDER_POOLS_FILE_PATH,
-                MAX_ERROR_COUNT: currentConfig.MAX_ERROR_COUNT,
-                POOL_GROUP_SELECTION_ENABLED: currentConfig.POOL_GROUP_SELECTION_ENABLED,
-                POOL_GROUP_SIZE: currentConfig.POOL_GROUP_SIZE,
-                POOL_GROUP_MIN_POOL_SIZE: currentConfig.POOL_GROUP_MIN_POOL_SIZE,
-                POOL_GROUP_UNHEALTHY_RATIO_THRESHOLD: currentConfig.POOL_GROUP_UNHEALTHY_RATIO_THRESHOLD,
-                POOL_GROUP_MIN_HEALTHY: currentConfig.POOL_GROUP_MIN_HEALTHY,
-                POOL_GROUP_ROTATE_ON_SELECT: currentConfig.POOL_GROUP_ROTATE_ON_SELECT,
-                PERSIST_SELECTION_STATE: currentConfig.PERSIST_SELECTION_STATE,
-                RUNTIME_STORAGE_PROVIDER_FLUSH_DEBOUNCE_MS: currentConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_DEBOUNCE_MS,
-                RUNTIME_STORAGE_PROVIDER_FLUSH_DIRTY_THRESHOLD: currentConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_DIRTY_THRESHOLD,
-                RUNTIME_STORAGE_PROVIDER_FLUSH_BATCH_SIZE: currentConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_BATCH_SIZE,
-                RUNTIME_STORAGE_PROVIDER_FLUSH_RETRY_DELAY_MS: currentConfig.RUNTIME_STORAGE_PROVIDER_FLUSH_RETRY_DELAY_MS,
-                RUNTIME_STORAGE_LARGE_POOL_THRESHOLD: currentConfig.RUNTIME_STORAGE_LARGE_POOL_THRESHOLD,
-                RUNTIME_STORAGE_COMPAT_EXPORT_PAGE_SIZE: currentConfig.RUNTIME_STORAGE_COMPAT_EXPORT_PAGE_SIZE,
-                RUNTIME_STORAGE_STARTUP_RESTORE_PAGE_SIZE: currentConfig.RUNTIME_STORAGE_STARTUP_RESTORE_PAGE_SIZE,
-                WARMUP_TARGET: currentConfig.WARMUP_TARGET,
-                REFRESH_CONCURRENCY_PER_PROVIDER: currentConfig.REFRESH_CONCURRENCY_PER_PROVIDER,
-                USAGE_QUERY_CONCURRENCY_PER_PROVIDER: currentConfig.USAGE_QUERY_CONCURRENCY_PER_PROVIDER,
-                providerFallbackChain: currentConfig.providerFallbackChain,
-                modelFallbackMapping: currentConfig.modelFallbackMapping,
-                PROXY_URL: currentConfig.PROXY_URL,
-                PROXY_ENABLED_PROVIDERS: currentConfig.PROXY_ENABLED_PROVIDERS,
-                LOG_ENABLED: currentConfig.LOG_ENABLED,
-                LOG_OUTPUT_MODE: currentConfig.LOG_OUTPUT_MODE,
-                LOG_LEVEL: currentConfig.LOG_LEVEL,
-                LOG_DIR: currentConfig.LOG_DIR,
-                LOG_INCLUDE_REQUEST_ID: currentConfig.LOG_INCLUDE_REQUEST_ID,
-                LOG_INCLUDE_TIMESTAMP: currentConfig.LOG_INCLUDE_TIMESTAMP,
-                LOG_MAX_FILE_SIZE: currentConfig.LOG_MAX_FILE_SIZE,
-                LOG_MAX_FILES: currentConfig.LOG_MAX_FILES,
-                TLS_SIDECAR_ENABLED: currentConfig.TLS_SIDECAR_ENABLED,
-                TLS_SIDECAR_PORT: currentConfig.TLS_SIDECAR_PORT
-            };
+            // 基于现有 config.json 合并保存，避免把未在 UI 展示的持久化配置误删
+            const existingConfig = existsSync(configPath)
+                ? JSON.parse(readFileSync(configPath, 'utf-8'))
+                : {};
+            const configToSave = buildPersistedConfigPayload(currentConfig, existingConfig);
 
             writeFileSync(configPath, JSON.stringify(configToSave, null, 2), 'utf-8');
             logger.info('[UI API] Configuration saved to configs/config.json');
