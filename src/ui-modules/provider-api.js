@@ -1231,6 +1231,151 @@ export async function handleHealthCheck(req, res, currentConfig, providerPoolMan
 }
 
 /**
+ * 对单个提供商节点执行健康检查
+ */
+export async function handleSingleProviderHealthCheck(req, res, currentConfig, providerPoolManager, providerType, providerUuid) {
+    try {
+        if (!providerPoolManager) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: 'Provider pool manager not initialized' } }));
+            return true;
+        }
+
+        const providers = providerPoolManager.providerStatus[providerType] || [];
+        if (providers.length === 0) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: 'No providers found for this type' } }));
+            return true;
+        }
+
+        const providerStatus = providers.find(ps => ps?.config?.uuid === providerUuid);
+        if (!providerStatus?.config) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: 'Provider not found' } }));
+            return true;
+        }
+
+        const providerConfig = providerStatus.config;
+        if (providerConfig.isDisabled) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: true,
+                skipped: true,
+                message: 'Provider is disabled, skipped health check',
+                result: {
+                    uuid: providerUuid,
+                    success: null,
+                    message: 'Provider is disabled'
+                }
+            }));
+            return true;
+        }
+
+        let result;
+        try {
+            // 强制执行健康检查，忽略 checkHealth 配置
+            const healthResult = await providerPoolManager._checkProviderHealth(providerType, providerConfig, true);
+
+            if (healthResult === null) {
+                result = {
+                    uuid: providerConfig.uuid,
+                    success: null,
+                    message: 'Health check not supported for this provider type'
+                };
+            } else if (healthResult.success) {
+                providerPoolManager.markProviderHealthy(providerType, providerConfig, false, healthResult.modelName);
+                result = {
+                    uuid: providerConfig.uuid,
+                    success: true,
+                    modelName: healthResult.modelName,
+                    message: 'Healthy'
+                };
+            } else {
+                const errorMessage = healthResult.errorMessage || 'Check failed';
+                const isAuthError = /\b(401|403)\b/.test(errorMessage) ||
+                    /\b(Unauthorized|Forbidden|AccessDenied|InvalidToken|ExpiredToken)\b/i.test(errorMessage);
+
+                if (isAuthError) {
+                    providerPoolManager.markProviderUnhealthyImmediately(providerType, providerConfig, errorMessage);
+                    logger.info(`[UI API] Auth error detected for ${providerConfig.uuid}, immediately marked as unhealthy`);
+                } else {
+                    providerPoolManager.markProviderUnhealthy(providerType, providerConfig, errorMessage);
+                }
+
+                providerStatus.config.lastHealthCheckTime = new Date().toISOString();
+                if (healthResult.modelName) {
+                    providerStatus.config.lastHealthCheckModel = healthResult.modelName;
+                }
+
+                result = {
+                    uuid: providerConfig.uuid,
+                    success: false,
+                    modelName: healthResult.modelName,
+                    message: errorMessage,
+                    isAuthError
+                };
+            }
+        } catch (error) {
+            const errorMessage = error.message || 'Unknown error';
+            const isAuthError = /\b(401|403)\b/.test(errorMessage) ||
+                /\b(Unauthorized|Forbidden|AccessDenied|InvalidToken|ExpiredToken)\b/i.test(errorMessage);
+
+            if (isAuthError) {
+                providerPoolManager.markProviderUnhealthyImmediately(providerType, providerConfig, errorMessage);
+                logger.info(`[UI API] Auth error detected for ${providerConfig.uuid}, immediately marked as unhealthy`);
+            } else {
+                providerPoolManager.markProviderUnhealthy(providerType, providerConfig, errorMessage);
+            }
+
+            result = {
+                uuid: providerConfig.uuid,
+                success: false,
+                message: errorMessage,
+                isAuthError
+            };
+        }
+
+        const filePath = getProviderPoolsFilePath(currentConfig);
+        const providerPools = {};
+        for (const pType in providerPoolManager.providerStatus) {
+            providerPools[pType] = providerPoolManager.providerStatus[pType].map(ps => ps.config);
+        }
+        await persistProviderPools(currentConfig, providerPoolManager, providerPools, {
+            reinitializeManager: false,
+            managerProviderPools: providerPools
+        });
+
+        safeBroadcastEvent('config_update', {
+            action: 'single_health_check',
+            filePath,
+            providerType,
+            providerUuid,
+            result,
+            timestamp: new Date().toISOString()
+        });
+
+        const resultMessage = result.success === true
+            ? 'Health check completed: healthy'
+            : (result.success === false ? `Health check completed: ${result.message}` : result.message);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: true,
+            message: resultMessage,
+            result
+        }));
+        return true;
+    } catch (error) {
+        return handleProviderMutationFailure(res, 'single_provider_health_check', error, {
+            currentConfig,
+            providerType,
+            providerUuid,
+            filePath: getProviderPoolsFilePath(currentConfig)
+        });
+    }
+}
+
+/**
  * 快速链接配置文件到对应的提供商
  * 支持单个文件路径或文件路径数组
  */

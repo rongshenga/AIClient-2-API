@@ -5,7 +5,10 @@ import path from 'path';
 import AdmZip from 'adm-zip';
 import { broadcastEvent } from './event-broadcast.js';
 import { scanConfigFiles } from './config-scanner.js';
-import { exportProviderPoolsCompatSnapshot } from '../storage/runtime-storage-registry.js';
+import {
+    exportProviderPoolsCompatSnapshot,
+    listCredentialAssetsWithRuntimeStorage
+} from '../storage/runtime-storage-registry.js';
 
 function normalizeUiDebugFlag(value) {
     if (typeof value !== 'string') {
@@ -51,24 +54,84 @@ function logUploadConfigDebug(enabled, message, payload = null, level = 'info') 
     logMethod(`[UI Debug][Upload Config] ${message}`);
 }
 
+function getUploadConfigSource(req) {
+    try {
+        const requestUrl = new URL(req?.url || '/', 'http://127.0.0.1');
+        const source = (requestUrl.searchParams.get('source') || '').trim().toLowerCase();
+        return source === 'scan' ? 'scan' : 'runtime';
+    } catch {
+        return 'runtime';
+    }
+}
+
+function mapRuntimeCredentialAssetToConfigItem(asset = {}) {
+    const rawPath = String(asset.source_path || '').replace(/\\/g, '/');
+    const normalizedPath = rawPath.replace(/^\.\//, '');
+    const fileName = normalizedPath ? path.basename(normalizedPath) : String(asset.id || 'credential.json');
+    const extension = path.extname(fileName).toLowerCase() || '.json';
+    const modifiedAt = asset.last_imported_at || asset.updated_at || new Date().toISOString();
+
+    return {
+        name: fileName,
+        path: normalizedPath || rawPath || fileName,
+        size: 0,
+        type: extension === '.json' ? 'oauth' : 'other',
+        provider: asset.provider_type || 'unknown',
+        extension,
+        modified: modifiedAt,
+        isValid: true,
+        errorMessage: '',
+        isUsed: true,
+        usageInfo: {
+            isUsed: true,
+            usageType: 'provider_pool',
+            usageDetails: [
+                {
+                    type: 'Provider Pool',
+                    location: 'Runtime credential binding',
+                    providerType: asset.provider_type || 'unknown',
+                    configKey: asset.source_kind || 'runtime_storage'
+                }
+            ]
+        },
+        preview: '',
+        sourceKind: asset.source_kind || 'runtime_storage'
+    };
+}
+
+async function buildRuntimeConfigInventory(currentConfig = {}) {
+    const assets = await listCredentialAssetsWithRuntimeStorage(currentConfig, null, {
+        sort: 'desc'
+    });
+
+    if (!Array.isArray(assets) || assets.length === 0) {
+        return [];
+    }
+
+    return assets.map((asset) => mapRuntimeCredentialAssetToConfigItem(asset));
+}
+
 /**
  * 获取上传配置文件列表
  */
 export async function handleGetUploadConfigs(req, res, currentConfig, providerPoolManager) {
     const debugEnabled = isUploadConfigDebugEnabled(req, currentConfig);
     const startedAt = Date.now();
+    const source = getUploadConfigSource(req);
 
     logUploadConfigDebug(debugEnabled, 'GET /api/upload-configs started', {
-        path: req?.url || '/api/upload-configs'
+        path: req?.url || '/api/upload-configs',
+        source
     });
 
     try {
-        const configFiles = await scanConfigFiles(currentConfig, providerPoolManager, {
-            debugEnabled
-        });
+        const configFiles = source === 'scan'
+            ? await scanConfigFiles(currentConfig, providerPoolManager, { debugEnabled })
+            : await buildRuntimeConfigInventory(currentConfig);
         logUploadConfigDebug(debugEnabled, 'GET /api/upload-configs completed', {
             count: Array.isArray(configFiles) ? configFiles.length : 0,
-            durationMs: Date.now() - startedAt
+            durationMs: Date.now() - startedAt,
+            source
         });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(configFiles));
@@ -76,13 +139,14 @@ export async function handleGetUploadConfigs(req, res, currentConfig, providerPo
     } catch (error) {
         logUploadConfigDebug(debugEnabled, 'GET /api/upload-configs failed', {
             durationMs: Date.now() - startedAt,
-            message: error?.message || String(error)
+            message: error?.message || String(error),
+            source
         }, 'warn');
-        logger.error('[UI API] Failed to scan config files:', error);
+        logger.error('[UI API] Failed to load upload configs:', error);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             error: {
-                message: 'Failed to scan config files: ' + error.message
+                message: 'Failed to load upload configs: ' + error.message
             }
         }));
         return true;

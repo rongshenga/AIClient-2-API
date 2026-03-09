@@ -698,6 +698,15 @@ export async function linkCredentialFilesWithRuntimeStorage(config = {}, credPat
     return await storage.linkCredentialFiles(credPaths, options);
 }
 
+export async function listCredentialAssetsWithRuntimeStorage(config = {}, providerType = null, options = {}) {
+    const storage = await resolveRuntimeStorage(config);
+    if (!storage || typeof storage.listCredentialAssets !== 'function') {
+        return [];
+    }
+
+    return await storage.listCredentialAssets(providerType, options);
+}
+
 export async function closeRuntimeStorage() {
     if (!runtimeStorage) {
         return;

@@ -642,6 +642,9 @@ function renderProviderList(providers) {
                         <button class="btn-small btn-delete" onclick="window.deleteProvider('${provider.uuid}', event)">
                             <i class="fas fa-trash"></i> <span data-i18n="modal.provider.delete">删除</span>
                         </button>
+                        <button class="btn-small btn-info" onclick="window.refreshProviderHealthStatus('${provider.uuid}', event)" title="${t('modal.provider.refreshHealth')}">
+                            <i class="fas fa-stethoscope"></i>
+                        </button>
                         <button class="btn-small btn-refresh-uuid" onclick="window.refreshProviderUuid('${provider.uuid}', event)" title="${t('modal.provider.refreshUuid')}">
                             <i class="fas fa-sync-alt"></i>
                         </button>
@@ -1098,6 +1101,9 @@ function cancelEdit(uuid, event) {
         </button>
         <button class="btn-small btn-delete" onclick="window.deleteProvider('${uuid}', event)">
             <i class="fas fa-trash"></i> <span data-i18n="modal.provider.delete">${t('modal.provider.delete')}</span>
+        </button>
+        <button class="btn-small btn-info" onclick="window.refreshProviderHealthStatus('${uuid}', event)" title="${t('modal.provider.refreshHealth')}">
+            <i class="fas fa-stethoscope"></i>
         </button>
         <button class="btn-small btn-refresh-uuid" onclick="window.refreshProviderUuid('${uuid}', event)" title="${t('modal.provider.refreshUuid')}">
             <i class="fas fa-sync-alt"></i>
@@ -1866,6 +1872,52 @@ async function refreshProviderUuid(uuid, event) {
 }
 
 /**
+ * 刷新单个提供商健康状态
+ * @param {string} uuid - 提供商UUID
+ * @param {Event} event - 事件对象
+ */
+async function refreshProviderHealthStatus(uuid, event) {
+    event.stopPropagation();
+
+    const providerDetail = event.target.closest('.provider-item-detail');
+    const providerType = providerDetail.closest('.provider-modal').getAttribute('data-provider-type');
+
+    if (!confirm(t('modal.provider.refreshHealthConfirm', { uuid }))) {
+        return;
+    }
+
+    try {
+        showToast(t('common.info'), t('modal.provider.refreshHealth.running'), 'info');
+
+        const response = await window.apiClient.post(
+            `/providers/${encodeURIComponent(providerType)}/${uuid}/health-check`,
+            {}
+        );
+
+        const result = response?.result || null;
+        if (!response?.success) {
+            showToast(t('common.error'), t('modal.provider.refreshHealth.failed'), 'error');
+            return;
+        }
+
+        if (result?.success === true) {
+            showToast(t('common.success'), t('modal.provider.refreshHealth.success'), 'success');
+        } else if (result?.success === false) {
+            const errorMessage = result.message || t('common.error');
+            showToast(t('common.warning'), t('modal.provider.refreshHealth.unhealthy') + `: ${errorMessage}`, 'warning');
+        } else {
+            showToast(t('common.info'), result?.message || t('modal.provider.refreshHealth.notSupported'), 'info');
+        }
+
+        await window.apiClient.post('/reload-config');
+        await refreshProviderConfig(providerType);
+    } catch (error) {
+        console.error('刷新健康状态失败:', error);
+        showToast(t('common.error'), t('modal.provider.refreshHealth.failed') + ': ' + error.message, 'error');
+    }
+}
+
+/**
  * 删除所有不健康的提供商节点
  * @param {string} providerType - 提供商类型
  */
@@ -2017,7 +2069,8 @@ export {
     goToProviderPage,
     applyProviderHealthFilter,
     executeRefreshProviderUuidAction,
-    refreshProviderUuid
+    refreshProviderUuid,
+    refreshProviderHealthStatus
 };
 
 // 将函数挂载到window对象
@@ -2038,3 +2091,4 @@ window.showGrokBatchImportModal = showGrokBatchImportModal;
 window.goToProviderPage = goToProviderPage;
 window.applyProviderHealthFilter = applyProviderHealthFilter;
 window.refreshProviderUuid = refreshProviderUuid;
+window.refreshProviderHealthStatus = refreshProviderHealthStatus;

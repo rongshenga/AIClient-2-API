@@ -280,6 +280,15 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
         return await providerApi.handleRefreshUnhealthyUuids(req, res, currentConfig, providerPoolManager, providerType);
     }
 
+    // Perform health check for a specific provider
+    // NOTE: This must be before the generic /{providerType}/{uuid} route to avoid matching 'health-check' as UUID
+    const singleProviderHealthCheckMatch = pathParam.match(/^\/api\/providers\/([^\/]+)\/([^\/]+)\/health-check$/);
+    if (method === 'POST' && singleProviderHealthCheckMatch) {
+        const providerType = decodeURIComponent(singleProviderHealthCheckMatch[1]);
+        const providerUuid = singleProviderHealthCheckMatch[2];
+        return await providerApi.handleSingleProviderHealthCheck(req, res, currentConfig, providerPoolManager, providerType, providerUuid);
+    }
+
     // Disable/Enable specific provider configuration
     const disableEnableProviderMatch = pathParam.match(/^\/api\/providers\/([^\/]+)\/([^\/]+)\/(disable|enable)$/);
     if (disableEnableProviderMatch) {

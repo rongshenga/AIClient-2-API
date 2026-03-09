@@ -17,6 +17,10 @@ export default {
   testMatch: [
     '**/tests/**/*.test.js'
   ],
+  testPathIgnorePatterns: [
+    '/node_modules/',
+    '/tests/integration/'
+  ],
   collectCoverageFrom: [
     'src/**/*.js',
     '!src/**/*.test.js',
