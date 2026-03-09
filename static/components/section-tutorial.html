@@ -3,11 +3,11 @@
 <section id="tutorial" class="section" aria-labelledby="tutorial-title">
     <h2 id="tutorial-title" data-i18n="tutorial.title">配置教程</h2>
     
-    <!-- 配置文件说明 -->
+    <!-- 配置与存储说明 -->
     <div class="tutorial-panel">
-        <h3><i class="fas fa-file-code"></i> <span data-i18n="tutorial.config.title">配置文件说明</span></h3>
+        <h3><i class="fas fa-file-code"></i> <span data-i18n="tutorial.config.title">配置与存储说明</span></h3>
         <div class="tutorial-content">
-            <p data-i18n="tutorial.config.desc">所有配置文件都存放在 <code>configs/</code> 目录下。主要配置文件包括：</p>
+            <p data-i18n="tutorial.config.desc">配置以 Web UI 保存为主，<code>configs/</code> 目录用于启动参数与兼容导入导出。运行时数据可按后端写入文件或 SQLite。</p>
             
             <div class="config-file-list">
                 <div class="config-file-item">
@@ -22,9 +22,9 @@
                     <div class="file-header">
                         <i class="fas fa-file-alt"></i>
                         <span class="file-name">provider_pools.json</span>
-                        <span class="file-badge required" data-i18n="tutorial.config.badge.required">必需</span>
+                        <span class="file-badge optional" data-i18n="tutorial.config.badge.optional">可选</span>
                     </div>
-                    <p class="file-desc" data-i18n="tutorial.config.file.pools">提供商池配置，用于多账号轮询和故障转移 (保存节点后自动新建)</p>
+                    <p class="file-desc" data-i18n="tutorial.config.file.pools">提供商池兼容快照文件。启用 DB 后主要用于迁移、导入导出和回滚工件，不再是唯一数据源</p>
                 </div>
                 <div class="config-file-item">
                     <div class="file-header">
@@ -228,11 +228,67 @@
         </div>
     </div>
 
+    <!-- Runtime Storage -->
+    <div class="tutorial-panel">
+        <h3><i class="fas fa-database"></i> <span data-i18n="tutorial.storage.title">Runtime Storage (file/db)</span></h3>
+        <div class="tutorial-content">
+            <p data-i18n="tutorial.storage.desc">运行时数据存储后端可选 file 或 db。db 模式使用 sqlite，并支持与历史 JSON 文件互导与回滚。</p>
+            <div class="config-section">
+                <h4 data-i18n="tutorial.storage.table.title">关键参数</h4>
+                <div class="config-table">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th data-i18n="tutorial.main.table.param">参数</th>
+                                <th data-i18n="tutorial.main.table.type">类型</th>
+                                <th data-i18n="tutorial.main.table.default">默认值</th>
+                                <th data-i18n="tutorial.main.table.desc">说明</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><code>RUNTIME_STORAGE_BACKEND</code></td>
+                                <td>string</td>
+                                <td>file</td>
+                                <td data-i18n="tutorial.storage.backend">运行时存储后端：<code>file</code> 或 <code>db</code></td>
+                            </tr>
+                            <tr>
+                                <td><code>RUNTIME_STORAGE_DB_PATH</code></td>
+                                <td>string</td>
+                                <td>configs/runtime/runtime-storage.sqlite</td>
+                                <td data-i18n="tutorial.storage.dbPath">SQLite 数据库路径（仅 db 模式使用）</td>
+                            </tr>
+                            <tr>
+                                <td><code>RUNTIME_STORAGE_DUAL_WRITE</code></td>
+                                <td>boolean</td>
+                                <td>false</td>
+                                <td data-i18n="tutorial.storage.dualWrite">双写模式，便于迁移阶段同时写入 DB 与文件</td>
+                            </tr>
+                            <tr>
+                                <td><code>RUNTIME_STORAGE_AUTO_IMPORT_PROVIDER_POOLS</code></td>
+                                <td>boolean</td>
+                                <td>true</td>
+                                <td data-i18n="tutorial.storage.autoImport">启动时自动导入历史 provider pools 快照到 DB（仅 db 模式）</td>
+                            </tr>
+                            <tr>
+                                <td><code>RUNTIME_STORAGE_FALLBACK_TO_FILE</code></td>
+                                <td>boolean</td>
+                                <td>true</td>
+                                <td data-i18n="tutorial.storage.fallback">DB 读写异常时回退到文件存储</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <p data-i18n="tutorial.storage.migration">迁移建议：先执行 <code>npm run runtime-storage:admin -- migrate</code> 预演，再用 <code>--execute</code> 落地，最后执行 <code>verify --fail-on-diff</code> 校验。</p>
+        </div>
+    </div>
+
     <!-- 提供商池配置 -->
     <div class="tutorial-panel">
-        <h3><i class="fas fa-layer-group"></i> <span data-i18n="tutorial.pool.title">提供商池配置 (provider_pools.json)</span></h3>
+        <h3><i class="fas fa-layer-group"></i> <span data-i18n="tutorial.pool.title">提供商池兼容数据 (provider_pools.json)</span></h3>
         <div class="tutorial-content">
-            <p data-i18n="tutorial.pool.desc">提供商池用于配置多个账号，实现负载均衡和故障转移。每个提供商类型可以配置多个账号节点。</p>
+            <p data-i18n="tutorial.pool.desc">该结构仍用于导入导出、兼容工具链与排障。db 模式下，运行时以数据库中的 provider 数据为准。</p>
             
             <div class="config-section">
                 <h4 data-i18n="tutorial.pool.node.title">节点配置参数</h4>
