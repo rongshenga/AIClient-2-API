@@ -24,6 +24,7 @@ let isStaticProviderConfigsUpdated = false;
 let cachedSupportedProviders = null;
 const PROVIDERS_LIST_LOADING_DELAY_MS = 160;
 const PROVIDER_DETAILS_LOADING_DELAY_MS = 180;
+const PROVIDER_MODAL_PAGE_LIMIT = 5;
 let providersSectionLoadingCount = 0;
 let providerDetailsGlobalLoadingCount = 0;
 let providerDetailsGlobalLoadingEl = null;
@@ -1056,7 +1057,11 @@ async function openProviderManager(providerType) {
             hasDisplayedGlobalLoading = true;
         }, PROVIDER_DETAILS_LOADING_DELAY_MS);
 
-        const data = await window.apiClient.get(`/providers/${encodeURIComponent(providerType)}`);
+        const query = new URLSearchParams({
+            page: '1',
+            limit: String(PROVIDER_MODAL_PAGE_LIMIT)
+        });
+        const data = await window.apiClient.get(`/providers/${encodeURIComponent(providerType)}?${query.toString()}`);
         
         showProviderManagerModal(data);
     } catch (error) {

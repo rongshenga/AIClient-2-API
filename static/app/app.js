@@ -164,6 +164,7 @@ function initApp() {
 
         if (!providerRefreshTimer) {
             providerRefreshTimer = setInterval(() => {
+                loadSystemInfo();
                 loadProviders({ showLoading: false });
 
                 if (providerStats.activeProviders > 0) {

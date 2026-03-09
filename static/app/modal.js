@@ -10,8 +10,69 @@ let currentPage = 1;
 let allProviders = [];
 let currentProviders = [];
 let currentProviderType = '';
+let currentTotalCount = 0;
+let currentHealthyCount = 0;
+let currentTotalPages = 1;
+let currentSort = null;
 let cachedModels = []; // 缓存模型列表
 let currentHealthFilter = 'all';
+
+function normalizePage(value, fallback = 1) {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+        return fallback;
+    }
+    return parsed;
+}
+
+function buildProviderPageUrl(providerType, page = 1) {
+    const params = new URLSearchParams({
+        page: String(normalizePage(page, 1)),
+        limit: String(PROVIDERS_PER_PAGE)
+    });
+
+    if (currentSort === 'asc' || currentSort === 'desc') {
+        params.set('sort', currentSort);
+    }
+
+    return `/providers/${encodeURIComponent(providerType)}?${params.toString()}`;
+}
+
+async function fetchProviderPage(providerType, page = 1) {
+    return await window.apiClient.get(buildProviderPageUrl(providerType, page));
+}
+
+function applyProviderModalPayload(data = {}, { resetFilter = false } = {}) {
+    allProviders = Array.isArray(data.providers) ? data.providers : [];
+    currentProviderType = data.providerType || currentProviderType;
+    currentPage = normalizePage(data.page, currentPage);
+    currentTotalCount = Number(data.totalCount) || allProviders.length;
+    currentHealthyCount = Number(data.healthyCount) || 0;
+    currentTotalPages = Math.max(
+        1,
+        Number(data.totalPages) || Math.ceil(Math.max(currentTotalCount, 1) / PROVIDERS_PER_PAGE)
+    );
+    if (data.sort === 'asc' || data.sort === 'desc') {
+        currentSort = data.sort;
+    } else if (data.sort === null) {
+        currentSort = null;
+    }
+
+    if (resetFilter) {
+        currentHealthFilter = 'all';
+    }
+
+    currentProviders = filterProvidersByHealth(allProviders, currentHealthFilter);
+}
+
+function getUnhealthyCountEstimate() {
+    const unhealthyBySummary = Math.max(0, currentTotalCount - currentHealthyCount);
+    if (unhealthyBySummary > 0) {
+        return unhealthyBySummary;
+    }
+
+    return allProviders.filter(provider => !provider.isHealthy).length;
+}
 
 /**
  * 按健康状态筛选提供商
@@ -58,31 +119,36 @@ function updateProviderFilterButtonsState(modal) {
 function renderProviderListWithPagination(modal, { scrollToTop = false } = {}) {
     if (!modal) return;
 
-    const totalPages = Math.ceil(currentProviders.length / PROVIDERS_PER_PAGE);
-    if (totalPages === 0) {
-        currentPage = 1;
-    } else {
-        if (currentPage < 1) currentPage = 1;
-        if (currentPage > totalPages) currentPage = totalPages;
+    const totalPages = Math.max(1, currentTotalPages);
+    if (currentPage < 1) currentPage = 1;
+    if (currentPage > totalPages) currentPage = totalPages;
+
+    const summaryValues = modal.querySelectorAll('.provider-summary-item .value');
+    if (summaryValues[0]) {
+        summaryValues[0].textContent = currentTotalCount;
+    }
+    if (summaryValues[1]) {
+        summaryValues[1].textContent = currentHealthyCount;
     }
 
     const providerList = modal.querySelector('.provider-list');
     if (providerList) {
-        providerList.innerHTML = renderProviderListPaginated(currentProviders, currentPage);
+        providerList.innerHTML = renderProviderList(currentProviders);
     }
 
+    const shouldShowPagination = currentHealthFilter === 'all' && totalPages > 1;
     const paginationContainers = modal.querySelectorAll('.pagination-container');
-    if (totalPages > 1) {
+    if (shouldShowPagination) {
         paginationContainers.forEach(container => {
             const position = container.getAttribute('data-position');
-            container.outerHTML = renderPagination(currentPage, totalPages, currentProviders.length, position);
+            container.outerHTML = renderPagination(currentPage, totalPages, currentTotalCount, position);
         });
 
         if (paginationContainers.length === 0) {
             const providerListEl = modal.querySelector('.provider-list');
             if (providerListEl) {
-                providerListEl.insertAdjacentHTML('beforebegin', renderPagination(currentPage, totalPages, currentProviders.length, 'top'));
-                providerListEl.insertAdjacentHTML('afterend', renderPagination(currentPage, totalPages, currentProviders.length, 'bottom'));
+                providerListEl.insertAdjacentHTML('beforebegin', renderPagination(currentPage, totalPages, currentTotalCount, 'top'));
+                providerListEl.insertAdjacentHTML('afterend', renderPagination(currentPage, totalPages, currentTotalCount, 'bottom'));
             }
         }
     } else {
@@ -96,9 +162,7 @@ function renderProviderListWithPagination(modal, { scrollToTop = false } = {}) {
         }
     }
 
-    const startIndex = (currentPage - 1) * PROVIDERS_PER_PAGE;
-    const endIndex = Math.min(startIndex + PROVIDERS_PER_PAGE, currentProviders.length);
-    const pageProviders = currentProviders.slice(startIndex, endIndex);
+    const pageProviders = currentProviders;
 
     if (pageProviders.length === 0) {
         return;
@@ -124,8 +188,9 @@ function applyProviderHealthFilter(healthFilter = 'all', resetPage = true, scrol
     currentHealthFilter = validFilters.includes(healthFilter) ? healthFilter : 'all';
     currentProviders = filterProvidersByHealth(allProviders, currentHealthFilter);
 
-    if (resetPage) {
-        currentPage = 1;
+    if (resetPage && currentPage !== 1) {
+        void goToProviderPage(1);
+        return;
     }
 
     const modal = document.querySelector('.provider-modal');
@@ -140,14 +205,8 @@ function applyProviderHealthFilter(healthFilter = 'all', resetPage = true, scrol
  * @param {Object} data - 提供商数据
  */
 function showProviderManagerModal(data) {
-    const { providerType, providers, totalCount, healthyCount } = data;
-    
-    // 保存当前数据用于分页
-    allProviders = Array.isArray(providers) ? providers : [];
-    currentHealthFilter = 'all';
-    currentProviders = filterProvidersByHealth(allProviders, currentHealthFilter);
-    currentProviderType = providerType;
-    currentPage = 1;
+    const providerType = data?.providerType || '';
+    applyProviderModalPayload(data, { resetFilter: true });
     cachedModels = [];
     
     // 移除已存在的模态框
@@ -160,7 +219,7 @@ function showProviderManagerModal(data) {
         existingModal.remove();
     }
     
-    const totalPages = Math.ceil(currentProviders.length / PROVIDERS_PER_PAGE);
+    const totalPages = Math.max(1, currentTotalPages);
     
     // 创建模态框
     const modal = document.createElement('div');
@@ -178,11 +237,11 @@ function showProviderManagerModal(data) {
                 <div class="provider-summary">
                     <div class="provider-summary-item">
                         <span class="label" data-i18n="modal.provider.totalAccounts">总账户数:</span>
-                        <span class="value">${totalCount}</span>
+                        <span class="value">${currentTotalCount}</span>
                     </div>
                     <div class="provider-summary-item">
                         <span class="label" data-i18n="modal.provider.healthyAccounts">健康账户:</span>
-                        <span class="value">${healthyCount}</span>
+                        <span class="value">${currentHealthyCount}</span>
                     </div>
                     <div class="provider-summary-actions">
                         <button class="btn btn-success" onclick="window.showAddProviderForm('${providerType}')">
@@ -223,13 +282,13 @@ function showProviderManagerModal(data) {
                     </div>
                 </div>
                 
-                ${totalPages > 1 ? renderPagination(1, totalPages, currentProviders.length) : ''}
+                ${totalPages > 1 ? renderPagination(currentPage, totalPages, currentTotalCount) : ''}
                 
                 <div class="provider-list" id="providerList">
-                    ${renderProviderListPaginated(currentProviders, 1)}
+                    ${renderProviderList(currentProviders)}
                 </div>
                 
-                ${totalPages > 1 ? renderPagination(1, totalPages, currentProviders.length, 'bottom') : ''}
+                ${totalPages > 1 ? renderPagination(currentPage, totalPages, currentTotalCount, 'bottom') : ''}
             </div>
         </div>
     `;
@@ -242,7 +301,7 @@ function showProviderManagerModal(data) {
     updateProviderFilterButtonsState(modal);
     
     // 先获取该提供商类型的模型列表（只调用一次API）
-    const pageProviders = currentProviders.slice(0, PROVIDERS_PER_PAGE);
+    const pageProviders = currentProviders;
     if (pageProviders.length > 0) {
         loadModelsForProviderType(providerType, pageProviders);
     }
@@ -317,19 +376,29 @@ function renderPagination(page, totalPages, totalItems, position = 'top') {
  * 跳转到指定页
  * @param {number} page - 目标页码
  */
-function goToProviderPage(page) {
-    const totalPages = Math.ceil(currentProviders.length / PROVIDERS_PER_PAGE);
-    if (totalPages <= 0) {
-        currentPage = 1;
-    } else {
-        if (page < 1) page = 1;
-        if (page > totalPages) page = totalPages;
-        currentPage = page;
-    }
+async function goToProviderPage(page) {
+    const totalPages = Math.max(1, currentTotalPages);
+    let targetPage = normalizePage(page, currentPage);
+    if (targetPage < 1) targetPage = 1;
+    if (targetPage > totalPages) targetPage = totalPages;
 
     const modal = document.querySelector('.provider-modal');
     if (!modal) return;
-    renderProviderListWithPagination(modal, { scrollToTop: true });
+
+    if (targetPage === currentPage) {
+        renderProviderListWithPagination(modal, { scrollToTop: true });
+        return;
+    }
+
+    try {
+        const data = await fetchProviderPage(currentProviderType, targetPage);
+        applyProviderModalPayload(data);
+        updateProviderFilterButtonsState(modal);
+        renderProviderListWithPagination(modal, { scrollToTop: true });
+    } catch (error) {
+        console.error('Failed to load provider page:', error);
+        showToast(t('common.error'), `${t('modal.provider.load.failed')}: ${error.message}`, 'error');
+    }
 }
 
 /**
@@ -1097,29 +1166,15 @@ async function deleteProvider(uuid, event) {
  */
 async function refreshProviderConfig(providerType) {
     try {
-        // 重新获取该提供商类型的最新数据
-        const data = await window.apiClient.get(`/providers/${encodeURIComponent(providerType)}`);
+        const targetPage = currentProviderType === providerType ? currentPage : 1;
+        const data = await fetchProviderPage(providerType, targetPage);
         
         // 如果当前显示的是该提供商类型的模态框，则更新模态框
         const modal = document.querySelector('.provider-modal');
         if (modal && modal.getAttribute('data-provider-type') === providerType) {
-            // 更新缓存的提供商数据
-            allProviders = Array.isArray(data.providers) ? data.providers : [];
-            currentProviderType = providerType;
-            
-            // 更新统计信息
-            const totalCountElement = modal.querySelector('.provider-summary-item .value');
-            if (totalCountElement) {
-                totalCountElement.textContent = data.totalCount;
-            }
-            
-            const healthyCountElement = modal.querySelectorAll('.provider-summary-item .value')[1];
-            if (healthyCountElement) {
-                healthyCountElement.textContent = data.healthyCount;
-            }
-
-            // 保留当前筛选条件，刷新筛选结果和分页
-            applyProviderHealthFilter(currentHealthFilter, false, false);
+            applyProviderModalPayload(data);
+            updateProviderFilterButtonsState(modal);
+            renderProviderListWithPagination(modal, { scrollToTop: false });
         }
         
         // 同时更新主界面的提供商统计数据
@@ -1797,7 +1852,7 @@ async function refreshProviderUuid(uuid, event) {
  */
 async function deleteUnhealthyProviders(providerType) {
     // 先获取不健康节点数量
-    const unhealthyCount = allProviders.filter(p => !p.isHealthy).length;
+    const unhealthyCount = getUnhealthyCountEstimate();
     
     if (unhealthyCount === 0) {
         showToast(t('common.info'), t('modal.provider.deleteUnhealthy.noUnhealthy'), 'info');
@@ -1842,7 +1897,7 @@ async function deleteUnhealthyProviders(providerType) {
  */
 async function refreshUnhealthyUuids(providerType) {
     // 先获取不健康节点数量
-    const unhealthyCount = allProviders.filter(p => !p.isHealthy).length;
+    const unhealthyCount = getUnhealthyCountEstimate();
     
     if (unhealthyCount === 0) {
         showToast(t('common.info'), t('modal.provider.refreshUnhealthyUuids.noUnhealthy'), 'info');

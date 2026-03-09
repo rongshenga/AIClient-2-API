@@ -211,4 +211,32 @@ describe('Provider API Summary', () => {
         expect(payload.returnedCount).toBe(1);
         expect(payload.providers.map(item => item.customName)).toEqual(['Charlie']);
     });
+
+    test('should keep original order when paging without sort query', async () => {
+        const req = {
+            url: '/api/providers/gemini-cli-oauth?page=1&limit=2'
+        };
+        const res = createMockRes();
+        const currentConfig = {};
+        const providers = [
+            { uuid: 'gemini-2', customName: 'Bravo', isHealthy: true, isDisabled: false, usageCount: 2, errorCount: 0 },
+            { uuid: 'gemini-1', customName: 'Alpha', isHealthy: true, isDisabled: false, usageCount: 8, errorCount: 0 },
+            { uuid: 'gemini-3', customName: 'Charlie', isHealthy: false, isDisabled: false, usageCount: 1, errorCount: 5 }
+        ];
+        const providerPoolManager = {
+            providerPools: {
+                'gemini-cli-oauth': providers
+            }
+        };
+
+        const handled = await handleGetProviderType(req, res, currentConfig, providerPoolManager, 'gemini-cli-oauth');
+        expect(handled).toBe(true);
+        expect(res.statusCode).toBe(200);
+
+        const payload = JSON.parse(res.body);
+        expect(payload.page).toBe(1);
+        expect(payload.limit).toBe(2);
+        expect(payload.sort).toBeNull();
+        expect(payload.providers.map(item => item.uuid)).toEqual(['gemini-2', 'gemini-1']);
+    });
 });

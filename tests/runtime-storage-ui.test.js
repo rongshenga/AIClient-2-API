@@ -489,6 +489,31 @@ describe('Runtime storage dashboard diagnostics UI', () => {
         expect(deniedResult).toEqual({ skipped: true, runId: 'run-91' });
         expect(apiClient.post).not.toHaveBeenCalled();
     });
+
+    test('should request first provider details page with fixed limit when opening modal', async () => {
+        const providerManagerModule = await importProviderManagerModule();
+        const modalPayload = {
+            providerType: 'grok-custom',
+            providers: [{ uuid: 'grok-1' }],
+            page: 1,
+            limit: 5,
+            totalPages: 10,
+            totalCount: 50,
+            healthyCount: 40
+        };
+
+        global.window.apiClient.get.mockResolvedValue(modalPayload);
+        global.window.setTimeout = setTimeout;
+        global.window.clearTimeout = clearTimeout;
+        global.showProviderManagerModal = jest.fn();
+
+        await providerManagerModule.openProviderManager('grok-custom');
+
+        expect(global.window.apiClient.get).toHaveBeenCalledWith('/providers/grok-custom?page=1&limit=5');
+        expect(global.showProviderManagerModal).toHaveBeenCalledWith(modalPayload);
+
+        delete global.showProviderManagerModal;
+    });
 });
 
 describe('Provider modal runtime storage interactions', () => {

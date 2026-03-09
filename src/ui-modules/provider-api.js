@@ -23,9 +23,16 @@ function cloneProviderPools(providerPools = {}) {
 
 async function loadProviderPools(currentConfig, providerPoolManager) {
     const runtimeBackend = currentConfig?.RUNTIME_STORAGE_INFO?.backend;
+    const managerProviderPools = providerPoolManager?.providerPools;
+    const configProviderPools = currentConfig?.providerPools;
 
-    if (runtimeBackend !== 'db' && providerPoolManager?.providerPools) {
-        return providerPoolManager.providerPools;
+    // 优先复用内存快照，避免在大号池场景下每次请求都触发 runtime storage 全量导出
+    if (managerProviderPools && Object.keys(managerProviderPools).length > 0) {
+        return managerProviderPools;
+    }
+
+    if (configProviderPools && Object.keys(configProviderPools).length > 0) {
+        return configProviderPools;
     }
 
     try {
@@ -35,14 +42,6 @@ async function loadProviderPools(currentConfig, providerPoolManager) {
         }
     } catch (error) {
         logger.warn('[UI API] Failed to load provider pools from runtime storage:', error.message);
-    }
-
-    if (providerPoolManager?.providerPools) {
-        return providerPoolManager.providerPools;
-    }
-
-    if (currentConfig?.providerPools) {
-        return currentConfig.providerPools;
     }
 
     return {};
@@ -172,7 +171,8 @@ function parseProviderListQuery(req, totalCount = 0) {
         { min: 1, max: MAX_PROVIDER_PAGE_LIMIT }
     );
     const page = parsePositiveInteger(requestUrl.searchParams.get('page'), 1, { min: 1 });
-    const sort = requestUrl.searchParams.get('sort') === 'asc' ? 'asc' : 'desc';
+    const rawSort = requestUrl.searchParams.get('sort');
+    const sort = rawSort === 'asc' || rawSort === 'desc' ? rawSort : null;
     const totalPages = Math.max(1, Math.ceil(Math.max(totalCount, 0) / limit));
     const normalizedPage = Math.min(page, totalPages);
 
@@ -346,7 +346,7 @@ export async function handleGetProviderType(req, res, currentConfig, providerPoo
     const allProviders = providerPools[providerType] || [];
     const summary = buildProviderSummary(allProviders);
     const listQuery = parseProviderListQuery(req, allProviders.length);
-    const sortedProviders = listQuery
+    const sortedProviders = listQuery?.sort
         ? sortProvidersForDisplay(allProviders, listQuery.sort)
         : allProviders;
     const providers = listQuery

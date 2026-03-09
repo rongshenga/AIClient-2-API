@@ -2,7 +2,7 @@ import { existsSync, readFileSync, createReadStream } from 'fs';
 import logger from '../utils/logger.js';
 import path from 'path';
 import { CONFIG } from '../core/config-manager.js';
-import { getRuntimeStorageInfo } from '../storage/runtime-storage-registry.js';
+import { getRuntimeStorage, getRuntimeStorageInfo } from '../storage/runtime-storage-registry.js';
 import { getCpuUsagePercent } from './system-monitor.js';
 
 function summarizeProviderPools(providerPools = {}) {
@@ -24,8 +24,65 @@ function summarizeProviderPools(providerPools = {}) {
     };
 }
 
+function summarizeProviderSummaries(providerSummaries = {}) {
+    let providerTypeCount = 0;
+    let providerCount = 0;
+
+    for (const summary of Object.values(providerSummaries || {})) {
+        if (!summary || typeof summary !== 'object') {
+            continue;
+        }
+
+        providerTypeCount += 1;
+        const totalCount = Number(summary.totalCount);
+        if (Number.isFinite(totalCount) && totalCount > 0) {
+            providerCount += totalCount;
+        }
+    }
+
+    return {
+        providerTypeCount,
+        providerCount
+    };
+}
+
 function getRuntimeStorageSnapshot() {
     return getRuntimeStorageInfo() || CONFIG?.RUNTIME_STORAGE_INFO || null;
+}
+
+async function loadProviderSummaryFromRuntimeStorage(runtimeStorageSnapshot, config = CONFIG) {
+    const backend = runtimeStorageSnapshot?.backend;
+    const shouldUseRuntimeSummary = backend === 'db' || backend === 'dual-write';
+    if (!shouldUseRuntimeSummary) {
+        return null;
+    }
+
+    const runtimeStorage = getRuntimeStorage();
+    if (!runtimeStorage) {
+        return null;
+    }
+
+    const providerDomain = runtimeStorage.provider || null;
+    const summaryLoader = providerDomain?.loadPoolsSummary
+        || runtimeStorage?.loadProviderPoolsSummary
+        || runtimeStorage?.rawStorage?.loadProviderPoolsSummary;
+    if (typeof summaryLoader !== 'function') {
+        return null;
+    }
+
+    try {
+        const summaries = await summaryLoader.call(providerDomain || runtimeStorage, {
+            filePath: config?.PROVIDER_POOLS_FILE_PATH,
+            autoImportFromFile: config?.RUNTIME_STORAGE_AUTO_IMPORT_PROVIDER_POOLS !== false
+        });
+        if (!summaries || typeof summaries !== 'object' || Object.keys(summaries).length === 0) {
+            return null;
+        }
+        return summarizeProviderSummaries(summaries);
+    } catch (error) {
+        logger.warn('[UI API] Failed to load provider summary from runtime storage:', error.message);
+        return null;
+    }
 }
 
 /**
@@ -59,6 +116,10 @@ export async function handleGetSystem(req, res) {
         cpuUsage = getCpuUsagePercent();
     }
     
+    const runtimeStorageSnapshot = getRuntimeStorageSnapshot();
+    const providerSummary = await loadProviderSummaryFromRuntimeStorage(runtimeStorageSnapshot, CONFIG)
+        || summarizeProviderPools(CONFIG?.providerPools || {});
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
         appVersion: appVersion,
@@ -67,8 +128,8 @@ export async function handleGetSystem(req, res) {
         memoryUsage: `${Math.round(memUsage.heapUsed / 1024 / 1024)} MB / ${Math.round(memUsage.heapTotal / 1024 / 1024)} MB`,
         cpuUsage: cpuUsage,
         uptime: process.uptime(),
-        runtimeStorage: getRuntimeStorageSnapshot(),
-        providerSummary: summarizeProviderPools(CONFIG?.providerPools || {})
+        runtimeStorage: runtimeStorageSnapshot,
+        providerSummary
     }));
     return true;
 }

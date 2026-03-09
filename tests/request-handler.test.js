@@ -151,3 +151,68 @@ describe('request handler config cloning', () => {
         expect(runtimeStorageInfo.featureFlagRollback.RUNTIME_STORAGE_BACKEND).toBe('file');
     });
 });
+
+describe('request handler startup guard for provider details', () => {
+    function createMockRes() {
+        return {
+            headers: {},
+            statusCode: null,
+            body: '',
+            once: jest.fn(),
+            setHeader: jest.fn(function (name, value) {
+                this.headers[name] = value;
+            }),
+            writeHead: jest.fn(function (statusCode, headers = {}) {
+                this.statusCode = statusCode;
+                this.headers = {
+                    ...this.headers,
+                    ...headers
+                };
+            }),
+            end: jest.fn(function (payload = '') {
+                this.body = payload;
+            })
+        };
+    }
+
+    test('should fast-fail provider detail request during startup bootstrap before ui handler', async () => {
+        const { createRequestHandler } = await import('../src/handlers/request-handler.js');
+        const { handleUIApiRequests, serveStaticFiles } = await import('../src/services/ui-manager.js');
+
+        serveStaticFiles.mockResolvedValue(false);
+        handleUIApiRequests.mockResolvedValue(false);
+
+        const handler = createRequestHandler(
+            {
+                MODEL_PROVIDER: 'gemini-cli-oauth',
+                providerPools: {}
+            },
+            {
+                getStartupStatus: () => ({
+                    ready: false,
+                    failed: false,
+                    phase: 'background-bootstrap'
+                })
+            }
+        );
+
+        const req = {
+            method: 'GET',
+            url: '/api/providers/gemini-cli-oauth?page=1&limit=5',
+            headers: {
+                host: '127.0.0.1:3000'
+            },
+            socket: {
+                encrypted: false
+            }
+        };
+        const res = createMockRes();
+
+        await handler(req, res);
+
+        expect(res.statusCode).toBe(503);
+        expect(res.headers['Retry-After']).toBe('5');
+        expect(res.body).toContain('Provider details are still warming up in background');
+        expect(handleUIApiRequests).not.toHaveBeenCalled();
+    });
+});

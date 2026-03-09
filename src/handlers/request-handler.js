@@ -161,6 +161,26 @@ function shouldBlockApiRequestsDuringStartup(method, path, startupStatus) {
     );
 }
 
+function shouldBlockUiProviderDetailRequestsDuringStartup(method, path, startupStatus) {
+    if (method === 'OPTIONS') {
+        return false;
+    }
+
+    if (!startupStatus || startupStatus.ready) {
+        return false;
+    }
+
+    if (method !== 'GET') {
+        return false;
+    }
+
+    if (path === '/api/providers' || path === '/api/providers/summary' || path === '/api/providers/supported') {
+        return false;
+    }
+
+    return /^\/api\/providers\/[^/]+$/.test(path);
+}
+
 /**
  * Main request handler. It authenticates the request, determines the endpoint type,
  * and delegates to the appropriate specialized handler function.
@@ -257,6 +277,23 @@ export function createRequestHandler(config, options = {}) {
         // 执行插件路由
         const pluginRouteHandled = await pluginManager.executeRoutes(method, path, req, res);
         if (pluginRouteHandled) return;
+
+        if (shouldBlockUiProviderDetailRequestsDuringStartup(method, path, startupStatus)) {
+            const startupMessage = startupStatus.failed
+                ? 'Server startup failed. Please inspect logs and restart service.'
+                : 'Provider details are still warming up in background. Please retry shortly.';
+            res.writeHead(503, {
+                'Content-Type': 'application/json',
+                'Retry-After': '5'
+            });
+            res.end(JSON.stringify({
+                error: {
+                    message: startupMessage
+                },
+                startup: startupStatus
+            }));
+            return;
+        }
 
         const uiHandled = await handleUIApiRequests(method, path, req, res, currentConfig, providerPoolManager);
         if (uiHandled) return;
