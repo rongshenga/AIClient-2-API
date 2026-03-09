@@ -274,6 +274,73 @@ describe('Runtime storage dashboard diagnostics UI', () => {
         expect(global.window.apiClient.get.mock.calls.filter(([url]) => url === '/providers/supported')).toHaveLength(1);
     });
 
+    test('should keep providers loading overlay hidden for silent refresh', async () => {
+        const providerManagerModule = await importProviderManagerModule();
+        const providersLoading = createFakeElement();
+        const providersList = createFakeElement();
+        const providersContainer = createFakeElement();
+        const statsGrid = createFakeElement();
+        const activeProviders = createFakeElement();
+        const healthyProviders = createFakeElement();
+        const activeConnections = createFakeElement();
+
+        global.document = {
+            getElementById: jest.fn((id) => ({
+                providersLoading,
+                providersList,
+                activeProviders,
+                healthyProviders,
+                activeConnections
+            }[id] || null)),
+            querySelector: jest.fn((selector) => {
+                if (selector === '#providers .providers-container') return providersContainer;
+                if (selector === '#providers .stats-grid') return statsGrid;
+                return null;
+            }),
+            createElement: jest.fn(() => createFakeElement())
+        };
+
+        global.window.setTimeout = setTimeout;
+        global.window.clearTimeout = clearTimeout;
+        mockGetProviderConfigs.mockReturnValue([{
+            id: 'grok-custom',
+            name: 'Grok Reverse',
+            visible: true
+        }]);
+
+        let resolveSummary;
+        const summaryPromise = new Promise((resolve) => {
+            resolveSummary = resolve;
+        });
+        global.window.apiClient.get.mockImplementation((url) => {
+            if (url === '/providers/summary') {
+                return summaryPromise;
+            }
+            if (url === '/providers/supported') {
+                return Promise.resolve(['grok-custom']);
+            }
+            return Promise.reject(new Error(`Unexpected url: ${url}`));
+        });
+
+        const loadPromise = providerManagerModule.loadProviders({ showLoading: false });
+        await Promise.resolve();
+
+        expect(providersLoading.classList.contains('active')).toBe(false);
+        expect(providersContainer.attributes['aria-busy']).not.toBe('true');
+
+        resolveSummary({
+            'grok-custom': {
+                totalCount: 1,
+                healthyCount: 1,
+                usageCount: 1,
+                errorCount: 0
+            }
+        });
+        await loadPromise;
+
+        expect(providersLoading.classList.contains('active')).toBe(false);
+    });
+
     test('should build diagnostics view model with fallback warning and readonly actions', async () => {
         const { buildRuntimeStorageDiagnosticsViewModel } = await importProviderManagerModule();
 

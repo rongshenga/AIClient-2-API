@@ -6,11 +6,51 @@ import { t } from './i18n.js';
 let allConfigs = []; // 存储所有配置数据
 let filteredConfigs = []; // 存储过滤后的配置数据
 let isLoadingConfigs = false; // 防止重复加载配置
+let uploadConfigSectionListenerBound = false; // 防止重复绑定章节激活监听器
+let hasLoadedConfigListOnce = false; // 标记是否已完成首次配置列表加载
+let initialConfigListLoadPromise = null; // 首次加载中的 Promise（用于合并并发触发）
 
 function logUploadConfigUiDebug(message, payload = null, level = 'log') {
     if (typeof window.logUiDebug === 'function') {
         window.logUiDebug(`[upload-config] ${message}`, payload, level);
     }
+}
+
+function isConfigSectionActive() {
+    const configSection = document.getElementById('config');
+    return Boolean(configSection && configSection.classList.contains('active'));
+}
+
+async function ensureInitialConfigListLoaded(trigger = 'unknown') {
+    if (hasLoadedConfigListOnce) {
+        logUploadConfigUiDebug('initial config list load skipped because it is already completed', {
+            trigger
+        });
+        return;
+    }
+
+    if (initialConfigListLoadPromise) {
+        logUploadConfigUiDebug('initial config list load reusing in-flight request', {
+            trigger
+        });
+        await initialConfigListLoadPromise;
+        return;
+    }
+
+    initialConfigListLoadPromise = (async () => {
+        logUploadConfigUiDebug('initial config list load started', {
+            trigger
+        });
+        await loadConfigList();
+        hasLoadedConfigListOnce = true;
+        logUploadConfigUiDebug('initial config list load completed', {
+            trigger
+        });
+    })().finally(() => {
+        initialConfigListLoadPromise = null;
+    });
+
+    await initialConfigListLoadPromise;
 }
 
 /**
@@ -483,6 +523,7 @@ async function loadConfigList(searchTerm = '', statusFilter = '', providerFilter
         const result = await window.apiClient.get('/upload-configs');
         const fetchedAt = Date.now();
         allConfigs = sortConfigs(result);
+        hasLoadedConfigListOnce = true;
         
         // 如果提供了过滤参数，则执行搜索过滤，否则显示全部
         if (searchTerm || statusFilter || providerFilter) {
@@ -962,8 +1003,20 @@ function initUploadConfigManager() {
         deleteUnboundBtn.addEventListener('click', deleteUnboundConfigs);
     }
 
-    // 初始加载配置列表
-    loadConfigList();
+    if (!uploadConfigSectionListenerBound && typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+        window.addEventListener('ui:section-activated', (event) => {
+            if (event?.detail?.sectionId !== 'config') {
+                return;
+            }
+            void ensureInitialConfigListLoaded('section_activated');
+        });
+        uploadConfigSectionListenerBound = true;
+    }
+
+    // 若初始化时已在配置页，立即触发首次加载；否则延迟到用户切换到配置页
+    if (isConfigSectionActive()) {
+        void ensureInitialConfigListLoaded('init_active_section');
+    }
 }
 
 /**

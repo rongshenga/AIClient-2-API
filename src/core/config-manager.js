@@ -3,7 +3,7 @@ import { promises as pfs } from 'fs';
 import { INPUT_SYSTEM_PROMPT_FILE, MODEL_PROVIDER } from '../utils/common.js';
 import logger from '../utils/logger.js';
 import { getRuntimeStorageDefaults } from '../storage/runtime-storage-factory.js';
-import { initializeRuntimeStorage } from '../storage/runtime-storage-registry.js';
+import { initializeRuntimeStorage, loadProviderPoolsCompatSnapshot } from '../storage/runtime-storage-registry.js';
 
 export let CONFIG = {}; // Make CONFIG exportable
 export let PROMPT_LOG_FILENAME = ''; // Make PROMPT_LOG_FILENAME exportable
@@ -51,12 +51,38 @@ function normalizeConfiguredProviders(config) {
 }
 
 /**
+ * 从运行时存储加载 provider pools，并写回目标配置对象
+ * @param {Object} config - 目标配置对象
+ * @param {Object} [options] - 传递给 runtime storage 的额外选项
+ * @returns {Promise<Object>} 加载后的 providerPools
+ */
+export async function loadProviderPoolsIntoConfig(config = CONFIG, options = {}) {
+    if (!config || typeof config !== 'object') {
+        throw new Error('Invalid config object for loading provider pools');
+    }
+
+    if (!config.PROVIDER_POOLS_FILE_PATH) {
+        config.PROVIDER_POOLS_FILE_PATH = 'configs/provider_pools.json';
+    }
+
+    const providerPools = await loadProviderPoolsCompatSnapshot(config, options);
+    config.providerPools = providerPools && typeof providerPools === 'object' ? providerPools : {};
+
+    const backend = config?.RUNTIME_STORAGE_INFO?.backend || 'unknown';
+    logger.info(`[Config] Loaded provider pools via runtime storage backend: ${backend}`);
+    return config.providerPools;
+}
+
+/**
  * Initializes the server configuration from config.json and command-line arguments.
  * @param {string[]} args - Command-line arguments.
  * @param {string} [configFilePath='configs/config.json'] - Path to the configuration file.
+ * @param {Object} [options] - 初始化选项
+ * @param {boolean} [options.deferProviderPoolsLoad=false] - 是否延迟加载 provider pools
  * @returns {Object} The initialized configuration object.
  */
-export async function initializeConfig(args = process.argv.slice(2), configFilePath = 'configs/config.json') {
+export async function initializeConfig(args = process.argv.slice(2), configFilePath = 'configs/config.json', options = {}) {
+    const shouldDeferProviderPoolsLoad = options.deferProviderPoolsLoad === true;
     let currentConfig = {};
 
     try {
@@ -80,6 +106,7 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
             REQUEST_MAX_RETRIES: 3,
             REQUEST_BASE_DELAY: 1000,
             CREDENTIAL_SWITCH_MAX_RETRIES: 5, // 坏凭证切换最大重试次数（用于认证错误后切换凭证）
+            STARTUP_BACKGROUND_INIT: true, // 是否启用“先启动 Web，再后台初始化号池”
             CRON_NEAR_MINUTES: 15,
             CRON_REFRESH_TOKEN: false,
             LOGIN_EXPIRY: 3600, // 登录过期时间（秒），默认1小时
@@ -175,6 +202,9 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
             currentConfig[key] = value;
         }
     }
+    if (currentConfig.STARTUP_BACKGROUND_INIT === undefined) {
+        currentConfig.STARTUP_BACKGROUND_INIT = true;
+    }
 
     normalizeConfiguredProviders(currentConfig);
 
@@ -191,11 +221,12 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
     try {
         const runtimeStorage = await initializeRuntimeStorage(currentConfig);
         currentConfig.RUNTIME_STORAGE_INFO = runtimeStorage.getInfo();
-        currentConfig.providerPools = await runtimeStorage.loadProviderPoolsSnapshot({
-            filePath: currentConfig.PROVIDER_POOLS_FILE_PATH,
-            autoImportFromFile: currentConfig.RUNTIME_STORAGE_AUTO_IMPORT_PROVIDER_POOLS !== false
-        });
-        logger.info(`[Config] Loaded provider pools via runtime storage backend: ${currentConfig.RUNTIME_STORAGE_INFO.backend}`);
+        if (shouldDeferProviderPoolsLoad) {
+            currentConfig.providerPools = {};
+            logger.info('[Config] Deferred provider pools loading to background startup stage');
+        } else {
+            await loadProviderPoolsIntoConfig(currentConfig);
+        }
     } catch (error) {
         logger.error(`[Config Error] Failed to load provider pools via runtime storage: ${error.message}`);
         currentConfig.providerPools = {};

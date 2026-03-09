@@ -1,7 +1,7 @@
 import logger from '../utils/logger.js';
 import * as http from 'http';
-import { initializeConfig, CONFIG } from '../core/config-manager.js';
-import { initApiService, autoLinkProviderConfigs } from './service-manager.js';
+import { initializeConfig, CONFIG, loadProviderPoolsIntoConfig } from '../core/config-manager.js';
+import { initApiService } from './service-manager.js';
 import { initializeUIManagement } from './ui-manager.js';
 import { initializeAPIManagement } from './api-manager.js';
 import { createRequestHandler } from '../handlers/request-handler.js';
@@ -126,6 +126,26 @@ const IS_WORKER_PROCESS = process.env.IS_WORKER_PROCESS === 'true';
 let serverInstance = null;
 let shutdownPromise = null;
 let shutdownFinalized = false;
+
+const startupState = {
+    ready: false,
+    failed: false,
+    phase: 'booting',
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    readyAt: null,
+    error: null
+};
+
+function updateStartupState(patch = {}) {
+    Object.assign(startupState, patch, {
+        updatedAt: new Date().toISOString()
+    });
+}
+
+function getStartupStatus() {
+    return { ...startupState };
+}
 
 async function finalizeRuntimeShutdown(exitCode) {
     if (shutdownFinalized) {
@@ -284,10 +304,69 @@ function setupSignalHandlers() {
     });
 }
 
+async function runProviderBootstrap() {
+    const bootstrapStartedAt = Date.now();
+
+    try {
+        updateStartupState({
+            ready: false,
+            failed: false,
+            error: null,
+            phase: 'loading_provider_pools'
+        });
+        await loadProviderPoolsIntoConfig(CONFIG);
+
+        updateStartupState({
+            phase: 'initializing_provider_pool'
+        });
+        const services = await initApiService(CONFIG, true);
+
+        updateStartupState({
+            phase: 'initializing_api_management'
+        });
+        const heartbeatAndRefreshToken = initializeAPIManagement(services);
+
+        if (CONFIG.CRON_REFRESH_TOKEN) {
+            logger.info(`  • Cron Near Minutes: ${CONFIG.CRON_NEAR_MINUTES}`);
+            logger.info(`  • Cron Refresh Token: ${CONFIG.CRON_REFRESH_TOKEN}`);
+            // 每 CRON_NEAR_MINUTES 分钟执行一次心跳日志和令牌刷新
+            setInterval(heartbeatAndRefreshToken, CONFIG.CRON_NEAR_MINUTES * 60 * 1000);
+        }
+
+        const poolManager = getProviderPoolManager();
+        if (poolManager) {
+            logger.info('[Initialization] Performing initial health checks for provider pools...');
+            poolManager.performHealthChecks(true);
+        }
+
+        updateStartupState({
+            ready: true,
+            failed: false,
+            phase: 'ready',
+            readyAt: new Date().toISOString(),
+            error: null
+        });
+
+        logger.info(`[Initialization] Startup bootstrap completed in ${Date.now() - bootstrapStartedAt}ms`);
+    } catch (error) {
+        updateStartupState({
+            ready: false,
+            failed: true,
+            phase: 'failed',
+            error: error.message
+        });
+        throw error;
+    }
+}
+
 // --- Server Initialization ---
 async function startServer() {
     // Initialize configuration
-    await initializeConfig(process.argv.slice(2), 'configs/config.json');
+    await initializeConfig(process.argv.slice(2), 'configs/config.json', {
+        // 默认优先快速拉起 Web，号池加载交给后台阶段
+        deferProviderPoolsLoad: true
+    });
+    const startupBackgroundInitEnabled = CONFIG.STARTUP_BACKGROUND_INIT !== false;
     
     // 自动关联 configs 目录中的配置文件到对应的提供商
     // logger.info('[Initialization] Checking for unlinked provider configs...');
@@ -323,17 +402,25 @@ async function startServer() {
         });
     }
 
-    // Initialize API services
-    const services = await initApiService(CONFIG, true);
-    
     // Initialize UI management features
     initializeUIManagement(CONFIG);
-    
-    // Initialize API management and get heartbeat function
-    const heartbeatAndRefreshToken = initializeAPIManagement(services);
-    
+
+    // 启动模式：默认后台初始化，兼容通过配置禁用（回到阻塞式启动）
+    if (!startupBackgroundInitEnabled) {
+        logger.info('[Initialization] STARTUP_BACKGROUND_INIT=false, running bootstrap before listen...');
+        await runProviderBootstrap();
+    } else {
+        updateStartupState({
+            ready: false,
+            failed: false,
+            phase: 'waiting_http_listen'
+        });
+    }
+
     // Create request handler
-    const requestHandlerInstance = createRequestHandler(CONFIG, getProviderPoolManager());
+    const requestHandlerInstance = createRequestHandler(CONFIG, {
+        getStartupStatus
+    });
 
     serverInstance = http.createServer({
         // 设置服务器级别的超时
@@ -368,6 +455,11 @@ async function startServer() {
         logger.info(`  • Claude-compatible: /v1/messages`);
         logger.info(`  • Health check: /health`);
         logger.info(`  • UI Management Console: http://${CONFIG.HOST}:${CONFIG.SERVER_PORT}/`);
+        if (startupBackgroundInitEnabled) {
+            logger.info(`  • Startup mode: background bootstrap (Web UI available immediately)`);
+        } else {
+            logger.info(`  • Startup mode: blocking bootstrap`);
+        }
 
         // Auto-open browser to UI (only if host is 0.0.0.0 or 127.0.0.1)
         // if (CONFIG.HOST === '0.0.0.0' || CONFIG.HOST === '127.0.0.1') {
@@ -393,22 +485,21 @@ async function startServer() {
             }
         // }
 
-        if (CONFIG.CRON_REFRESH_TOKEN) {
-            logger.info(`  • Cron Near Minutes: ${CONFIG.CRON_NEAR_MINUTES}`);
-            logger.info(`  • Cron Refresh Token: ${CONFIG.CRON_REFRESH_TOKEN}`);
-            // 每 CRON_NEAR_MINUTES 分钟执行一次心跳日志和令牌刷新
-            setInterval(heartbeatAndRefreshToken, CONFIG.CRON_NEAR_MINUTES * 60 * 1000);
-        }
-        // 服务器完全启动后,执行初始健康检查
-        const poolManager = getProviderPoolManager();
-        if (poolManager) {
-            logger.info('[Initialization] Performing initial health checks for provider pools...');
-            poolManager.performHealthChecks(true);
-        }
-
         // 如果是子进程，通知主进程已就绪
         if (IS_WORKER_PROCESS) {
             sendToMaster({ type: 'ready', pid: process.pid });
+        }
+
+        if (startupBackgroundInitEnabled) {
+            updateStartupState({
+                ready: false,
+                failed: false,
+                phase: 'background_bootstrap_running'
+            });
+
+            runProviderBootstrap().catch((error) => {
+                logger.error(`[Initialization] Background bootstrap failed: ${error.message}`);
+            });
         }
     });
     return serverInstance; // Return the server instance for testing purposes

@@ -2,7 +2,7 @@ import logger from '../utils/logger.js';
 import { handleError, getClientIp } from '../utils/common.js';
 import { handleUIApiRequests, serveStaticFiles } from '../services/ui-manager.js';
 import { handleAPIRequests } from '../services/api-manager.js';
-import { getApiService, getProviderStatus } from '../services/service-manager.js';
+import { getProviderStatus } from '../services/service-manager.js';
 import { getProviderPoolManager } from '../services/service-manager.js';
 import { MODEL_PROVIDER } from '../utils/common.js';
 import { getRegisteredProviders } from '../providers/adapter.js';
@@ -123,15 +123,61 @@ function logRequestDebug(enabled, message, payload = null) {
     logger.info(`[UI Debug] ${message}`);
 }
 
+function normalizeStartupStatus(rawStatus) {
+    if (!rawStatus || typeof rawStatus !== 'object') {
+        return {
+            ready: true,
+            failed: false,
+            phase: 'ready'
+        };
+    }
+
+    return {
+        ready: rawStatus.ready === true,
+        failed: rawStatus.failed === true,
+        phase: typeof rawStatus.phase === 'string' ? rawStatus.phase : (rawStatus.ready ? 'ready' : 'initializing'),
+        startedAt: rawStatus.startedAt || null,
+        updatedAt: rawStatus.updatedAt || null,
+        readyAt: rawStatus.readyAt || null,
+        error: rawStatus.error || null
+    };
+}
+
+function shouldBlockApiRequestsDuringStartup(method, path, startupStatus) {
+    if (method === 'OPTIONS') {
+        return false;
+    }
+
+    if (!startupStatus || startupStatus.ready) {
+        return false;
+    }
+
+    return (
+        path === '/provider_health' ||
+        path === '/v1' ||
+        path.startsWith('/v1/') ||
+        path === '/v1beta' ||
+        path.startsWith('/v1beta/')
+    );
+}
+
 /**
  * Main request handler. It authenticates the request, determines the endpoint type,
  * and delegates to the appropriate specialized handler function.
  * @param {Object} config - The server configuration
- * @param {Object} providerPoolManager - The provider pool manager instance
+ * @param {Object} [options] - handler 扩展选项
+ * @param {Function} [options.getStartupStatus] - 返回当前启动状态
  * @returns {Function} - The request handler function
  */
-export function createRequestHandler(config, providerPoolManager) {
+export function createRequestHandler(config, options = {}) {
+    const getStartupStatus = typeof options.getStartupStatus === 'function'
+        ? options.getStartupStatus
+        : () => ({ ready: true, failed: false, phase: 'ready' });
+
     return async function requestHandler(req, res) {
+        const providerPoolManager = getProviderPoolManager();
+        const startupStatus = normalizeStartupStatus(getStartupStatus());
+
         // Generate unique request ID and set it in logger context
         const clientIp = getClientIp(req);
         const requestId = `${clientIp}:${generateRequestId()}`;
@@ -222,9 +268,10 @@ export function createRequestHandler(config, providerPoolManager) {
         if (method === 'GET' && path === '/health') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
-                status: 'healthy',
+                status: startupStatus.ready ? 'healthy' : (startupStatus.failed ? 'degraded' : 'initializing'),
                 timestamp: new Date().toISOString(),
-                provider: currentConfig.MODEL_PROVIDER
+                provider: currentConfig.MODEL_PROVIDER,
+                startup: startupStatus
             }));
             return true;
         }
@@ -309,6 +356,23 @@ export function createRequestHandler(config, providerPoolManager) {
             } else if (firstSegment && !isValidProvider) {
                 logger.info(`[Config] Ignoring invalid MODEL_PROVIDER in path segment: ${firstSegment}`);
             }
+        }
+
+        if (shouldBlockApiRequestsDuringStartup(method, path, startupStatus)) {
+            const startupMessage = startupStatus.failed
+                ? 'Server startup failed. Please inspect logs and restart service.'
+                : 'Server is initializing provider pools in background. Please retry shortly.';
+            res.writeHead(503, {
+                'Content-Type': 'application/json',
+                'Retry-After': '5'
+            });
+            res.end(JSON.stringify({
+                error: {
+                    message: startupMessage
+                },
+                startup: startupStatus
+            }));
+            return;
         }
 
         // 1. 执行认证流程（只有 type='auth' 的插件参与）

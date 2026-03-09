@@ -1124,7 +1124,7 @@ async function refreshProviderConfig(providerType) {
         
         // 同时更新主界面的提供商统计数据
         if (typeof window.loadProviders === 'function') {
-            await window.loadProviders();
+            await window.loadProviders({ showLoading: false });
         }
         
     } catch (error) {

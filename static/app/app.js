@@ -87,7 +87,7 @@ import {
  */
 function loadInitialData() {
     loadSystemInfo();
-    loadProviders();
+    loadProviders({ showLoading: true });
     loadConfiguration();
     // showToast('数据已刷新', 'success');
 }
@@ -164,7 +164,7 @@ function initApp() {
 
         if (!providerRefreshTimer) {
             providerRefreshTimer = setInterval(() => {
-                loadProviders();
+                loadProviders({ showLoading: false });
 
                 if (providerStats.activeProviders > 0) {
                     const stats = getProviderStats(providerStats);

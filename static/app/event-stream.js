@@ -113,7 +113,7 @@ function updateServerStatus(connected) {
 function updateProviderStatus(data) {
     // 触发重新加载提供商列表
     if (typeof loadProviders === 'function') {
-        loadProviders();
+        loadProviders({ showLoading: false });
     }
 }
 
@@ -186,7 +186,7 @@ function handleProviderUpdate(data) {
         } else {
             // 否则更新主界面的提供商列表
             if (typeof loadProviders === 'function') {
-                loadProviders();
+                loadProviders({ showLoading: false });
             }
         }
     }

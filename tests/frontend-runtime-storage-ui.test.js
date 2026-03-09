@@ -347,7 +347,9 @@ describe('frontend event stream and usage manager', () => {
 
         global.document.querySelector.mockReturnValueOnce(null);
         eventStreamModule.handleProviderUpdate({ action: 'delete', providerType: 'openai-codex-oauth' });
-        expect(loadProviders).toHaveBeenCalled();
+        expect(loadProviders).toHaveBeenCalledWith(expect.objectContaining({
+            showLoading: false
+        }));
 
         eventStreamModule.handleConfigUpdate({ action: 'delete' });
         eventStreamModule.handleConfigUpdate({ action: 'add' });

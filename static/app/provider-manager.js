@@ -687,19 +687,22 @@ function updateTimeDisplay() {
 /**
  * 加载提供商列表
  */
-async function loadProvidersInternal() {
+async function loadProvidersInternal(options = {}) {
     let loadingTimer = null;
     let hasDisplayedSectionLoading = false;
+    const showLoading = options?.showLoading !== false;
     const startedAt = Date.now();
-    logProviderDebug('loadProviders started');
+    logProviderDebug('loadProviders started', { showLoading });
 
     try {
-        loadingTimer = window.setTimeout(() => {
-            if (setProvidersSectionLoading(true)) {
-                providersSectionLoadingCount += 1;
-                hasDisplayedSectionLoading = true;
-            }
-        }, PROVIDERS_LIST_LOADING_DELAY_MS);
+        if (showLoading) {
+            loadingTimer = window.setTimeout(() => {
+                if (setProvidersSectionLoading(true)) {
+                    providersSectionLoadingCount += 1;
+                    hasDisplayedSectionLoading = true;
+                }
+            }, PROVIDERS_LIST_LOADING_DELAY_MS);
+        }
 
         const providers = await window.apiClient.get('/providers/summary');
         logProviderDebug('loadProviders summary loaded', {
@@ -762,13 +765,18 @@ async function loadProvidersInternal() {
 }
 
 async function loadProviders(options = {}) {
-    if (options?.bypassInFlight !== true && providersLoadPromise) {
+    const normalizedOptions = {
+        ...options,
+        showLoading: options?.showLoading !== false
+    };
+
+    if (normalizedOptions?.bypassInFlight !== true && providersLoadPromise) {
         logProviderDebug('loadProviders reused in-flight request');
         return await providersLoadPromise;
     }
 
-    const runner = loadProvidersInternal();
-    if (options?.bypassInFlight === true) {
+    const runner = loadProvidersInternal(normalizedOptions);
+    if (normalizedOptions?.bypassInFlight === true) {
         return await runner;
     }
 

@@ -21,9 +21,16 @@ function logConfigScannerDebug(enabled, message, payload = null, level = 'info')
 
 async function loadScannerProviderPools(currentConfig, providerPoolManager) {
     const runtimeBackend = currentConfig?.RUNTIME_STORAGE_INFO?.backend;
+    const managerProviderPools = providerPoolManager?.providerPools;
+    const configProviderPools = currentConfig?.providerPools;
 
-    if (runtimeBackend !== 'db' && providerPoolManager?.providerPools) {
-        return providerPoolManager.providerPools;
+    // 优先使用已在内存中的快照，避免在大号池场景下每次扫描都触发 DB 全量导出
+    if (managerProviderPools && Object.keys(managerProviderPools).length > 0) {
+        return managerProviderPools;
+    }
+
+    if (configProviderPools && Object.keys(configProviderPools).length > 0) {
+        return configProviderPools;
     }
 
     try {
@@ -35,11 +42,7 @@ async function loadScannerProviderPools(currentConfig, providerPoolManager) {
         logger.warn('[Config Scanner] Failed to load provider pools from runtime storage:', error.message);
     }
 
-    if (providerPoolManager?.providerPools) {
-        return providerPoolManager.providerPools;
-    }
-
-    return currentConfig?.providerPools || {};
+    return {};
 }
 
 /**
