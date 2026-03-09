@@ -17,6 +17,8 @@ let simulationRunning = false;
 let requiredApiKeyCache = null;
 const PROVIDER_SIMULATION_CONCURRENCY = 3;
 let activeSimulationProviderType = null;
+let simulationTriggerMode = null; // 'batch' | 'single' | null
+const MODEL_REQUEST_TIMEOUT_MS = 45000;
 
 function tt(key, fallback) {
     const value = t(key);
@@ -213,6 +215,11 @@ function renderModelsList(models) {
                                 <i class="fas fa-cube"></i>
                             </div>
                             <span class="model-item-name">${escapeHtml(model)}</span>
+                            ${isModelLoading(providerType, model) ? `
+                                <span class="model-item-loading">
+                                    <i class="fas fa-spinner fa-spin"></i>
+                                </span>
+                            ` : ''}
                             ${hasModelRequestRecord(providerType, model) ? `
                                 <button class="model-item-detail-btn"
                                     type="button"
@@ -334,6 +341,11 @@ function getModelStateClass(providerType, modelName) {
     return '';
 }
 
+function isModelLoading(providerType, modelName) {
+    const state = getModelState(providerType, modelName);
+    return !!(state && state.status === 'loading');
+}
+
 function getProviderSimulationButtonIcon(providerType) {
     if (simulationRunning && activeSimulationProviderType === providerType) {
         return 'fas fa-spinner fa-spin';
@@ -443,6 +455,7 @@ function buildDetailText(providerType, modelName, state = null) {
         `Provider: ${providerType}`,
         `Model: ${modelName}`,
         `Status: ${state.status || 'unknown'}`,
+        state.failureType ? `Failure Type: ${state.failureType}` : null,
         state.httpStatus !== undefined ? `HTTP Status: ${state.httpStatus}` : null,
         state.durationMs !== undefined ? `Duration: ${state.durationMs}ms` : null,
         state.endpoint ? `Endpoint: ${state.endpoint}` : null,
@@ -520,7 +533,10 @@ function updateSimulationButtonState() {
     buttons.forEach((btn) => {
         btn.disabled = simulationRunning;
         const providerType = btn.getAttribute('data-provider');
-        const isActive = simulationRunning && activeSimulationProviderType && providerType === activeSimulationProviderType;
+        const isActive = simulationRunning
+            && simulationTriggerMode === 'batch'
+            && activeSimulationProviderType
+            && providerType === activeSimulationProviderType;
         btn.classList.toggle('loading', isActive);
     });
 }
@@ -545,14 +561,63 @@ async function ensureServerReadyForSimulation() {
 async function runProviderSimulation(providerType, fn) {
     simulationRunning = true;
     activeSimulationProviderType = providerType;
+    simulationTriggerMode = providerType ? (simulationTriggerMode || 'single') : null;
     updateSimulationButtonState();
     try {
         await fn();
     } finally {
         simulationRunning = false;
         activeSimulationProviderType = null;
+        simulationTriggerMode = null;
         updateSimulationButtonState();
     }
+}
+
+function parseSimulationResponseStatus(httpStatus, rawBody) {
+    let normalizedBody = rawBody || '';
+    let isBodyError = false;
+    let bodyErrorMessage = '';
+    let bodyErrorType = '';
+    let bodyErrorCode = '';
+
+    try {
+        const data = JSON.parse(rawBody || '{}');
+        if (data && typeof data === 'object' && data.error) {
+            isBodyError = true;
+            bodyErrorMessage = data.error?.message || JSON.stringify(data.error);
+            bodyErrorType = String(data.error?.type || '');
+            bodyErrorCode = String(data.error?.code || '');
+        }
+    } catch {
+        // ignore json parse errors for non-json response
+    }
+
+    const isHttpOk = httpStatus >= 200 && httpStatus < 300;
+    const isSuccess = isHttpOk && !isBodyError;
+
+    return {
+        isSuccess,
+        bodyErrorMessage,
+        bodyErrorType,
+        bodyErrorCode,
+        normalizedBody
+    };
+}
+
+function classifySimulationFailure({ httpStatus, errorType = '', errorCode = '', errorMessage = '' }) {
+    const typeLower = String(errorType || '').toLowerCase();
+    const codeLower = String(errorCode || '').toLowerCase();
+    const msgLower = String(errorMessage || '').toLowerCase();
+
+    if (httpStatus === 401 || httpStatus === 403) return 'auth_error';
+    if (httpStatus === 429 || typeLower.includes('rate_limit') || codeLower.includes('rate_limit') || msgLower.includes('rate limit')) {
+        return 'rate_limit_error';
+    }
+    if (httpStatus >= 500 && httpStatus < 600) return 'server_error';
+    if (msgLower.includes('timeout')) return 'timeout_error';
+    if (msgLower.includes('network') || msgLower.includes('failed to fetch') || msgLower.includes('econn')) return 'network_error';
+    if (httpStatus >= 400 && httpStatus < 500) return 'client_error';
+    return 'unknown_error';
 }
 
 async function simulateModelRequest(providerType, modelName) {
@@ -571,18 +636,28 @@ async function simulateModelRequest(providerType, modelName) {
 
     try {
         const apiKey = await getRequiredApiKey();
-        const response = await fetch(reqConfig.endpoint, {
-            method: reqConfig.method,
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`
-            },
-            body: JSON.stringify(reqConfig.body)
-        });
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), MODEL_REQUEST_TIMEOUT_MS);
+        let response;
+        try {
+            response = await fetch(reqConfig.endpoint, {
+                method: reqConfig.method,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`
+                },
+                body: JSON.stringify(reqConfig.body),
+                signal: controller.signal
+            });
+        } finally {
+            clearTimeout(timer);
+        }
 
         const durationMs = Date.now() - startedAt;
-        if (response.ok) {
-            const responseBodyRaw = await response.text();
+        const responseBodyRaw = await response.text();
+        const parsedStatus = parseSimulationResponseStatus(response.status, responseBodyRaw);
+
+        if (parsedStatus.isSuccess) {
             setModelState(providerType, modelName, {
                 status: 'success',
                 endpoint: reqConfig.endpoint,
@@ -590,37 +665,46 @@ async function simulateModelRequest(providerType, modelName) {
                 requestBody: JSON.stringify(reqConfig.body),
                 httpStatus: response.status,
                 durationMs,
-                responseBody: responseBodyRaw
+                responseBody: parsedStatus.normalizedBody
             });
         } else {
-            const responseBodyRaw = await response.text();
-            let errorMessage = `HTTP ${response.status}`;
-            try {
-                const data = JSON.parse(responseBodyRaw);
-                errorMessage = data?.error?.message || JSON.stringify(data);
-            } catch {
-                if (responseBodyRaw) errorMessage = responseBodyRaw;
+            let errorMessage = parsedStatus.bodyErrorMessage || `HTTP ${response.status}`;
+            if (!parsedStatus.bodyErrorMessage && responseBodyRaw) {
+                errorMessage = responseBodyRaw;
             }
             setModelState(providerType, modelName, {
                 status: 'failed',
+                failureType: classifySimulationFailure({
+                    httpStatus: response.status,
+                    errorType: parsedStatus.bodyErrorType,
+                    errorCode: parsedStatus.bodyErrorCode,
+                    errorMessage
+                }),
                 endpoint: reqConfig.endpoint,
                 method: reqConfig.method,
                 requestBody: JSON.stringify(reqConfig.body),
                 httpStatus: response.status,
                 durationMs,
                 errorMessage,
-                responseBody: responseBodyRaw
+                responseBody: parsedStatus.normalizedBody
             });
         }
     } catch (error) {
         const durationMs = Date.now() - startedAt;
+        const errorMessage = error.name === 'AbortError'
+            ? `Request timeout after ${MODEL_REQUEST_TIMEOUT_MS}ms`
+            : (error.message || 'Request failed');
         setModelState(providerType, modelName, {
             status: 'failed',
+            failureType: classifySimulationFailure({
+                httpStatus: 0,
+                errorMessage
+            }),
             endpoint: reqConfig.endpoint,
             method: reqConfig.method,
             requestBody: JSON.stringify(reqConfig.body),
             durationMs,
-            errorMessage: error.message || 'Request failed'
+            errorMessage
         });
     }
 
@@ -640,6 +724,7 @@ async function simulateSingleModelRequest(providerType, modelName, event) {
     }
     const ready = await ensureServerReadyForSimulation();
     if (!ready) return;
+    simulationTriggerMode = 'single';
     await runProviderSimulation(providerType, async () => {
         await simulateModelRequest(providerType, modelName);
     });
@@ -684,6 +769,7 @@ async function simulateProviderModelsRequest(providerType, event) {
     }
     const ready = await ensureServerReadyForSimulation();
     if (!ready) return;
+    simulationTriggerMode = 'batch';
     await runProviderSimulation(providerType, async () => {
         const modelList = modelsCache[providerType] || [];
         const concurrency = Math.max(1, Math.min(PROVIDER_SIMULATION_CONCURRENCY, modelList.length || 1));

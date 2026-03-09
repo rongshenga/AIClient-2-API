@@ -12,6 +12,7 @@ let currentProviders = [];
 let currentProviderType = '';
 let currentTotalCount = 0;
 let currentHealthyCount = 0;
+let currentFilteredCount = 0;
 let currentTotalPages = 1;
 let currentSort = null;
 let cachedModels = []; // 缓存模型列表
@@ -34,6 +35,7 @@ function buildProviderPageUrl(providerType, page = 1) {
     if (currentSort === 'asc' || currentSort === 'desc') {
         params.set('sort', currentSort);
     }
+    params.set('healthFilter', currentHealthFilter);
 
     return `/providers/${encodeURIComponent(providerType)}?${params.toString()}`;
 }
@@ -50,26 +52,33 @@ async function fetchProviderPage(providerType, page = 1) {
 }
 
 function applyProviderModalPayload(data = {}, { resetFilter = false } = {}) {
+    const validFilters = ['all', 'healthy', 'unhealthy'];
+    const payloadHealthFilter = validFilters.includes(data.healthFilter) ? data.healthFilter : 'all';
+    if (resetFilter) {
+        currentHealthFilter = 'all';
+    } else {
+        currentHealthFilter = payloadHealthFilter;
+    }
+
     allProviders = Array.isArray(data.providers) ? data.providers : [];
     currentProviderType = data.providerType || currentProviderType;
     currentPage = normalizePage(data.page, currentPage);
     currentTotalCount = Number(data.totalCount) || allProviders.length;
     currentHealthyCount = Number(data.healthyCount) || 0;
+    currentFilteredCount = Number(data.filteredCount);
+    if (!Number.isFinite(currentFilteredCount) || currentFilteredCount < 0) {
+        currentFilteredCount = allProviders.length;
+    }
     currentTotalPages = Math.max(
         1,
-        Number(data.totalPages) || Math.ceil(Math.max(currentTotalCount, 1) / PROVIDERS_PER_PAGE)
+        Number(data.filteredTotalPages) || Number(data.totalPages) || Math.ceil(Math.max(currentFilteredCount, 1) / PROVIDERS_PER_PAGE)
     );
     if (data.sort === 'asc' || data.sort === 'desc') {
         currentSort = data.sort;
     } else if (data.sort === null) {
         currentSort = null;
     }
-
-    if (resetFilter) {
-        currentHealthFilter = 'all';
-    }
-
-    currentProviders = filterProvidersByHealth(allProviders, currentHealthFilter);
+    currentProviders = [...allProviders];
 }
 
 function getUnhealthyCountEstimate() {
@@ -143,19 +152,19 @@ function renderProviderListWithPagination(modal, { scrollToTop = false } = {}) {
         providerList.innerHTML = renderProviderList(currentProviders);
     }
 
-    const shouldShowPagination = currentHealthFilter === 'all' && totalPages > 1;
+    const shouldShowPagination = totalPages > 1;
     const paginationContainers = modal.querySelectorAll('.pagination-container');
     if (shouldShowPagination) {
         paginationContainers.forEach(container => {
             const position = container.getAttribute('data-position');
-            container.outerHTML = renderPagination(currentPage, totalPages, currentTotalCount, position);
+            container.outerHTML = renderPagination(currentPage, totalPages, currentFilteredCount, position);
         });
 
         if (paginationContainers.length === 0) {
             const providerListEl = modal.querySelector('.provider-list');
             if (providerListEl) {
-                providerListEl.insertAdjacentHTML('beforebegin', renderPagination(currentPage, totalPages, currentTotalCount, 'top'));
-                providerListEl.insertAdjacentHTML('afterend', renderPagination(currentPage, totalPages, currentTotalCount, 'bottom'));
+                providerListEl.insertAdjacentHTML('beforebegin', renderPagination(currentPage, totalPages, currentFilteredCount, 'top'));
+                providerListEl.insertAdjacentHTML('afterend', renderPagination(currentPage, totalPages, currentFilteredCount, 'bottom'));
             }
         }
     } else {
@@ -193,18 +202,12 @@ function renderProviderListWithPagination(modal, { scrollToTop = false } = {}) {
 function applyProviderHealthFilter(healthFilter = 'all', resetPage = true, scrollToTop = true) {
     const validFilters = ['all', 'healthy', 'unhealthy'];
     currentHealthFilter = validFilters.includes(healthFilter) ? healthFilter : 'all';
-    currentProviders = filterProvidersByHealth(allProviders, currentHealthFilter);
-
-    if (resetPage && currentPage !== 1) {
-        void goToProviderPage(1);
-        return;
-    }
 
     const modal = document.querySelector('.provider-modal');
     if (!modal) return;
 
     updateProviderFilterButtonsState(modal);
-    renderProviderListWithPagination(modal, { scrollToTop });
+    void goToProviderPage(resetPage ? 1 : currentPage, scrollToTop, true);
 }
 
 /**
@@ -298,13 +301,13 @@ function showProviderManagerModal(data) {
                     </div>
                 </div>
                 
-                ${totalPages > 1 ? renderPagination(currentPage, totalPages, currentTotalCount) : ''}
+                ${totalPages > 1 ? renderPagination(currentPage, totalPages, currentFilteredCount) : ''}
                 
                 <div class="provider-list" id="providerList">
                     ${renderProviderList(currentProviders)}
                 </div>
                 
-                ${totalPages > 1 ? renderPagination(currentPage, totalPages, currentTotalCount, 'bottom') : ''}
+                ${totalPages > 1 ? renderPagination(currentPage, totalPages, currentFilteredCount, 'bottom') : ''}
             </div>
         </div>
     `;
@@ -392,7 +395,7 @@ function renderPagination(page, totalPages, totalItems, position = 'top') {
  * 跳转到指定页
  * @param {number} page - 目标页码
  */
-async function goToProviderPage(page) {
+async function goToProviderPage(page, scrollToTop = true, forceReload = false) {
     const totalPages = Math.max(1, currentTotalPages);
     let targetPage = normalizePage(page, currentPage);
     if (targetPage < 1) targetPage = 1;
@@ -401,8 +404,8 @@ async function goToProviderPage(page) {
     const modal = document.querySelector('.provider-modal');
     if (!modal) return;
 
-    if (targetPage === currentPage) {
-        renderProviderListWithPagination(modal, { scrollToTop: true });
+    if (!forceReload && targetPage === currentPage) {
+        renderProviderListWithPagination(modal, { scrollToTop });
         return;
     }
 
@@ -410,7 +413,7 @@ async function goToProviderPage(page) {
         const data = await fetchProviderPage(currentProviderType, targetPage);
         applyProviderModalPayload(data);
         updateProviderFilterButtonsState(modal);
-        renderProviderListWithPagination(modal, { scrollToTop: true });
+        renderProviderListWithPagination(modal, { scrollToTop });
     } catch (error) {
         console.error('Failed to load provider page:', error);
         showToast(t('common.error'), `${t('modal.provider.load.failed')}: ${error.message}`, 'error');

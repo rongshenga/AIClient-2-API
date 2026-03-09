@@ -363,10 +363,11 @@ async function runProviderBootstrap() {
 async function startServer() {
     // Initialize configuration
     await initializeConfig(process.argv.slice(2), 'configs/config.json', {
-        // 默认优先快速拉起 Web，号池加载交给后台阶段
+        // 默认先快速加载配置，provider pools 在后续启动阶段按模式处理
         deferProviderPoolsLoad: true
     });
-    const startupBackgroundInitEnabled = CONFIG.STARTUP_BACKGROUND_INIT !== false;
+    // 默认阻塞启动；仅当显式配置 true 时才启用后台初始化
+    const startupBackgroundInitEnabled = CONFIG.STARTUP_BACKGROUND_INIT === true;
     
     // 自动关联 configs 目录中的配置文件到对应的提供商
     // logger.info('[Initialization] Checking for unlinked provider configs...');
@@ -405,7 +406,7 @@ async function startServer() {
     // Initialize UI management features
     initializeUIManagement(CONFIG);
 
-    // 启动模式：默认后台初始化，兼容通过配置禁用（回到阻塞式启动）
+    // 启动模式：默认阻塞初始化，显式配置后可启用后台初始化
     if (!startupBackgroundInitEnabled) {
         logger.info('[Initialization] STARTUP_BACKGROUND_INIT=false, running bootstrap before listen...');
         await runProviderBootstrap();

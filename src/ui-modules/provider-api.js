@@ -154,9 +154,12 @@ function parseProviderListQuery(req, totalCount = 0) {
     }
 
     const requestUrl = new URL(req.url, 'http://127.0.0.1');
+    const rawHealthFilter = requestUrl.searchParams.get('healthFilter');
+    const healthFilter = rawHealthFilter === 'healthy' || rawHealthFilter === 'unhealthy' ? rawHealthFilter : 'all';
     const hasPagingQuery = requestUrl.searchParams.has('page')
         || requestUrl.searchParams.has('limit')
-        || requestUrl.searchParams.has('sort');
+        || requestUrl.searchParams.has('sort')
+        || requestUrl.searchParams.has('healthFilter');
 
     if (!hasPagingQuery) {
         return null;
@@ -178,7 +181,8 @@ function parseProviderListQuery(req, totalCount = 0) {
         limit,
         offset: (normalizedPage - 1) * limit,
         sort,
-        totalPages
+        totalPages,
+        healthFilter
     };
 }
 
@@ -193,6 +197,18 @@ function sortProvidersForDisplay(providers = [], sort = 'desc') {
     });
 
     return sort === 'asc' ? sorted : sorted.reverse();
+}
+
+function filterProvidersByHealth(providers = [], healthFilter = 'all') {
+    if (healthFilter === 'healthy') {
+        return providers.filter((provider) => provider?.isHealthy === true);
+    }
+
+    if (healthFilter === 'unhealthy') {
+        return providers.filter((provider) => provider?.isHealthy !== true);
+    }
+
+    return providers;
 }
 
 function getGrokBatchImportLimit(currentConfig = {}) {
@@ -342,13 +358,16 @@ export async function handleGetProviderType(req, res, currentConfig, providerPoo
 
     const allProviders = providerPools[providerType] || [];
     const summary = buildProviderSummary(allProviders);
-    const listQuery = parseProviderListQuery(req, allProviders.length);
+    const requestedQuery = parseProviderListQuery(req, allProviders.length);
+    const healthFilter = requestedQuery?.healthFilter || 'all';
+    const filteredProviders = filterProvidersByHealth(allProviders, healthFilter);
+    const listQuery = parseProviderListQuery(req, filteredProviders.length);
     const sortedProviders = listQuery?.sort
-        ? sortProvidersForDisplay(allProviders, listQuery.sort)
-        : allProviders;
+        ? sortProvidersForDisplay(filteredProviders, listQuery.sort)
+        : filteredProviders;
     const providers = listQuery
         ? sortedProviders.slice(listQuery.offset, listQuery.offset + listQuery.limit)
-        : allProviders;
+        : filteredProviders;
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -359,6 +378,9 @@ export async function handleGetProviderType(req, res, currentConfig, providerPoo
         totalPages: listQuery?.totalPages || 1,
         returnedCount: providers.length,
         sort: listQuery?.sort || null,
+        healthFilter,
+        filteredCount: filteredProviders.length,
+        filteredTotalPages: listQuery?.totalPages || 1,
         ...summary
     }));
     return true;
