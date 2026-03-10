@@ -2,12 +2,14 @@ import { existsSync, readFileSync, writeFileSync } from 'fs';
 import logger from '../utils/logger.js';
 import { promises as fs } from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { CONFIG } from '../core/config-manager.js';
 import { serviceInstances } from '../providers/adapter.js';
 import { initApiService } from '../services/service-manager.js';
 import { getRequestBody } from '../utils/common.js';
 import { broadcastEvent } from '../ui-modules/event-broadcast.js';
 import { rollbackRuntimeStorageMigration } from '../storage/runtime-storage-migration-service.js';
+import { getRuntimeStorage } from '../storage/runtime-storage-registry.js';
 
 const CONFIG_RESPONSE_KEYS = [
     'REQUIRED_API_KEY',
@@ -46,6 +48,10 @@ const CONFIG_RESPONSE_KEYS = [
     'RUNTIME_STORAGE_LARGE_POOL_THRESHOLD',
     'RUNTIME_STORAGE_COMPAT_EXPORT_PAGE_SIZE',
     'RUNTIME_STORAGE_STARTUP_RESTORE_PAGE_SIZE',
+    'AUTH_STORAGE_MODE',
+    'AUTH_GROUP_PRELOAD_SIZE',
+    'AUTH_GROUP_PRELOAD_AHEAD',
+    'AUTH_SECRET_CACHE_TTL_MS',
     'WARMUP_TARGET',
     'REFRESH_CONCURRENCY_PER_PROVIDER',
     'USAGE_QUERY_CONCURRENCY_PER_PROVIDER',
@@ -103,6 +109,10 @@ const CONFIG_PERSIST_KEYS = [
     'RUNTIME_STORAGE_LARGE_POOL_THRESHOLD',
     'RUNTIME_STORAGE_COMPAT_EXPORT_PAGE_SIZE',
     'RUNTIME_STORAGE_STARTUP_RESTORE_PAGE_SIZE',
+    'AUTH_STORAGE_MODE',
+    'AUTH_GROUP_PRELOAD_SIZE',
+    'AUTH_GROUP_PRELOAD_AHEAD',
+    'AUTH_SECRET_CACHE_TTL_MS',
     'WARMUP_TARGET',
     'REFRESH_CONCURRENCY_PER_PROVIDER',
     'USAGE_QUERY_CONCURRENCY_PER_PROVIDER',
@@ -157,6 +167,24 @@ function buildPersistedConfigPayload(currentConfig = {}, existingConfig = {}) {
     }
 
     return configToSave;
+}
+
+function resolveAuthStorageMode(config = CONFIG) {
+    const normalized = String(config?.AUTH_STORAGE_MODE || '').toLowerCase();
+    return normalized === 'bridge' ? 'bridge' : 'db_only';
+}
+
+function createPasswordHashRecord(password) {
+    const normalizedPassword = String(password || '');
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = crypto.createHash('sha256').update(`${salt}:${normalizedPassword}`).digest('hex');
+    return {
+        version: 1,
+        algorithm: 'sha256-salt',
+        salt,
+        hash,
+        updatedAt: new Date().toISOString()
+    };
 }
 
 /**
@@ -266,6 +294,10 @@ export async function handleUpdateConfig(req, res, currentConfig) {
         if (newConfig.RUNTIME_STORAGE_LARGE_POOL_THRESHOLD !== undefined) currentConfig.RUNTIME_STORAGE_LARGE_POOL_THRESHOLD = newConfig.RUNTIME_STORAGE_LARGE_POOL_THRESHOLD;
         if (newConfig.RUNTIME_STORAGE_COMPAT_EXPORT_PAGE_SIZE !== undefined) currentConfig.RUNTIME_STORAGE_COMPAT_EXPORT_PAGE_SIZE = newConfig.RUNTIME_STORAGE_COMPAT_EXPORT_PAGE_SIZE;
         if (newConfig.RUNTIME_STORAGE_STARTUP_RESTORE_PAGE_SIZE !== undefined) currentConfig.RUNTIME_STORAGE_STARTUP_RESTORE_PAGE_SIZE = newConfig.RUNTIME_STORAGE_STARTUP_RESTORE_PAGE_SIZE;
+        if (newConfig.AUTH_STORAGE_MODE !== undefined) currentConfig.AUTH_STORAGE_MODE = newConfig.AUTH_STORAGE_MODE;
+        if (newConfig.AUTH_GROUP_PRELOAD_SIZE !== undefined) currentConfig.AUTH_GROUP_PRELOAD_SIZE = newConfig.AUTH_GROUP_PRELOAD_SIZE;
+        if (newConfig.AUTH_GROUP_PRELOAD_AHEAD !== undefined) currentConfig.AUTH_GROUP_PRELOAD_AHEAD = newConfig.AUTH_GROUP_PRELOAD_AHEAD;
+        if (newConfig.AUTH_SECRET_CACHE_TTL_MS !== undefined) currentConfig.AUTH_SECRET_CACHE_TTL_MS = newConfig.AUTH_SECRET_CACHE_TTL_MS;
         if (newConfig.WARMUP_TARGET !== undefined) currentConfig.WARMUP_TARGET = newConfig.WARMUP_TARGET;
         if (newConfig.REFRESH_CONCURRENCY_PER_PROVIDER !== undefined) currentConfig.REFRESH_CONCURRENCY_PER_PROVIDER = newConfig.REFRESH_CONCURRENCY_PER_PROVIDER;
         if (newConfig.USAGE_QUERY_CONCURRENCY_PER_PROVIDER !== undefined) currentConfig.USAGE_QUERY_CONCURRENCY_PER_PROVIDER = newConfig.USAGE_QUERY_CONCURRENCY_PER_PROVIDER;
@@ -476,9 +508,22 @@ export async function handleUpdateAdminPassword(req, res) {
             return true;
         }
 
-        // 写入密码到 pwd 文件
-        const pwdFilePath = path.join(process.cwd(), 'configs', 'pwd');
-        await fs.writeFile(pwdFilePath, password.trim(), 'utf-8');
+        const runtimeStorage = getRuntimeStorage();
+        const authMode = resolveAuthStorageMode(CONFIG);
+        const normalizedPassword = password.trim();
+        const hashRecord = createPasswordHashRecord(normalizedPassword);
+        const hasDbPasswordWriter = runtimeStorage && typeof runtimeStorage.saveAdminPasswordHash === 'function';
+
+        if (hasDbPasswordWriter) {
+            await runtimeStorage.saveAdminPasswordHash(hashRecord);
+        } else if (authMode === 'db_only') {
+            throw new Error('Runtime storage password authority is unavailable in db_only mode');
+        }
+
+        if (authMode === 'bridge') {
+            const pwdFilePath = path.join(process.cwd(), 'configs', 'pwd');
+            await fs.writeFile(pwdFilePath, normalizedPassword, 'utf-8');
+        }
         
         logger.info('[UI API] Admin password updated successfully');
 

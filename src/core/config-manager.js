@@ -10,6 +10,12 @@ export let PROMPT_LOG_FILENAME = ''; // Make PROMPT_LOG_FILENAME exportable
 
 const ALL_MODEL_PROVIDERS = Object.values(MODEL_PROVIDER);
 const RUNTIME_STORAGE_DEFAULTS = getRuntimeStorageDefaults();
+const AUTH_STORAGE_DEFAULTS = {
+    AUTH_STORAGE_MODE: 'db_only',
+    AUTH_GROUP_PRELOAD_SIZE: 100,
+    AUTH_GROUP_PRELOAD_AHEAD: 1,
+    AUTH_SECRET_CACHE_TTL_MS: 300000
+};
 
 function normalizeConfiguredProviders(config) {
     const fallbackProvider = MODEL_PROVIDER.GEMINI_CLI;
@@ -84,6 +90,7 @@ export async function loadProviderPoolsIntoConfig(config = CONFIG, options = {})
 export async function initializeConfig(args = process.argv.slice(2), configFilePath = 'configs/config.json', options = {}) {
     const shouldDeferProviderPoolsLoad = options.deferProviderPoolsLoad === true;
     let currentConfig = {};
+    let authAutoMigration = null;
 
     try {
         const configData = fs.readFileSync(configFilePath, 'utf8');
@@ -160,6 +167,10 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         { flag: '--runtime-storage-db-path', configKey: 'RUNTIME_STORAGE_DB_PATH', type: 'string' },
         { flag: '--runtime-storage-dual-write', configKey: 'RUNTIME_STORAGE_DUAL_WRITE', type: 'bool' },
         { flag: '--runtime-storage-fallback-to-file', configKey: 'RUNTIME_STORAGE_FALLBACK_TO_FILE', type: 'bool' },
+        { flag: '--auth-storage-mode', configKey: 'AUTH_STORAGE_MODE', type: 'enum', validValues: ['db_only', 'bridge'] },
+        { flag: '--auth-group-preload-size', configKey: 'AUTH_GROUP_PRELOAD_SIZE', type: 'int' },
+        { flag: '--auth-group-preload-ahead', configKey: 'AUTH_GROUP_PRELOAD_AHEAD', type: 'int' },
+        { flag: '--auth-secret-cache-ttl-ms', configKey: 'AUTH_SECRET_CACHE_TTL_MS', type: 'int' },
         { flag: '--max-error-count',      configKey: 'MAX_ERROR_COUNT',        type: 'int' },
     ];
 
@@ -200,6 +211,25 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
             currentConfig[key] = value;
         }
     }
+    for (const [key, value] of Object.entries(AUTH_STORAGE_DEFAULTS)) {
+        if (currentConfig[key] === undefined || currentConfig[key] === null) {
+            currentConfig[key] = value;
+        }
+    }
+    if (!['db_only', 'bridge'].includes(String(currentConfig.AUTH_STORAGE_MODE || '').toLowerCase())) {
+        currentConfig.AUTH_STORAGE_MODE = AUTH_STORAGE_DEFAULTS.AUTH_STORAGE_MODE;
+    } else {
+        currentConfig.AUTH_STORAGE_MODE = String(currentConfig.AUTH_STORAGE_MODE).toLowerCase();
+    }
+    currentConfig.AUTH_GROUP_PRELOAD_SIZE = Number.isFinite(Number.parseInt(currentConfig.AUTH_GROUP_PRELOAD_SIZE, 10))
+        ? Math.max(1, Number.parseInt(currentConfig.AUTH_GROUP_PRELOAD_SIZE, 10))
+        : AUTH_STORAGE_DEFAULTS.AUTH_GROUP_PRELOAD_SIZE;
+    currentConfig.AUTH_GROUP_PRELOAD_AHEAD = Number.isFinite(Number.parseInt(currentConfig.AUTH_GROUP_PRELOAD_AHEAD, 10))
+        ? Math.max(0, Number.parseInt(currentConfig.AUTH_GROUP_PRELOAD_AHEAD, 10))
+        : AUTH_STORAGE_DEFAULTS.AUTH_GROUP_PRELOAD_AHEAD;
+    currentConfig.AUTH_SECRET_CACHE_TTL_MS = Number.isFinite(Number.parseInt(currentConfig.AUTH_SECRET_CACHE_TTL_MS, 10))
+        ? Math.max(1000, Number.parseInt(currentConfig.AUTH_SECRET_CACHE_TTL_MS, 10))
+        : AUTH_STORAGE_DEFAULTS.AUTH_SECRET_CACHE_TTL_MS;
     normalizeConfiguredProviders(currentConfig);
 
     if (!currentConfig.SYSTEM_PROMPT_FILE_PATH) {
@@ -213,8 +243,35 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
     }
 
     try {
+        if (currentConfig.AUTH_STORAGE_MODE === 'db_only' && String(currentConfig.RUNTIME_STORAGE_BACKEND || '').toLowerCase() === 'db') {
+            const { ensureAuthAuthorityMigrated } = await import('../storage/runtime-storage-migration-service.js');
+            const authMigrationStartedAt = Date.now();
+            logger.info('[Config] Checking auth authority migration state...');
+            authAutoMigration = await ensureAuthAuthorityMigrated(currentConfig, {
+                force: false,
+                operator: 'config_manager_startup'
+            });
+            logger.info(`[Config] Auth authority migration check completed in ${Date.now() - authMigrationStartedAt}ms`);
+            if (authAutoMigration?.migrated) {
+                logger.warn(
+                    `[Config] Legacy auth authority detected and migrated during startup (runId=${authAutoMigration.runId || 'unknown'}).`
+                );
+            }
+        }
+
         const runtimeStorage = await initializeRuntimeStorage(currentConfig);
         currentConfig.RUNTIME_STORAGE_INFO = runtimeStorage.getInfo();
+        const activeBackend = String(currentConfig.RUNTIME_STORAGE_INFO?.activeBackend || currentConfig.RUNTIME_STORAGE_INFO?.backend || '').toLowerCase();
+        if (currentConfig.AUTH_STORAGE_MODE === 'db_only' && activeBackend === 'file') {
+            throw new Error('db_only mode rejected file fallback backend during startup');
+        }
+
+        if (authAutoMigration) {
+            currentConfig.RUNTIME_STORAGE_INFO = {
+                ...currentConfig.RUNTIME_STORAGE_INFO,
+                authAutoMigration
+            };
+        }
         if (shouldDeferProviderPoolsLoad) {
             currentConfig.providerPools = {};
             logger.info('[Config] Deferred provider pools loading to background startup stage');
@@ -223,6 +280,9 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         }
     } catch (error) {
         logger.error(`[Config Error] Failed to load provider pools via runtime storage: ${error.message}`);
+        if (currentConfig.AUTH_STORAGE_MODE === 'db_only') {
+            throw error;
+        }
         currentConfig.providerPools = {};
         currentConfig.RUNTIME_STORAGE_INFO = {
             backend: 'unavailable',

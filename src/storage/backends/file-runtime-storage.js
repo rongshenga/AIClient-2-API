@@ -131,6 +131,18 @@ export class FileRuntimeStorage {
         return [];
     }
 
+    async getCredentialSecretBlob(_credentialAssetId) {
+        return null;
+    }
+
+    async upsertCredentialSecretBlob(_credentialAssetId, _payload = null, _options = {}) {
+        return null;
+    }
+
+    async listCredentialExpiryCandidates(_providerType = null, _options = {}) {
+        return [];
+    }
+
     async linkCredentialFiles(credPaths = [], options = {}) {
         const providerPools = options.providerPools && typeof options.providerPools === 'object'
             ? cloneJson(options.providerPools)

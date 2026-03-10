@@ -17,6 +17,7 @@ let getRuntimeStorageMigrationRun;
 let listRuntimeStorageMigrationRuns;
 let migrateLegacyRuntimeStorage;
 let rollbackRuntimeStorageMigration;
+let verifyAuthRuntimeStorageMigration;
 let verifyRuntimeStorageMigration;
 let SqliteRuntimeStorage;
 
@@ -40,6 +41,7 @@ async function createRuntimeMigrationFixture(prefix = 'runtime-storage-fixture-'
     const providerPoolsPath = path.join(tempDir, 'provider_pools.json');
     const usageCachePath = path.join(tempDir, 'usage-cache.json');
     const tokenStorePath = path.join(tempDir, 'token-store.json');
+    const passwordFilePath = path.join(tempDir, 'pwd');
     const apiPotluckDataPath = path.join(tempDir, 'api-potluck-data.json');
     const apiPotluckKeysPath = path.join(tempDir, 'api-potluck-keys.json');
     const credentialPath = path.join(tempDir, 'gemini', 'account-1.json');
@@ -118,6 +120,7 @@ async function createRuntimeMigrationFixture(prefix = 'runtime-storage-fixture-'
             }
         }
     };
+    const sourceAdminPassword = overrides.adminPassword ?? 'admin123';
     const sourceApiPotluckData = overrides.apiPotluckData ?? {
         config: {
             defaultDailyLimit: 500,
@@ -181,6 +184,11 @@ async function createRuntimeMigrationFixture(prefix = 'runtime-storage-fixture-'
     } else {
         await writeJson(tokenStorePath, sourceTokenStore);
     }
+    if (typeof overrides.passwordRaw === 'string') {
+        await fs.writeFile(passwordFilePath, overrides.passwordRaw, 'utf8');
+    } else {
+        await fs.writeFile(passwordFilePath, `${sourceAdminPassword}\n`, 'utf8');
+    }
 
     if (typeof overrides.apiPotluckDataRaw === 'string') {
         await fs.writeFile(apiPotluckDataPath, overrides.apiPotluckDataRaw, 'utf8');
@@ -198,6 +206,7 @@ async function createRuntimeMigrationFixture(prefix = 'runtime-storage-fixture-'
         PROVIDER_POOLS_FILE_PATH: providerPoolsPath,
         USAGE_CACHE_FILE_PATH: usageCachePath,
         TOKEN_STORE_FILE_PATH: tokenStorePath,
+        PASSWORD_FILE_PATH: passwordFilePath,
         API_POTLUCK_DATA_FILE_PATH: apiPotluckDataPath,
         API_POTLUCK_KEYS_FILE_PATH: apiPotluckKeysPath,
         RUNTIME_STORAGE_DB_PATH: dbPath,
@@ -212,6 +221,7 @@ async function createRuntimeMigrationFixture(prefix = 'runtime-storage-fixture-'
         providerPoolsPath,
         usageCachePath,
         tokenStorePath,
+        passwordFilePath,
         apiPotluckDataPath,
         apiPotluckKeysPath,
         credentialPath,
@@ -219,6 +229,7 @@ async function createRuntimeMigrationFixture(prefix = 'runtime-storage-fixture-'
         sourceProviderPools,
         sourceUsageCache,
         sourceTokenStore,
+        sourceAdminPassword,
         sourceApiPotluckData,
         sourceApiPotluckKeys
     };
@@ -238,6 +249,7 @@ describe('Runtime storage migration service', () => {
             listRuntimeStorageMigrationRuns,
             migrateLegacyRuntimeStorage,
             rollbackRuntimeStorageMigration,
+            verifyAuthRuntimeStorageMigration,
             verifyRuntimeStorageMigration
         } = await import('../src/storage/runtime-storage-migration-service.js'));
         ({ SqliteRuntimeStorage } = await import('../src/storage/backends/sqlite-runtime-storage.js'));
@@ -1308,6 +1320,30 @@ WHERE meta_key = 'schema_version';
         });
         expect(rerun.report.overallStatus).toBe('pass');
         expect(rerun.report.validationStatus).toBe('pass');
+    });
+
+    test('should migrate auth authority from pwd and credential files into db', async () => {
+        const fixture = await createRuntimeMigrationFixture('runtime-storage-auth-authority-', {
+            adminPassword: 'auth-migrate-password'
+        });
+
+        const result = await migrateLegacyRuntimeStorage(fixture.config, {
+            execute: true,
+            force: true
+        });
+        expect(result.runId).toBeTruthy();
+
+        const verifyAuth = await verifyAuthRuntimeStorageMigration(fixture.config, {});
+        expect(verifyAuth.status).toBe('pass');
+        expect(verifyAuth.password).toMatchObject({
+            required: true,
+            present: true,
+            missing: false
+        });
+        expect(verifyAuth.credentialSecrets.expectedCount).toBeGreaterThan(0);
+        expect(verifyAuth.credentialSecrets.missingAssetIds).toEqual([]);
+        expect(verifyAuth.credentialSecrets.mismatchAssetIds).toEqual([]);
+        expect(verifyAuth.marker).toBeTruthy();
     });
 
 });

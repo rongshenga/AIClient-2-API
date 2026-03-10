@@ -1370,6 +1370,7 @@ export class SqliteRuntimeStorage {
             : 5 * 60 * 1000;
         this.adminSessionTouchTimestamps = new Map();
         this.adminSessionTouchInFlight = new Map();
+        this.legacyAutoImportOnce = config.RUNTIME_STORAGE_AUTO_IMPORT_LEGACY_ONCE !== false;
     }
 
     getInfo() {
@@ -1400,8 +1401,150 @@ ON CONFLICT(meta_key) DO UPDATE SET
     updated_at = excluded.updated_at;
         `);
         this.initialized = true;
+        await this.#seedLegacyFromFilesOnce();
         await this.markInterruptedUsageRefreshTasks();
         return this;
+    }
+
+    async #readJsonFileSafe(filePath, fallback) {
+        try {
+            if (!filePath || !fs.existsSync(filePath)) {
+                return fallback;
+            }
+            const content = await pfs.readFile(filePath, 'utf8');
+            return JSON.parse(content);
+        } catch {
+            return fallback;
+        }
+    }
+
+    async #seedLegacyFromFilesOnce() {
+        if (!this.legacyAutoImportOnce) {
+            return;
+        }
+
+        const seededMetaRow = (await this.client.query(`
+SELECT meta_value
+FROM runtime_storage_meta
+WHERE meta_key = 'legacy_seed_completed'
+LIMIT 1;
+        `))[0];
+        if (seededMetaRow?.meta_value === '1') {
+            return;
+        }
+
+        const domainCounts = (await this.client.query(`
+SELECT
+    (SELECT COUNT(*) FROM provider_registrations) AS provider_count,
+    (SELECT COUNT(*) FROM usage_snapshots WHERE provider_id IS NULL) AS usage_count,
+    (SELECT COUNT(*) FROM admin_sessions) AS session_count,
+    (SELECT COUNT(*) FROM potluck_users) AS potluck_user_count,
+    (SELECT COUNT(*) FROM potluck_api_keys) AS potluck_key_count
+LIMIT 1;
+        `))[0] || {};
+
+        const hasRuntimeData = Number(domainCounts.provider_count || 0) > 0
+            || Number(domainCounts.usage_count || 0) > 0
+            || Number(domainCounts.session_count || 0) > 0
+            || Number(domainCounts.potluck_user_count || 0) > 0
+            || Number(domainCounts.potluck_key_count || 0) > 0;
+
+        let importedProviderCount = 0;
+        let importedUsageProviderCount = 0;
+        let importedSessionCount = 0;
+        let importedPotluckUserCount = 0;
+        let importedPotluckKeyCount = 0;
+
+        if (!hasRuntimeData) {
+            const providerPoolsFilePath = typeof this.config.PROVIDER_POOLS_FILE_PATH === 'string'
+                ? this.config.PROVIDER_POOLS_FILE_PATH
+                : null;
+            if (providerPoolsFilePath) {
+                const providerPools = await this.#readJsonFileSafe(providerPoolsFilePath, {});
+                if (providerPools && typeof providerPools === 'object' && Object.keys(providerPools).length > 0) {
+                    const snapshot = await this.replaceProviderPoolsSnapshot(providerPools, {
+                        sourceKind: 'legacy_seed'
+                    });
+                    importedProviderCount = Object.values(snapshot || {}).reduce((sum, providers) => {
+                        return sum + (Array.isArray(providers) ? providers.length : 0);
+                    }, 0);
+                }
+            }
+
+            const usageCacheFilePath = typeof this.config.USAGE_CACHE_FILE_PATH === 'string'
+                ? this.config.USAGE_CACHE_FILE_PATH
+                : null;
+            if (usageCacheFilePath) {
+                const usageCache = await this.#readJsonFileSafe(usageCacheFilePath, null);
+                const usageProviders = usageCache?.providers && typeof usageCache.providers === 'object'
+                    ? Object.keys(usageCache.providers)
+                    : [];
+                if (usageProviders.length > 0) {
+                    await this.replaceUsageCacheSnapshot(usageCache);
+                    importedUsageProviderCount = usageProviders.length;
+                }
+            }
+
+            const tokenStoreFilePath = typeof this.config.TOKEN_STORE_FILE_PATH === 'string'
+                ? this.config.TOKEN_STORE_FILE_PATH
+                : null;
+            if (tokenStoreFilePath) {
+                const tokenStore = await this.#readJsonFileSafe(tokenStoreFilePath, { tokens: {} });
+                const tokens = tokenStore?.tokens && typeof tokenStore.tokens === 'object'
+                    ? Object.entries(tokenStore.tokens)
+                    : [];
+                for (const [token, tokenInfo] of tokens) {
+                    if (!token || !tokenInfo || typeof tokenInfo !== 'object') {
+                        continue;
+                    }
+                    await this.saveAdminSession(token, tokenInfo);
+                    importedSessionCount += 1;
+                }
+            }
+
+            const potluckDataFilePath = typeof this.config.POTLUCK_USER_DATA_FILE_PATH === 'string'
+                ? this.config.POTLUCK_USER_DATA_FILE_PATH
+                : (typeof this.config.API_POTLUCK_DATA_FILE_PATH === 'string' ? this.config.API_POTLUCK_DATA_FILE_PATH : null);
+            if (potluckDataFilePath) {
+                const potluckUserData = await this.#readJsonFileSafe(potluckDataFilePath, createEmptyPotluckUserData());
+                const potluckUsers = potluckUserData?.users && typeof potluckUserData.users === 'object'
+                    ? Object.keys(potluckUserData.users)
+                    : [];
+                if ((potluckUserData?.config && Object.keys(potluckUserData.config).length > 0) || potluckUsers.length > 0) {
+                    await this.savePotluckUserData(potluckUserData);
+                    importedPotluckUserCount = potluckUsers.length;
+                }
+            }
+
+            const potluckKeysFilePath = typeof this.config.POTLUCK_KEYS_FILE_PATH === 'string'
+                ? this.config.POTLUCK_KEYS_FILE_PATH
+                : (typeof this.config.API_POTLUCK_KEYS_FILE_PATH === 'string' ? this.config.API_POTLUCK_KEYS_FILE_PATH : null);
+            if (potluckKeysFilePath) {
+                const potluckKeys = await this.#readJsonFileSafe(potluckKeysFilePath, createEmptyPotluckKeyStore());
+                const potluckKeyIds = potluckKeys?.keys && typeof potluckKeys.keys === 'object'
+                    ? Object.keys(potluckKeys.keys)
+                    : [];
+                if (potluckKeyIds.length > 0) {
+                    await this.savePotluckKeyStore(potluckKeys);
+                    importedPotluckKeyCount = potluckKeyIds.length;
+                }
+            }
+        }
+
+        const timestamp = nowIso();
+        await this.client.exec(`
+BEGIN IMMEDIATE;
+INSERT INTO runtime_storage_meta (meta_key, meta_value, updated_at)
+VALUES ('legacy_seed_completed', '1', ${sqlValue(timestamp)})
+ON CONFLICT(meta_key) DO UPDATE SET
+    meta_value = excluded.meta_value,
+    updated_at = excluded.updated_at;
+COMMIT;
+        `);
+
+        logger.info(
+            `[RuntimeStorage:db] Legacy one-time seed completed: providers=${importedProviderCount}, usageProviders=${importedUsageProviderCount}, sessions=${importedSessionCount}, potluckUsers=${importedPotluckUserCount}, potluckKeys=${importedPotluckKeyCount}`
+        );
     }
 
     async hasProviderData() {
@@ -1784,6 +1927,117 @@ LIMIT 1;
 	   AND fi.is_primary = 1
 	${whereClause}
 	ORDER BY a.provider_type ASC, a.updated_at ${queryOptions.sort === 'asc' ? 'ASC' : 'DESC'}, a.id ASC${limitClause}${offsetClause};
+        `);
+    }
+
+    async getCredentialSecretBlob(credentialAssetId) {
+        await this.initialize();
+        if (!credentialAssetId) {
+            return null;
+        }
+
+        const row = (await this.client.query(`
+SELECT
+    credential_asset_id,
+    encrypted_payload,
+    payload_version,
+    key_version,
+    checksum,
+    updated_at
+FROM credential_secret_blobs
+WHERE credential_asset_id = ${sqlValue(credentialAssetId)}
+LIMIT 1;
+        `))[0];
+        return row || null;
+    }
+
+    async upsertCredentialSecretBlob(credentialAssetId, payload = null, options = {}) {
+        await this.initialize();
+        if (!credentialAssetId) {
+            return null;
+        }
+
+        const timestamp = nowIso();
+        const payloadText = payload === null || payload === undefined
+            ? null
+            : (typeof payload === 'string' ? payload : JSON.stringify(payload));
+        if (!payloadText) {
+            return null;
+        }
+
+        await this.client.exec(`
+BEGIN IMMEDIATE;
+INSERT INTO credential_secret_blobs (
+    credential_asset_id,
+    encrypted_payload,
+    payload_version,
+    key_version,
+    checksum,
+    updated_at
+) VALUES (
+    ${sqlValue(credentialAssetId)},
+    ${sqlValue(payloadText)},
+    ${sqlValue(options.payloadVersion || 'v1')},
+    ${sqlValue(options.keyVersion || null)},
+    ${sqlValue(options.checksum || null)},
+    ${sqlValue(timestamp)}
+)
+ON CONFLICT(credential_asset_id) DO UPDATE SET
+    encrypted_payload = excluded.encrypted_payload,
+    payload_version = excluded.payload_version,
+    key_version = excluded.key_version,
+    checksum = excluded.checksum,
+    updated_at = excluded.updated_at;
+COMMIT;
+        `);
+
+        return await this.getCredentialSecretBlob(credentialAssetId);
+    }
+
+    async listCredentialExpiryCandidates(providerType = null, options = {}) {
+        await this.initialize();
+
+        const normalizedLimit = normalizePositiveInt(options.limit, 500);
+        const normalizedOffset = Math.max(0, Number.parseInt(options.offset, 10) || 0);
+        const providerIds = Array.isArray(options.providerIds)
+            ? [...new Set(options.providerIds
+                .map((item) => (typeof item === 'string' ? item.trim() : ''))
+                .filter(Boolean))]
+            : [];
+        const providerFilterSql = providerType
+            ? `AND r.provider_type = ${sqlValue(providerType)}`
+            : '';
+        const providerIdFilterSql = providerIds.length > 0
+            ? `AND r.provider_id IN (${providerIds.map((item) => sqlValue(item)).join(', ')})`
+            : '';
+
+        return await this.client.query(`
+SELECT
+    r.provider_id,
+    r.provider_type,
+    r.routing_uuid,
+    b.credential_asset_id,
+    COALESCE(fi.file_path, a.source_path) AS source_path,
+    s.encrypted_payload,
+    s.updated_at AS secret_updated_at,
+    a.updated_at AS asset_updated_at
+FROM provider_registrations r
+INNER JOIN credential_bindings b
+    ON b.binding_target_id = r.provider_id
+   AND b.binding_type = 'provider_registration'
+   AND COALESCE(b.binding_status, 'active') = 'active'
+INNER JOIN credential_assets a
+    ON a.id = b.credential_asset_id
+LEFT JOIN credential_file_index fi
+    ON fi.credential_asset_id = a.id
+   AND fi.is_primary = 1
+LEFT JOIN credential_secret_blobs s
+    ON s.credential_asset_id = a.id
+WHERE 1 = 1
+  ${providerFilterSql}
+  ${providerIdFilterSql}
+ORDER BY r.provider_type ASC, r.provider_id ASC
+LIMIT ${normalizedLimit} OFFSET ${normalizedOffset};
         `);
     }
 
@@ -2829,6 +3083,51 @@ ORDER BY i.instance_order ASC, b.breakdown_order ASC, bo.bonus_order ASC, bo.id 
         }, pageMeta);
     }
 
+    async getAdminPasswordHash() {
+        await this.initialize();
+
+        const row = (await this.client.query(`
+SELECT value_json
+FROM runtime_settings
+WHERE scope = 'auth_password'
+  AND key = 'admin'
+LIMIT 1;
+        `))[0];
+        if (!row?.value_json) {
+            return null;
+        }
+        return parseJsonField(row.value_json, null);
+    }
+
+    async saveAdminPasswordHash(passwordRecord = {}) {
+        await this.initialize();
+
+        const timestamp = nowIso();
+        const normalizedRecord = passwordRecord && typeof passwordRecord === 'object'
+            ? {
+                ...passwordRecord,
+                updatedAt: passwordRecord.updatedAt || timestamp
+            }
+            : { updatedAt: timestamp };
+
+        await this.client.exec(`
+BEGIN IMMEDIATE;
+INSERT INTO runtime_settings (scope, key, value_json, updated_at)
+VALUES (
+    'auth_password',
+    'admin',
+    ${sqlValue(JSON.stringify(normalizedRecord))},
+    ${sqlValue(timestamp)}
+)
+ON CONFLICT(scope, key) DO UPDATE SET
+    value_json = excluded.value_json,
+    updated_at = excluded.updated_at;
+COMMIT;
+        `);
+
+        return normalizedRecord;
+    }
+
     #scheduleAdminSessionTouch(sessionId, lastSeenAt = null) {
         if (!sessionId || this.adminSessionTouchIntervalMs <= 0) {
             return;
@@ -2905,8 +3204,16 @@ LIMIT 1;
         await this.initialize();
 
         const timestamp = nowIso();
-        const expiresAt = normalizeIsoOrNull(tokenInfo.expiryTime) || normalizeIsoOrNull(new Date(Number(tokenInfo.expiryTime || Date.now())).toISOString()) || timestamp;
-        const createdAt = normalizeIsoOrNull(tokenInfo.loginTime) || normalizeIsoOrNull(new Date(Number(tokenInfo.loginTime || Date.now())).toISOString()) || timestamp;
+        const expiryNumeric = Number(tokenInfo.expiryTime);
+        const loginNumeric = Number(tokenInfo.loginTime);
+        const fallbackExpiryIso = Number.isFinite(expiryNumeric) && expiryNumeric > 0
+            ? normalizeIsoOrNull(new Date(expiryNumeric).toISOString())
+            : null;
+        const fallbackLoginIso = Number.isFinite(loginNumeric) && loginNumeric > 0
+            ? normalizeIsoOrNull(new Date(loginNumeric).toISOString())
+            : null;
+        const expiresAt = normalizeIsoOrNull(tokenInfo.expiryTime) || fallbackExpiryIso || timestamp;
+        const createdAt = normalizeIsoOrNull(tokenInfo.loginTime) || fallbackLoginIso || timestamp;
         const tokenHash = hashValue(token);
 
         await this.client.exec(`
@@ -3758,6 +4065,25 @@ function buildSqliteOperationDetails(instance, operation, args = []) {
             replayBoundary: 'credential_asset_list'
         };
     }
+    case 'getCredentialSecretBlob':
+        return {
+            credentialAssetId: args[0] || null,
+            replaySafe: true,
+            replayBoundary: 'credential_secret_blob_read'
+        };
+    case 'upsertCredentialSecretBlob':
+        return {
+            credentialAssetId: args[0] || null,
+            replaySafe: true,
+            replayBoundary: 'credential_secret_blob_upsert',
+            idempotencyKey: buildSqliteStorageOperationKey('credential_secret_blob', [args[0] || 'missing'])
+        };
+    case 'listCredentialExpiryCandidates':
+        return {
+            providerType: args[0] || null,
+            replaySafe: true,
+            replayBoundary: 'credential_expiry_candidates_list'
+        };
     case 'linkCredentialFiles': {
         const credPaths = normalizeOperationPathList(args[0]);
         const options = args[1] || {};
@@ -3848,6 +4174,18 @@ function buildSqliteOperationDetails(instance, operation, args = []) {
             replayBoundary: 'admin_session_upsert',
             idempotencyKey: buildSqliteStorageOperationKey('admin_session', [args[0] || 'missing'])
         };
+    case 'saveAdminPasswordHash':
+        return {
+            replaySafe: true,
+            replayBoundary: 'admin_password_upsert',
+            idempotencyKey: 'admin_password_hash_upsert'
+        };
+    case 'getAdminPasswordHash':
+        return {
+            replaySafe: true,
+            replayBoundary: 'admin_password_read',
+            idempotencyKey: 'admin_password_hash_read'
+        };
     case 'deleteAdminSession':
         return {
             sessionKey: buildHashedTokenKey(args[0]),
@@ -3893,6 +4231,9 @@ const SQLITE_STORAGE_OPERATION_META = {
     replaceProviderPoolsSnapshot: { phase: 'write', domain: 'provider' },
     findCredentialAsset: { phase: 'read', domain: 'provider' },
     listCredentialAssets: { phase: 'read', domain: 'provider' },
+    getCredentialSecretBlob: { phase: 'read', domain: 'provider' },
+    upsertCredentialSecretBlob: { phase: 'write', domain: 'provider' },
+    listCredentialExpiryCandidates: { phase: 'read', domain: 'provider' },
     linkCredentialFiles: { phase: 'write', domain: 'provider' },
     flushProviderRuntimeState: { phase: 'flush', domain: 'provider' },
     updateProviderRoutingUuid: { phase: 'flush', domain: 'provider' },
@@ -3904,6 +4245,8 @@ const SQLITE_STORAGE_OPERATION_META = {
     saveUsageRefreshTask: { phase: 'write', domain: 'usage' },
     loadUsageRefreshTask: { phase: 'read', domain: 'usage' },
     markInterruptedUsageRefreshTasks: { phase: 'write', domain: 'usage' },
+    getAdminPasswordHash: { phase: 'read', domain: 'auth' },
+    saveAdminPasswordHash: { phase: 'write', domain: 'auth' },
     getAdminSession: { phase: 'read', domain: 'session' },
     saveAdminSession: { phase: 'write', domain: 'session' },
     deleteAdminSession: { phase: 'write', domain: 'session' },

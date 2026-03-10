@@ -24,14 +24,24 @@ describe('Runtime storage registry fallback', () => {
             initialize: jest.fn(),
             close: jest.fn(),
             getInfo: jest.fn(() => ({ backend: 'db' })),
-            replaceProviderPoolsSnapshot: jest.fn(async (providerPools = {}) => providerPools)
+            replaceProviderPoolsSnapshot: jest.fn(async (providerPools = {}) => providerPools),
+            getCredentialSecretBlob: jest.fn(async () => null),
+            upsertCredentialSecretBlob: jest.fn(async (_id, payload = null) => payload),
+            listCredentialExpiryCandidates: jest.fn(async () => []),
+            getAdminPasswordHash: jest.fn(async () => null),
+            saveAdminPasswordHash: jest.fn(async (record = {}) => record)
         };
         fallbackStorage = {
             initialize: jest.fn(async () => fallbackStorage),
             close: jest.fn(),
             getInfo: jest.fn(() => ({ backend: 'file' })),
             loadProviderPoolsSnapshot: jest.fn(async () => ({})),
-            replaceProviderPoolsSnapshot: jest.fn(async (providerPools = {}) => providerPools)
+            replaceProviderPoolsSnapshot: jest.fn(async (providerPools = {}) => providerPools),
+            getCredentialSecretBlob: jest.fn(async () => null),
+            upsertCredentialSecretBlob: jest.fn(async (_id, payload = null) => payload),
+            listCredentialExpiryCandidates: jest.fn(async () => []),
+            getAdminPasswordHash: jest.fn(async () => null),
+            saveAdminPasswordHash: jest.fn(async (record = {}) => record)
         };
         mockCreateRuntimeStorage = jest.fn(() => preferredStorage);
         MockFileRuntimeStorage = jest.fn(() => fallbackStorage);
@@ -212,5 +222,51 @@ test('should surface fallback retry failure when file fallback write also fails'
     });
     expect(config.RUNTIME_STORAGE_BACKEND).toBe('file');
     expect(config.RUNTIME_STORAGE_DUAL_WRITE).toBe(false);
+});
+
+test('should proxy auth password hash operations to active runtime storage', async () => {
+    const config = {
+        RUNTIME_STORAGE_BACKEND: 'db',
+        RUNTIME_STORAGE_FALLBACK_TO_FILE: true
+    };
+    const storage = await initializeRuntimeStorage(config);
+    preferredStorage.getAdminPasswordHash.mockResolvedValueOnce({
+        version: 1,
+        algorithm: 'sha256-salt'
+    });
+
+    await expect(storage.getAdminPasswordHash()).resolves.toMatchObject({
+        version: 1,
+        algorithm: 'sha256-salt'
+    });
+    await expect(storage.saveAdminPasswordHash({ version: 1 })).resolves.toMatchObject({ version: 1 });
+    expect(preferredStorage.getAdminPasswordHash).toHaveBeenCalledTimes(1);
+    expect(preferredStorage.saveAdminPasswordHash).toHaveBeenCalledWith({ version: 1 });
+});
+
+test('should proxy credential secret and expiry candidate operations to active runtime storage', async () => {
+    const config = {
+        RUNTIME_STORAGE_BACKEND: 'db',
+        RUNTIME_STORAGE_FALLBACK_TO_FILE: true
+    };
+    const storage = await initializeRuntimeStorage(config);
+    preferredStorage.getCredentialSecretBlob.mockResolvedValueOnce({
+        credential_asset_id: 'asset-1'
+    });
+    preferredStorage.listCredentialExpiryCandidates.mockResolvedValueOnce([
+        { provider_id: 'prov-1' }
+    ]);
+
+    await expect(storage.getCredentialSecretBlob('asset-1')).resolves.toMatchObject({
+        credential_asset_id: 'asset-1'
+    });
+    await expect(storage.upsertCredentialSecretBlob('asset-1', { foo: 'bar' })).resolves.toMatchObject({ foo: 'bar' });
+    await expect(storage.listCredentialExpiryCandidates('gemini-cli-oauth')).resolves.toEqual([
+        { provider_id: 'prov-1' }
+    ]);
+
+    expect(preferredStorage.getCredentialSecretBlob).toHaveBeenCalledWith('asset-1');
+    expect(preferredStorage.upsertCredentialSecretBlob).toHaveBeenCalledWith('asset-1', { foo: 'bar' });
+    expect(preferredStorage.listCredentialExpiryCandidates).toHaveBeenCalledWith('gemini-cli-oauth');
 });
 });

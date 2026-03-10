@@ -9,6 +9,7 @@ import logger from '../../utils/logger.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, watch } from 'fs';
 import path from 'path';
 import { getRuntimeStorage } from '../../storage/runtime-storage-registry.js';
+import { CONFIG } from '../../core/config-manager.js';
 
 // 配置文件路径
 const USER_DATA_FILE = path.join(process.cwd(), 'configs', 'api-potluck-data.json');
@@ -63,6 +64,17 @@ function getPotluckUserStorage() {
     return runtimeStorage;
 }
 
+function isDbOnlyAuthMode() {
+    const mode = String(CONFIG?.AUTH_STORAGE_MODE || '').toLowerCase();
+    if (mode === 'db_only') {
+        return true;
+    }
+
+    const runtimeStorage = getRuntimeStorage();
+    const backend = String(runtimeStorage?.getInfo?.()?.backend || runtimeStorage?.kind || '').toLowerCase();
+    return backend === 'db' || backend === 'dual-write';
+}
+
 function ensurePersistTimer() {
     if (!persistTimer) {
         persistTimer = setInterval(persistIfDirty, currentPersistInterval);
@@ -106,17 +118,17 @@ export async function initializeUserDataManager(forceReload = false) {
             userDataStore = normalizeUserDataStore(await runtimeStorage.loadPotluckUserData());
         } catch (error) {
             logger.error('[API Potluck UserData] Failed to load user data from runtime storage:', error.message);
-            userDataStore = loadUserDataFromFileSync();
+            userDataStore = isDbOnlyAuthMode() ? createEmptyUserDataStore() : loadUserDataFromFileSync();
         }
     } else {
-        userDataStore = loadUserDataFromFileSync();
+        userDataStore = isDbOnlyAuthMode() ? createEmptyUserDataStore() : loadUserDataFromFileSync();
     }
 
     const config = userDataStore.config || {};
     currentPersistInterval = config.persistInterval ?? DEFAULT_CONFIG.persistInterval;
     ensurePersistTimer();
 
-    if (runtimeStorage && runtimeStorage.kind !== 'file') {
+    if (isDbOnlyAuthMode() || (runtimeStorage && runtimeStorage.kind !== 'file')) {
         stopFileWatcher();
     } else {
         startFileWatcher();
@@ -280,7 +292,7 @@ function ensureLoaded() {
         return;
     }
 
-    userDataStore = loadUserDataFromFileSync();
+    userDataStore = isDbOnlyAuthMode() ? createEmptyUserDataStore() : loadUserDataFromFileSync();
     const config = userDataStore.config || {};
     currentPersistInterval = config.persistInterval ?? DEFAULT_CONFIG.persistInterval;
     ensurePersistTimer();
@@ -313,6 +325,9 @@ async function persistIfDirty() {
         if (runtimeStorage) {
             await runtimeStorage.savePotluckUserData(normalizeUserDataStore(userDataStore));
         } else {
+            if (isDbOnlyAuthMode()) {
+                throw new Error('Potluck runtime storage is unavailable in db_only mode');
+            }
             const dir = path.dirname(USER_DATA_FILE);
             if (!existsSync(dir)) {
                 await fs.mkdir(dir, { recursive: true });

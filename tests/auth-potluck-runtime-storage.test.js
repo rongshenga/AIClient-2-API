@@ -190,4 +190,40 @@ describe('Auth and potluck runtime storage integration', () => {
             enabled: true
         });
     });
+
+    test('should not write potluck authority files in db_only mode', async () => {
+        const tempDir = await createTempDir('potluck-db-only-mode-');
+        const dbPath = path.join(tempDir, 'runtime.sqlite');
+        const potluckDataFilePath = path.join(tempDir, 'api-potluck-data.json');
+        const potluckKeysFilePath = path.join(tempDir, 'api-potluck-keys.json');
+        const config = {
+            RUNTIME_STORAGE_BACKEND: 'db',
+            RUNTIME_STORAGE_DB_PATH: dbPath,
+            AUTH_STORAGE_MODE: 'db_only',
+            PROVIDER_POOLS_FILE_PATH: path.join(tempDir, 'provider_pools.json'),
+            API_POTLUCK_DATA_FILE_PATH: potluckDataFilePath,
+            API_POTLUCK_KEYS_FILE_PATH: potluckKeysFilePath
+        };
+
+        await initializeRuntimeStorage(config);
+        await initializeUserDataManager(true);
+        setConfigGetter(getConfig);
+        await initializeKeyManager(true);
+
+        await updateConfig({
+            defaultDailyLimit: 888,
+            bonusPerCredential: 111,
+            bonusValidityDays: 13,
+            persistInterval: 1000
+        });
+        const keyData = await createKey('No File Key', 777);
+        await addUserCredential(keyData.id, {
+            path: 'configs/kiro/db-only.json',
+            provider: 'claude-kiro-oauth',
+            authMethod: 'builder-id'
+        });
+
+        await expect(fs.access(potluckDataFilePath)).rejects.toBeDefined();
+        await expect(fs.access(potluckKeysFilePath)).rejects.toBeDefined();
+    });
 });

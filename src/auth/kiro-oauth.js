@@ -59,6 +59,10 @@ const activeKiroServers = new Map();
  */
 const activeKiroPollingTasks = new Map();
 
+function isBridgeAuthStorageMode() {
+    return String(CONFIG?.AUTH_STORAGE_MODE || '').toLowerCase() === 'bridge';
+}
+
 /**
  * 创建带代理支持的 fetch 请求
  * 使用 axios 替代原生 fetch，以正确支持代理配置
@@ -740,6 +744,10 @@ export async function checkKiroCredentialsDuplicate(refreshToken, provider = 'cl
             logger.warn(`${KIRO_OAUTH_CONFIG.logPrefix} Runtime credential inventory lookup failed:`, error.message);
         }
     }
+
+    if (!isBridgeAuthStorageMode()) {
+        return { isDuplicate: false };
+    }
     
     try {
         // 检查 configs/kiro 目录是否存在
@@ -1166,4 +1174,3 @@ export async function importAwsCredentials(credentials, skipDuplicateCheck = fal
         };
     }
 }
-

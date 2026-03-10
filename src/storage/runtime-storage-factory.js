@@ -4,12 +4,12 @@ import { SqliteRuntimeStorage } from './backends/sqlite-runtime-storage.js';
 import { wrapRuntimeStorage } from './runtime-storage-facade.js';
 
 export function normalizeRuntimeStorageBackend(value) {
-    return String(value || 'file').toLowerCase() === 'db' ? 'db' : 'file';
+    return String(value || 'db').toLowerCase() === 'db' ? 'db' : 'file';
 }
 
 export function getRuntimeStorageDefaults() {
     return {
-        RUNTIME_STORAGE_BACKEND: 'file',
+        RUNTIME_STORAGE_BACKEND: 'db',
         RUNTIME_STORAGE_DUAL_WRITE: false,
         RUNTIME_STORAGE_DB_PATH: 'configs/runtime/runtime-storage.sqlite',
         RUNTIME_STORAGE_FALLBACK_TO_FILE: true,

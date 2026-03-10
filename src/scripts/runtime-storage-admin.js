@@ -2,12 +2,14 @@
 
 import path from 'path';
 import {
+    detectLegacyAuthAuthority,
     exportLegacyRuntimeStorage,
     getRuntimeStorageMigrationRun,
     listRuntimeStorageMigrationRuns,
     migrateLegacyRuntimeStorage,
     readAdminConfig,
     rollbackRuntimeStorageMigration,
+    verifyAuthRuntimeStorageMigration,
     verifyRuntimeStorageMigration
 } from '../storage/runtime-storage-migration-service.js';
 import { runSqliteCliRuntimeStorageBenchmark } from '../storage/runtime-storage-benchmark.js';
@@ -51,8 +53,10 @@ Usage:
 Commands:
   migrate         Import legacy files into sqlite runtime storage
   verify          Validate sqlite runtime storage against legacy files
+  verify-auth     Validate auth authority migration state (pwd + credential secrets)
   export-legacy   Export compatibility JSON from sqlite runtime storage
   rollback        Restore sqlite/files from migration artifacts
+  rollback-auth   Restore auth-related legacy files from migration artifacts
   list-runs       List migration runs from sqlite runtime storage
   show-run        Show one migration run with items
   benchmark       Measure sqlite3 CLI startup and runtime flush cost
@@ -61,6 +65,7 @@ Common Options:
   --config <path>                 Config file path, default: configs/config.json
   --provider-pools-file <path>    Override provider_pools.json path
   --token-store-file <path>       Override token-store.json path
+  --password-file <path>          Override pwd file path
   --runtime-storage-db-path <path> Override sqlite db path
   --artifact-root <path>          Override migration artifact root
 
@@ -134,6 +139,9 @@ function buildOverrides(options) {
     if (options['token-store-file']) {
         overrides.TOKEN_STORE_FILE_PATH = path.resolve(process.cwd(), options['token-store-file']);
     }
+    if (options['password-file']) {
+        overrides.PASSWORD_FILE_PATH = path.resolve(process.cwd(), options['password-file']);
+    }
     if (options['runtime-storage-db-path']) {
         overrides.RUNTIME_STORAGE_DB_PATH = path.resolve(process.cwd(), options['runtime-storage-db-path']);
     }
@@ -198,6 +206,16 @@ async function main() {
         return;
     }
 
+    if (command === 'verify-auth') {
+        const detection = await detectLegacyAuthAuthority(config, {});
+        const result = await verifyAuthRuntimeStorageMigration(config, {});
+        console.log(JSON.stringify({
+            detection,
+            verification: result
+        }, null, 2));
+        return;
+    }
+
     if (command === 'export-legacy') {
         const result = await exportLegacyRuntimeStorage(config, {
             domains: parseDomains(options.domains, ['provider-pools']),
@@ -225,6 +243,28 @@ async function main() {
             restoreLegacyFiles: options['skip-legacy-files'] !== true
         });
         console.log(JSON.stringify(result, null, 2));
+        return;
+    }
+
+    if (command === 'rollback-auth') {
+        if (!options['run-id']) {
+            throw new Error('rollback-auth requires --run-id');
+        }
+
+        const result = await rollbackRuntimeStorageMigration(config, {
+            runId: options['run-id'],
+            restoreLegacyFiles: true
+        });
+        console.log(JSON.stringify({
+            runId: result.runId,
+            rollbackNotePath: result.rollbackNotePath,
+            restoredAuthFiles: (result.restoredFiles || []).filter((filePath) => {
+                return filePath.endsWith('/pwd')
+                    || filePath.endsWith('\\pwd')
+                    || filePath.endsWith('/token-store.json')
+                    || filePath.endsWith('\\token-store.json');
+            })
+        }, null, 2));
         return;
     }
 

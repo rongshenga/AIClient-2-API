@@ -18,10 +18,13 @@ import { PROVIDER_MAPPINGS, isValidOAuthCredentials } from '../utils/provider-ut
 const DEFAULT_PROVIDER_POOLS_PATH = path.join(process.cwd(), 'configs', 'provider_pools.json');
 const DEFAULT_USAGE_CACHE_PATH = path.join(process.cwd(), 'configs', 'usage-cache.json');
 const DEFAULT_TOKEN_STORE_PATH = path.join(process.cwd(), 'configs', 'token-store.json');
+const DEFAULT_PASSWORD_FILE_PATH = path.join(process.cwd(), 'configs', 'pwd');
 const DEFAULT_API_POTLUCK_DATA_PATH = path.join(process.cwd(), 'configs', 'api-potluck-data.json');
 const DEFAULT_API_POTLUCK_KEYS_PATH = path.join(process.cwd(), 'configs', 'api-potluck-keys.json');
 const DEFAULT_ARTIFACT_ROOT = path.join(process.cwd(), 'configs', 'runtime', 'migrations');
 const PROVIDER_CREDENTIAL_PATH_SUFFIXES = ['_FILE_PATH', '_CREDS_FILE_PATH', '_TOKEN_FILE_PATH'];
+const AUTH_MIGRATION_META_SCOPE = 'auth_migration';
+const AUTH_MIGRATION_META_KEY = 'auth_authority_migrated_v1';
 
 function nowIso() {
     return new Date().toISOString();
@@ -70,6 +73,31 @@ function parseJsonSafe(value, fallback = null) {
     } catch (error) {
         return fallback;
     }
+}
+
+async function readTextFile(filePath, fallback = '') {
+    if (!filePath) {
+        return fallback;
+    }
+
+    try {
+        return await pfs.readFile(filePath, 'utf8');
+    } catch {
+        return fallback;
+    }
+}
+
+function createPasswordHashRecord(password, timestamp = nowIso()) {
+    const normalizedPassword = String(password || '').trim();
+    const salt = hashValue(`${timestamp}:${randomUUID()}`).slice(0, 32);
+    const hash = createHash('sha256').update(`${salt}:${normalizedPassword}`).digest('hex');
+    return {
+        version: 1,
+        algorithm: 'sha256-salt',
+        salt,
+        hash,
+        updatedAt: timestamp
+    };
 }
 
 function normalizeTimestamp(value, fallback = null) {
@@ -432,6 +460,13 @@ function resolveRuntimeStoragePaths(config = {}, options = {}) {
     const tokenStoreFilePath = resolvePathMaybeAbsolute(
         options.tokenStoreFilePath || config.TOKEN_STORE_FILE_PATH || path.join(legacyBaseDir, 'token-store.json') || DEFAULT_TOKEN_STORE_PATH
     );
+    const passwordFilePath = resolvePathMaybeAbsolute(
+        options.passwordFilePath
+        || config.PASSWORD_FILE_PATH
+        || config.PWD_FILE_PATH
+        || path.join(legacyBaseDir, 'pwd')
+        || DEFAULT_PASSWORD_FILE_PATH
+    );
     const apiPotluckDataFilePath = resolvePathMaybeAbsolute(
         options.apiPotluckDataFilePath
         || options.potluckUserDataFilePath
@@ -456,6 +491,7 @@ function resolveRuntimeStoragePaths(config = {}, options = {}) {
         dbPath,
         usageCacheFilePath,
         tokenStoreFilePath,
+        passwordFilePath,
         apiPotluckDataFilePath,
         apiPotluckKeysFilePath,
         artifactRoot,
@@ -477,6 +513,7 @@ async function createSqliteStorage(config = {}, options = {}) {
         POTLUCK_KEYS_FILE_PATH: resolvedPaths.apiPotluckKeysFilePath,
         API_POTLUCK_DATA_FILE_PATH: resolvedPaths.apiPotluckDataFilePath,
         API_POTLUCK_KEYS_FILE_PATH: resolvedPaths.apiPotluckKeysFilePath,
+        RUNTIME_STORAGE_AUTO_IMPORT_LEGACY_ONCE: false,
         RUNTIME_STORAGE_SQLITE_BINARY: resolvedPaths.sqliteBinary,
         RUNTIME_STORAGE_DB_BUSY_TIMEOUT_MS: resolvedPaths.dbBusyTimeoutMs
     });
@@ -492,6 +529,7 @@ async function loadLegacySourceBundle(config = {}, options = {}) {
     const providerPools = await readJsonFile(resolvedPaths.providerPoolsFilePath, {});
     const usageCache = normalizeUsageCache(await readJsonFile(resolvedPaths.usageCacheFilePath, null));
     const tokenStore = normalizeTokenStore(await readJsonFile(resolvedPaths.tokenStoreFilePath, null));
+    const adminPassword = String(await readTextFile(resolvedPaths.passwordFilePath, '') || '').trim();
     const apiPotluckData = normalizeApiPotluckData(await readJsonFile(resolvedPaths.apiPotluckDataFilePath, null));
     const apiPotluckKeys = normalizeApiPotluckKeys(await readJsonFile(resolvedPaths.apiPotluckKeysFilePath, null));
 
@@ -500,6 +538,7 @@ async function loadLegacySourceBundle(config = {}, options = {}) {
         providerPools,
         usageCache,
         tokenStore,
+        adminPassword,
         apiPotluckData,
         apiPotluckKeys
     };
@@ -1744,6 +1783,156 @@ ON CONFLICT(id) DO UPDATE SET
     await client.exec(statements.join('\n'));
 }
 
+async function readCredentialSecretPayload(filePath) {
+    const absolutePath = resolvePathMaybeAbsolute(filePath);
+    if (!absolutePath || !fs.existsSync(absolutePath)) {
+        return null;
+    }
+
+    try {
+        const content = await pfs.readFile(absolutePath, 'utf8');
+        const parsed = parseJsonSafe(content, null);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            return null;
+        }
+        return parsed;
+    } catch {
+        return null;
+    }
+}
+
+async function importAuthAuthority(storage, sourceBundle, credentialState, timestamp) {
+    const normalizedAdminPassword = String(sourceBundle?.adminPassword || '').trim();
+    let adminPasswordMigrated = false;
+    let credentialSecretBlobCount = 0;
+    let credentialSecretBlobMissing = 0;
+
+    if (normalizedAdminPassword) {
+        await storage.saveAdminPasswordHash(createPasswordHashRecord(normalizedAdminPassword, timestamp));
+        adminPasswordMigrated = true;
+    }
+
+    for (const asset of credentialState?.assets || []) {
+        if (!asset?.id || !asset?.sourcePath) {
+            credentialSecretBlobMissing += 1;
+            continue;
+        }
+
+        const payload = await readCredentialSecretPayload(asset.sourcePath);
+        if (!payload) {
+            credentialSecretBlobMissing += 1;
+            continue;
+        }
+
+        await storage.upsertCredentialSecretBlob(asset.id, payload, {
+            payloadVersion: 'legacy-json-v1',
+            keyVersion: 'legacy-file',
+            checksum: hashValue(stableStringify(payload))
+        });
+        credentialSecretBlobCount += 1;
+    }
+
+    await storage.client.exec(`
+INSERT INTO runtime_settings (scope, key, value_json, updated_at)
+VALUES (
+    ${sqlValue(AUTH_MIGRATION_META_SCOPE)},
+    ${sqlValue(AUTH_MIGRATION_META_KEY)},
+    ${sqlValue(JSON.stringify({
+        adminPasswordMigrated,
+        credentialSecretBlobCount,
+        credentialSecretBlobMissing,
+        migratedAt: timestamp
+    }))},
+    ${sqlValue(timestamp)}
+)
+ON CONFLICT(scope, key) DO UPDATE SET
+    value_json = excluded.value_json,
+    updated_at = excluded.updated_at;
+    `);
+
+    return {
+        adminPasswordMigrated,
+        credentialSecretBlobCount,
+        credentialSecretBlobMissing
+    };
+}
+
+async function queryCredentialAssetsMissingSecretBlob(client) {
+    return await client.query(`
+SELECT
+    a.id AS credential_asset_id,
+    COALESCE(fi.file_path, a.source_path) AS source_path
+FROM credential_assets a
+LEFT JOIN credential_secret_blobs s
+    ON s.credential_asset_id = a.id
+LEFT JOIN credential_file_index fi
+    ON fi.credential_asset_id = a.id
+   AND fi.is_primary = 1
+WHERE s.credential_asset_id IS NULL
+  AND COALESCE(fi.file_path, a.source_path) IS NOT NULL
+ORDER BY a.id ASC;
+    `);
+}
+
+async function importAuthAuthorityFromDatabase(storage, adminPassword = '', timestamp = nowIso()) {
+    const normalizedAdminPassword = String(adminPassword || '').trim();
+    let adminPasswordMigrated = false;
+    let credentialSecretBlobCount = 0;
+    let credentialSecretBlobMissing = 0;
+    const rows = await queryCredentialAssetsMissingSecretBlob(storage.client);
+
+    if (normalizedAdminPassword) {
+        await storage.saveAdminPasswordHash(createPasswordHashRecord(normalizedAdminPassword, timestamp));
+        adminPasswordMigrated = true;
+    }
+
+    for (const row of rows) {
+        const credentialAssetId = row.credential_asset_id || null;
+        const sourcePath = row.source_path || null;
+        if (!credentialAssetId || !sourcePath) {
+            credentialSecretBlobMissing += 1;
+            continue;
+        }
+
+        const payload = await readCredentialSecretPayload(sourcePath);
+        if (!payload) {
+            credentialSecretBlobMissing += 1;
+            continue;
+        }
+
+        await storage.upsertCredentialSecretBlob(credentialAssetId, payload, {
+            payloadVersion: 'legacy-json-v1',
+            keyVersion: 'legacy-file',
+            checksum: hashValue(stableStringify(payload))
+        });
+        credentialSecretBlobCount += 1;
+    }
+
+    await storage.client.exec(`
+INSERT INTO runtime_settings (scope, key, value_json, updated_at)
+VALUES (
+    ${sqlValue(AUTH_MIGRATION_META_SCOPE)},
+    ${sqlValue(AUTH_MIGRATION_META_KEY)},
+    ${sqlValue(JSON.stringify({
+        adminPasswordMigrated,
+        credentialSecretBlobCount,
+        credentialSecretBlobMissing,
+        migratedAt: timestamp
+    }))},
+    ${sqlValue(timestamp)}
+)
+ON CONFLICT(scope, key) DO UPDATE SET
+    value_json = excluded.value_json,
+    updated_at = excluded.updated_at;
+    `);
+
+    return {
+        adminPasswordMigrated,
+        credentialSecretBlobCount,
+        credentialSecretBlobMissing
+    };
+}
+
 function buildPotluckUserRow(userIdentifier, userData, timestamp) {
     const userId = createStableId('potluck_user', [userIdentifier]);
     return {
@@ -2869,6 +3058,203 @@ function buildDiffMarkdown(report) {
     return `${lines.join('\n')}\n`;
 }
 
+async function queryAuthMigrationMarker(client) {
+    const row = (await client.query(`
+SELECT value_json
+FROM runtime_settings
+WHERE scope = ${sqlValue(AUTH_MIGRATION_META_SCOPE)}
+  AND key = ${sqlValue(AUTH_MIGRATION_META_KEY)}
+LIMIT 1;
+    `))[0];
+    return parseJsonSafe(row?.value_json, null);
+}
+
+async function buildExpectedCredentialSecretSet(credentialState = {}) {
+    const expectedByAssetId = new Map();
+
+    for (const asset of credentialState.assets || []) {
+        if (!asset?.id || !asset.sourcePath) {
+            continue;
+        }
+
+        const payload = await readCredentialSecretPayload(asset.sourcePath);
+        if (!payload) {
+            continue;
+        }
+
+        expectedByAssetId.set(asset.id, {
+            checksum: hashValue(stableStringify(payload))
+        });
+    }
+
+    return expectedByAssetId;
+}
+
+export async function verifyAuthRuntimeStorageMigration(config = {}, options = {}) {
+    const sourceBundle = options.sourceBundle || await loadLegacySourceBundle(config, options);
+    const credentialState = options.credentialState || await collectExpectedCredentialState(
+        sourceBundle.providerPools,
+        sourceBundle.apiPotluckData
+    );
+    const expectedSecretsByAssetId = await buildExpectedCredentialSecretSet(credentialState);
+    const expectedSecretAssetIds = [...expectedSecretsByAssetId.keys()];
+    const { storage, resolvedPaths } = await createSqliteStorage(config, options);
+    const passwordRecord = await storage.getAdminPasswordHash();
+    const expectedPassword = String(sourceBundle.adminPassword || '').trim();
+    const authMigrationMarker = await queryAuthMigrationMarker(storage.client);
+
+    let actualSecretRows = [];
+    if (expectedSecretAssetIds.length > 0) {
+        const inClause = expectedSecretAssetIds.map((item) => sqlValue(item)).join(', ');
+        actualSecretRows = await storage.client.query(`
+SELECT credential_asset_id, checksum
+FROM credential_secret_blobs
+WHERE credential_asset_id IN (${inClause})
+ORDER BY credential_asset_id ASC;
+        `);
+    }
+    const actualSecretByAssetId = new Map(actualSecretRows.map((row) => [row.credential_asset_id, row]));
+
+    const missingSecretAssetIds = expectedSecretAssetIds.filter((assetId) => !actualSecretByAssetId.has(assetId));
+    const mismatchSecretAssetIds = expectedSecretAssetIds.filter((assetId) => {
+        const expected = expectedSecretsByAssetId.get(assetId);
+        const actual = actualSecretByAssetId.get(assetId);
+        if (!expected || !actual) {
+            return false;
+        }
+        return Boolean(expected.checksum) && Boolean(actual.checksum) && expected.checksum !== actual.checksum;
+    });
+    const passwordRequired = Boolean(expectedPassword);
+    const passwordPresent = Boolean(passwordRecord && typeof passwordRecord === 'object'
+        && typeof passwordRecord.salt === 'string'
+        && typeof passwordRecord.hash === 'string');
+    const passwordMissing = passwordRequired && !passwordPresent;
+
+    return {
+        status: (!passwordMissing && missingSecretAssetIds.length === 0 && mismatchSecretAssetIds.length === 0) ? 'pass' : 'fail',
+        password: {
+            required: passwordRequired,
+            present: passwordPresent,
+            missing: passwordMissing
+        },
+        credentialSecrets: {
+            expectedCount: expectedSecretAssetIds.length,
+            actualCount: actualSecretRows.length,
+            missingAssetIds: missingSecretAssetIds,
+            mismatchAssetIds: mismatchSecretAssetIds
+        },
+        marker: authMigrationMarker,
+        resolvedPaths: {
+            passwordFilePath: resolvedPaths.passwordFilePath
+        }
+    };
+}
+
+export async function detectLegacyAuthAuthority(config = {}, options = {}) {
+    const { storage, resolvedPaths } = await createSqliteStorage(config, options);
+    const marker = await queryAuthMigrationMarker(storage.client);
+    if (marker) {
+        return {
+            requiresMigration: false,
+            sourceIndicators: {
+                skippedByMarker: true
+            },
+            marker,
+            resolvedPaths
+        };
+    }
+
+    const adminPassword = String(await readTextFile(resolvedPaths.passwordFilePath, '') || '').trim();
+    const tokenStore = normalizeTokenStore(await readJsonFile(resolvedPaths.tokenStoreFilePath, null));
+    const sourceTokenCount = Object.keys(tokenStore?.tokens || {}).length;
+    const missingSecretRows = await queryCredentialAssetsMissingSecretBlob(storage.client);
+    const sourceSecretCount = missingSecretRows.length;
+    const passwordRequired = Boolean(adminPassword);
+    const sourceIndicators = {
+        passwordFilePresent: fs.existsSync(resolvedPaths.passwordFilePath),
+        passwordRequired,
+        sourceSecretCount,
+        tokenStoreSessionCount: sourceTokenCount
+    };
+    const requiresMigration = (passwordRequired || sourceSecretCount > 0 || sourceTokenCount > 0) && !marker;
+
+    return {
+        requiresMigration,
+        sourceIndicators,
+        marker,
+        resolvedPaths
+    };
+}
+
+export async function ensureAuthAuthorityMigrated(config = {}, options = {}) {
+    const detection = await detectLegacyAuthAuthority(config, options);
+    if (!detection.requiresMigration) {
+        return {
+            migrated: false,
+            reason: detection.marker ? 'already_migrated' : 'no_legacy_auth_source',
+            detection
+        };
+    }
+
+    const { storage, resolvedPaths } = await createSqliteStorage(config, options);
+    const hasProviderData = await storage.hasProviderData();
+
+    if (hasProviderData) {
+        const adminPassword = String(await readTextFile(resolvedPaths.passwordFilePath, '') || '').trim();
+        const authImport = await importAuthAuthorityFromDatabase(storage, adminPassword, nowIso());
+        const passwordRecord = await storage.getAdminPasswordHash();
+        const missingSecretRows = await queryCredentialAssetsMissingSecretBlob(storage.client);
+        const authReport = {
+            status: (missingSecretRows.length === 0 && (!adminPassword || Boolean(passwordRecord?.hash))) ? 'pass' : 'fail',
+            password: {
+                required: Boolean(adminPassword),
+                present: Boolean(passwordRecord?.hash),
+                missing: Boolean(adminPassword) && !Boolean(passwordRecord?.hash)
+            },
+            credentialSecrets: {
+                missingCount: missingSecretRows.length
+            }
+        };
+        if (authReport.status !== 'pass') {
+            throw new Error('Auth authority migration verification failed');
+        }
+
+        return {
+            migrated: true,
+            runId: null,
+            mode: 'auth_only',
+            authImport,
+            detection,
+            authReport
+        };
+    }
+
+    const sourceBundle = await loadLegacySourceBundle(config, options);
+    const credentialState = await collectExpectedCredentialState(sourceBundle.providerPools, sourceBundle.apiPotluckData);
+    const migrationResult = await migrateLegacyRuntimeStorage(config, {
+        ...options,
+        execute: true,
+        force: options.force === true,
+        operator: options.operator || 'startup_auto_auth_cutover'
+    });
+    const authReport = await verifyAuthRuntimeStorageMigration(config, {
+        ...options,
+        sourceBundle,
+        credentialState
+    });
+    if (authReport.status !== 'pass') {
+        throw new Error('Auth authority migration verification failed');
+    }
+
+    return {
+        migrated: true,
+        runId: migrationResult.runId || null,
+        mode: 'full',
+        detection,
+        authReport
+    };
+}
+
 async function loadMigrationRunRecord(client, runId) {
     if (!runId) {
         return null;
@@ -3258,6 +3644,10 @@ export async function migrateLegacyRuntimeStorage(config = {}, options = {}) {
             resolvedPaths.tokenStoreFilePath,
             path.join(artifactPaths.sourceDir, 'token-store.json')
         ),
+        passwordFileCopied: await copyFileIfExists(
+            resolvedPaths.passwordFilePath,
+            path.join(artifactPaths.sourceDir, 'pwd')
+        ),
         apiPotluckDataCopied: await copyFileIfExists(
             resolvedPaths.apiPotluckDataFilePath,
             path.join(artifactPaths.sourceDir, 'api-potluck-data.json')
@@ -3389,6 +3779,19 @@ WHERE run_id = ${sqlValue(runId)};
                             assetCount: credentialState.assets.length,
                             bindingCount: credentialState.bindings.length
                         }
+                    }];
+                }
+            },
+            {
+                itemType: 'auth_authority',
+                execute: async () => {
+                    const result = await importAuthAuthority(storage, sourceBundle, credentialState, nowIso());
+                    return [{
+                        itemType: 'auth_authority',
+                        sourceRef: 'pwd + credential files',
+                        targetRef: 'runtime_settings(auth_password) + credential_secret_blobs',
+                        status: 'completed',
+                        detailJson: result
                     }];
                 }
             },
@@ -3577,7 +3980,22 @@ WHERE run_id = ${sqlValue(runId)};
         manifest.result = failureSummary;
         await writeJsonFile(artifactPaths.manifestPath, manifest);
         await updateMigrationRun(storage.client, runId, 'failed', failureSummary).catch(() => undefined);
-        throw error;
+        const errorMessage = String(error?.message || '');
+        const isConstraintConflict = String(error?.code || '').includes('constraint')
+            || /UNIQUE constraint failed|FOREIGN KEY constraint failed/i.test(errorMessage);
+        throw wrapRuntimeStorageError(error, {
+            classification: isConstraintConflict ? 'constraint_conflict' : 'operation_failed',
+            code: isConstraintConflict
+                ? 'runtime_storage_constraint_conflict'
+                : (error?.code || 'runtime_storage_migration_failed'),
+            phase: 'migration_execute',
+            domain: 'compatibility',
+            backend: 'db',
+            operation: 'migrateLegacyRuntimeStorage',
+            details: {
+                runId
+            }
+        });
     }
 }
 
@@ -3601,6 +4019,7 @@ export async function rollbackRuntimeStorageMigration(config = {}, options = {})
             ['provider_pools.json', resolvedPaths.providerPoolsFilePath],
             ['usage-cache.json', resolvedPaths.usageCacheFilePath],
             ['token-store.json', resolvedPaths.tokenStoreFilePath],
+            ['pwd', resolvedPaths.passwordFilePath],
             ['api-potluck-data.json', resolvedPaths.apiPotluckDataFilePath],
             ['api-potluck-keys.json', resolvedPaths.apiPotluckKeysFilePath]
         ];
@@ -3694,6 +4113,7 @@ export async function readAdminConfig(configPath = 'configs/config.json', overri
         PROVIDER_POOLS_FILE_PATH: overrides.PROVIDER_POOLS_FILE_PATH || configFromFile.PROVIDER_POOLS_FILE_PATH || DEFAULT_PROVIDER_POOLS_PATH,
         RUNTIME_STORAGE_DB_PATH: overrides.RUNTIME_STORAGE_DB_PATH || configFromFile.RUNTIME_STORAGE_DB_PATH || runtimeDefaults.RUNTIME_STORAGE_DB_PATH,
         USAGE_CACHE_FILE_PATH: overrides.USAGE_CACHE_FILE_PATH || configFromFile.USAGE_CACHE_FILE_PATH || DEFAULT_USAGE_CACHE_PATH,
+        PASSWORD_FILE_PATH: overrides.PASSWORD_FILE_PATH || configFromFile.PASSWORD_FILE_PATH || configFromFile.PWD_FILE_PATH || DEFAULT_PASSWORD_FILE_PATH,
         API_POTLUCK_DATA_FILE_PATH: potluckDataPath,
         API_POTLUCK_KEYS_FILE_PATH: potluckKeysPath,
         POTLUCK_USER_DATA_FILE_PATH: potluckDataPath,

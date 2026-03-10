@@ -142,7 +142,7 @@ docker compose up -d
 服务器启动后，打开浏览器访问：
 👉 [**http://localhost:3000**](http://localhost:3000)
 
-> **默认密码**: `admin123` (登录后可在控制台或修改 `pwd` 文件变更)
+> **默认密码**: `admin123`（默认 `AUTH_STORAGE_MODE=db_only`，登录后请在控制台修改，权威写入数据库）
 
 #### 3. 可视化配置 (推荐)
 进入 **"配置管理"** 页面，您可以直接：
@@ -187,8 +187,9 @@ docker compose up -d
 如果你正在执行数据库化迁移，别再靠脑补流程瞎冲了，直接看现成运维文档：`docs/runtime-storage-migration.md`。
 
 - 统一 CLI：`npm run runtime-storage:admin -- <command>`
-- 核心命令：`migrate`、`verify`、`export-legacy`、`rollback`、`list-runs`、`show-run`
+- 核心命令：`migrate`、`verify`、`verify-auth`、`export-legacy`、`rollback`、`rollback-auth`、`list-runs`、`show-run`
 - 默认数据库：`configs/runtime/runtime-storage.sqlite`
+- 默认 auth 权威模式：`AUTH_STORAGE_MODE=db_only`
 - 默认迁移制品目录：`configs/runtime/migrations/<runId>/`
 - 推荐流程：先 `migrate` 预演，再 `migrate --execute`，最后 `verify --fail-on-diff`
 
@@ -212,7 +213,7 @@ docker compose up -d
 
 **📜 实时日志**：系统日志和请求日志实时显示，带管理控制
 
-**🔐 登录验证**：默认密码 `admin123`，可通过 `pwd` 文件修改
+**🔐 登录验证**：默认密码 `admin123`，默认以数据库为权威（`AUTH_STORAGE_MODE=db_only`）
 
 访问：`http://localhost:3000` → 登录 → 侧边栏导航 → 立即生效
 

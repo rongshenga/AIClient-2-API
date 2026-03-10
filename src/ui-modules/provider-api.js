@@ -132,6 +132,15 @@ const PROVIDER_NAME_MAX_LENGTH = 255;
 const DEFAULT_GROK_BATCH_IMPORT_LIMIT = 1000;
 const DEFAULT_PROVIDER_PAGE_LIMIT = 50;
 const MAX_PROVIDER_PAGE_LIMIT = 200;
+const DELETE_UNHEALTHY_ERROR_TYPES = new Set([
+    'all',
+    'auth',
+    'quota',
+    'timeout',
+    'network',
+    'other',
+    'unknown'
+]);
 
 function writeJsonError(res, statusCode, message) {
     res.writeHead(statusCode, { 'Content-Type': 'application/json' });
@@ -156,10 +165,13 @@ function parseProviderListQuery(req, totalCount = 0) {
     const requestUrl = new URL(req.url, 'http://127.0.0.1');
     const rawHealthFilter = requestUrl.searchParams.get('healthFilter');
     const healthFilter = rawHealthFilter === 'healthy' || rawHealthFilter === 'unhealthy' ? rawHealthFilter : 'all';
+    const parsedErrorType = normalizeDeleteUnhealthyErrorType(requestUrl.searchParams.get('errorType'));
+    const errorType = parsedErrorType || 'all';
     const hasPagingQuery = requestUrl.searchParams.has('page')
         || requestUrl.searchParams.has('limit')
         || requestUrl.searchParams.has('sort')
-        || requestUrl.searchParams.has('healthFilter');
+        || requestUrl.searchParams.has('healthFilter')
+        || requestUrl.searchParams.has('errorType');
 
     if (!hasPagingQuery) {
         return null;
@@ -182,7 +194,8 @@ function parseProviderListQuery(req, totalCount = 0) {
         offset: (normalizedPage - 1) * limit,
         sort,
         totalPages,
-        healthFilter
+        healthFilter,
+        errorType
     };
 }
 
@@ -209,6 +222,14 @@ function filterProvidersByHealth(providers = [], healthFilter = 'all') {
     }
 
     return providers;
+}
+
+function filterProvidersByErrorType(providers = [], errorType = 'all') {
+    if (errorType === 'all') {
+        return providers;
+    }
+
+    return providers.filter((provider) => classifyProviderErrorType(provider) === errorType);
 }
 
 function getGrokBatchImportLimit(currentConfig = {}) {
@@ -340,6 +361,41 @@ export async function handleGetProvidersSummary(req, res, currentConfig, provide
     return true;
 }
 
+function normalizeDeleteUnhealthyErrorType(rawValue = '') {
+    const normalized = String(rawValue || '').trim().toLowerCase();
+    if (!normalized) {
+        return 'all';
+    }
+    return DELETE_UNHEALTHY_ERROR_TYPES.has(normalized) ? normalized : null;
+}
+
+function classifyProviderErrorType(provider = {}) {
+    const message = String(provider?.lastErrorMessage || '').toLowerCase();
+    if (!message) {
+        return 'unknown';
+    }
+
+    if (/\b(401|403)\b/.test(message)
+        || /\b(unauthorized|forbidden|accessdenied|invalidtoken|expiredtoken)\b/i.test(message)) {
+        return 'auth';
+    }
+
+    if (/\b(429)\b/.test(message)
+        || /\b(too many requests|rate limit|ratelimit|quota|insufficient)\b/i.test(message)) {
+        return 'quota';
+    }
+
+    if (/\b(timeout|timed out|etimedout|deadline exceeded)\b/i.test(message)) {
+        return 'timeout';
+    }
+
+    if (/\b(network|econnreset|econnrefused|enotfound|fetch failed|socket hang up)\b/i.test(message)) {
+        return 'network';
+    }
+
+    return 'other';
+}
+
 /**
  * 获取支持的提供商类型（已注册适配器的）
  */
@@ -360,7 +416,9 @@ export async function handleGetProviderType(req, res, currentConfig, providerPoo
     const summary = buildProviderSummary(allProviders);
     const requestedQuery = parseProviderListQuery(req, allProviders.length);
     const healthFilter = requestedQuery?.healthFilter || 'all';
-    const filteredProviders = filterProvidersByHealth(allProviders, healthFilter);
+    const errorType = requestedQuery?.errorType || 'all';
+    const healthFilteredProviders = filterProvidersByHealth(allProviders, healthFilter);
+    const filteredProviders = filterProvidersByErrorType(healthFilteredProviders, errorType);
     const listQuery = parseProviderListQuery(req, filteredProviders.length);
     const sortedProviders = listQuery?.sort
         ? sortProvidersForDisplay(filteredProviders, listQuery.sort)
@@ -379,6 +437,7 @@ export async function handleGetProviderType(req, res, currentConfig, providerPoo
         returnedCount: providers.length,
         sort: listQuery?.sort || null,
         healthFilter,
+        errorType,
         filteredCount: filteredProviders.length,
         filteredTotalPages: listQuery?.totalPages || 1,
         ...summary
@@ -929,6 +988,14 @@ export async function handleResetProviderHealth(req, res, currentConfig, provide
  */
 export async function handleDeleteUnhealthyProviders(req, res, currentConfig, providerPoolManager, providerType) {
     try {
+        const requestUrl = new URL(req.url, 'http://127.0.0.1');
+        const errorType = normalizeDeleteUnhealthyErrorType(requestUrl.searchParams.get('errorType'));
+        if (errorType === null) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: 'Invalid errorType' } }));
+            return true;
+        }
+
         const filePath = getProviderPoolsFilePath(currentConfig);
         const providerPools = cloneProviderPools(await loadProviderPools(currentConfig, providerPoolManager));
 
@@ -942,47 +1009,74 @@ export async function handleDeleteUnhealthyProviders(req, res, currentConfig, pr
         }
 
         // Filter out unhealthy providers (keep only healthy ones)
-        const unhealthyProviders = providers.filter(p => !p.isHealthy);
-        const healthyProviders = providers.filter(p => p.isHealthy);
-        
-        if (unhealthyProviders.length === 0) {
+        const statusList = providerPoolManager?.providerStatus?.[providerType];
+        const unhealthyUuids = new Set();
+        if (Array.isArray(statusList)) {
+            statusList.forEach((status) => {
+                const statusConfig = status?.config;
+                const statusUuid = status?.uuid || statusConfig?.uuid;
+                if (!statusUuid) {
+                    return;
+                }
+                if (statusConfig?.isHealthy !== true) {
+                    unhealthyUuids.add(statusUuid);
+                }
+            });
+        }
+
+        const unhealthyProviders = unhealthyUuids.size > 0
+            ? providers.filter((provider) => unhealthyUuids.has(provider?.uuid))
+            : providers.filter((provider) => provider?.isHealthy !== true);
+        const providersToDelete = errorType !== 'all'
+            ? unhealthyProviders.filter((provider) => classifyProviderErrorType(provider) === errorType)
+            : unhealthyProviders;
+
+        if (providersToDelete.length === 0) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
                 success: true,
                 message: 'No unhealthy providers to delete',
                 deletedCount: 0,
-                remainingCount: providers.length
+                remainingCount: providers.length,
+                appliedErrorType: errorType
             }));
             return true;
         }
 
-        // Update the provider pool with only healthy providers
-        if (healthyProviders.length === 0) {
+        // Update the provider pool with remaining providers
+        const deletedUuidSet = new Set(providersToDelete.map((provider) => provider?.uuid).filter(Boolean));
+        const remainingProviders = providers.filter((provider) => !deletedUuidSet.has(provider?.uuid));
+
+        if (remainingProviders.length === 0) {
             delete providerPools[providerType];
         } else {
-            providerPools[providerType] = healthyProviders;
+            providerPools[providerType] = remainingProviders;
         }
 
-        await persistProviderPools(currentConfig, providerPoolManager, providerPools);
-        logger.info(`[UI API] Deleted ${unhealthyProviders.length} unhealthy providers from ${providerType}`);
+        await persistProviderPools(currentConfig, providerPoolManager, providerPools, {
+            managerProviderPools: providerPools
+        });
+        logger.info(`[UI API] Deleted ${providersToDelete.length} unhealthy providers from ${providerType} (errorType=${errorType})`);
 
         // 广播更新事件
         safeBroadcastEvent('config_update', {
             action: 'delete_unhealthy',
             filePath: filePath,
             providerType,
-            deletedCount: unhealthyProviders.length,
-            deletedProviders: unhealthyProviders.map(p => ({ uuid: p.uuid, customName: p.customName })),
+            deletedCount: providersToDelete.length,
+            deletedProviders: providersToDelete.map(p => ({ uuid: p.uuid, customName: p.customName })),
+            appliedErrorType: errorType,
             timestamp: new Date().toISOString()
         });
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             success: true,
-            message: `Successfully deleted ${unhealthyProviders.length} unhealthy providers`,
-            deletedCount: unhealthyProviders.length,
-            remainingCount: healthyProviders.length,
-            deletedProviders: unhealthyProviders.map(p => ({ uuid: p.uuid, customName: p.customName }))
+            message: `Successfully deleted ${providersToDelete.length} unhealthy providers`,
+            deletedCount: providersToDelete.length,
+            remainingCount: remainingProviders.length,
+            deletedProviders: providersToDelete.map(p => ({ uuid: p.uuid, customName: p.customName })),
+            appliedErrorType: errorType
         }));
         return true;
     } catch (error) {

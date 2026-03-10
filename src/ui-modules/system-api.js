@@ -3,6 +3,7 @@ import logger from '../utils/logger.js';
 import path from 'path';
 import { CONFIG } from '../core/config-manager.js';
 import { getRuntimeStorage, getRuntimeStorageInfo } from '../storage/runtime-storage-registry.js';
+import { getProviderPoolManager } from '../services/service-manager.js';
 import { getCpuUsagePercent } from './system-monitor.js';
 
 function summarizeProviderPools(providerPools = {}) {
@@ -48,6 +49,51 @@ function summarizeProviderSummaries(providerSummaries = {}) {
 
 function getRuntimeStorageSnapshot() {
     return getRuntimeStorageInfo() || CONFIG?.RUNTIME_STORAGE_INFO || null;
+}
+
+function buildAuthStorageMetrics() {
+    const providerPoolManager = getProviderPoolManager();
+    const defaultMetrics = {
+        authStorageMode: String(CONFIG?.AUTH_STORAGE_MODE || 'db_only').toLowerCase() === 'bridge' ? 'bridge' : 'db_only',
+        groupPreload: {
+            size: Number(CONFIG?.AUTH_GROUP_PRELOAD_SIZE || 100),
+            ahead: Number(CONFIG?.AUTH_GROUP_PRELOAD_AHEAD || 1),
+            queueLength: 0
+        },
+        credentialCache: {
+            ttlMs: Number(CONFIG?.AUTH_SECRET_CACHE_TTL_MS || 300000),
+            hits: 0,
+            misses: 0,
+            hitRate: 0
+        },
+        coldLoadDurationMs: null
+    };
+
+    if (!providerPoolManager || typeof providerPoolManager.getAuthRuntimeMetrics !== 'function') {
+        return defaultMetrics;
+    }
+
+    const providerMetrics = providerPoolManager.getAuthRuntimeMetrics() || {};
+    const hitCount = Number(providerMetrics?.credentialCache?.hits || 0);
+    const missCount = Number(providerMetrics?.credentialCache?.misses || 0);
+    const total = hitCount + missCount;
+
+    return {
+        ...defaultMetrics,
+        groupPreload: {
+            ...defaultMetrics.groupPreload,
+            queueLength: Number(providerMetrics?.groupPreload?.queueLength || 0)
+        },
+        credentialCache: {
+            ...defaultMetrics.credentialCache,
+            hits: hitCount,
+            misses: missCount,
+            hitRate: total > 0 ? Number((hitCount / total).toFixed(4)) : 0
+        },
+        coldLoadDurationMs: Number.isFinite(providerMetrics?.coldLoadDurationMs)
+            ? providerMetrics.coldLoadDurationMs
+            : null
+    };
 }
 
 async function loadProviderSummaryFromRuntimeStorage(runtimeStorageSnapshot, config = CONFIG) {
@@ -126,6 +172,7 @@ export async function handleGetSystem(req, res) {
         cpuUsage: cpuUsage,
         uptime: process.uptime(),
         runtimeStorage: runtimeStorageSnapshot,
+        authStorage: buildAuthStorageMetrics(),
         providerSummary
     }));
     return true;

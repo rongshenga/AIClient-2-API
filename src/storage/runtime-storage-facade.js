@@ -33,6 +33,27 @@ class ProviderStorageDomainFacade extends StorageDomainFacade {
         return await this.storage.listCredentialAssets(providerType, options);
     }
 
+    async getCredentialSecretBlob(credentialAssetId) {
+        if (typeof this.storage.getCredentialSecretBlob !== 'function') {
+            return null;
+        }
+        return await this.storage.getCredentialSecretBlob(credentialAssetId);
+    }
+
+    async upsertCredentialSecretBlob(credentialAssetId, payload = null, options = {}) {
+        if (typeof this.storage.upsertCredentialSecretBlob !== 'function') {
+            return null;
+        }
+        return await this.storage.upsertCredentialSecretBlob(credentialAssetId, payload, options);
+    }
+
+    async listCredentialExpiryCandidates(providerType = null, options = {}) {
+        if (typeof this.storage.listCredentialExpiryCandidates !== 'function') {
+            return [];
+        }
+        return await this.storage.listCredentialExpiryCandidates(providerType, options);
+    }
+
     async linkCredentialFiles(credPaths = [], options = {}) {
         return await this.storage.linkCredentialFiles(credPaths, options);
     }
@@ -95,6 +116,22 @@ class SessionStorageDomainFacade extends StorageDomainFacade {
 
     async cleanupExpiredSessions() {
         return await this.storage.cleanupExpiredAdminSessions();
+    }
+}
+
+class AuthStorageDomainFacade extends StorageDomainFacade {
+    async getAdminPasswordHash() {
+        if (typeof this.storage.getAdminPasswordHash !== 'function') {
+            return null;
+        }
+        return await this.storage.getAdminPasswordHash();
+    }
+
+    async saveAdminPasswordHash(passwordRecord = {}) {
+        if (typeof this.storage.saveAdminPasswordHash !== 'function') {
+            return null;
+        }
+        return await this.storage.saveAdminPasswordHash(passwordRecord);
     }
 }
 
@@ -162,6 +199,7 @@ export class RuntimeStorageFacade {
         this.config = config;
         this.provider = new ProviderStorageDomainFacade(storage);
         this.usage = new UsageStorageDomainFacade(storage);
+        this.auth = new AuthStorageDomainFacade(storage);
         this.session = new SessionStorageDomainFacade(storage);
         this.plugin = new PluginStorageDomainFacade(storage);
         this.migration = new MigrationStorageDomainFacade(config);
@@ -204,6 +242,7 @@ export class RuntimeStorageFacade {
         return {
             provider: this.provider,
             usage: this.usage,
+            auth: this.auth,
             session: this.session,
             plugin: this.plugin,
             migration: this.migration
@@ -232,6 +271,18 @@ export class RuntimeStorageFacade {
 
     async listCredentialAssets(providerType, options = {}) {
         return await this.provider.listCredentialAssets(providerType, options);
+    }
+
+    async getCredentialSecretBlob(credentialAssetId) {
+        return await this.provider.getCredentialSecretBlob(credentialAssetId);
+    }
+
+    async upsertCredentialSecretBlob(credentialAssetId, payload = null, options = {}) {
+        return await this.provider.upsertCredentialSecretBlob(credentialAssetId, payload, options);
+    }
+
+    async listCredentialExpiryCandidates(providerType = null, options = {}) {
+        return await this.provider.listCredentialExpiryCandidates(providerType, options);
     }
 
     async linkCredentialFiles(credPaths = [], options = {}) {
@@ -280,6 +331,14 @@ export class RuntimeStorageFacade {
 
     async markInterruptedUsageRefreshTasks() {
         return await this.usage.markInterruptedRefreshTasks();
+    }
+
+    async getAdminPasswordHash() {
+        return await this.auth.getAdminPasswordHash();
+    }
+
+    async saveAdminPasswordHash(passwordRecord = {}) {
+        return await this.auth.saveAdminPasswordHash(passwordRecord);
     }
 
     async getAdminSession(token) {

@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { getRuntimeStorage } from '../../storage/runtime-storage-registry.js';
+import { CONFIG } from '../../core/config-manager.js';
 
 // 配置常量
 const KEYS_STORE_FILE = path.join(process.cwd(), 'configs', 'api-potluck-keys.json');
@@ -92,6 +93,17 @@ function getPotluckKeyStorage() {
     return runtimeStorage;
 }
 
+function isDbOnlyAuthMode() {
+    const mode = String(CONFIG?.AUTH_STORAGE_MODE || '').toLowerCase();
+    if (mode === 'db_only') {
+        return true;
+    }
+
+    const runtimeStorage = getRuntimeStorage();
+    const backend = String(runtimeStorage?.getInfo?.()?.backend || runtimeStorage?.kind || '').toLowerCase();
+    return backend === 'db' || backend === 'dual-write';
+}
+
 function ensureProcessPersistHooks() {
     if (processHooksRegistered) {
         return;
@@ -166,10 +178,10 @@ export async function initializeKeyManager(forceReload = false) {
             keyStore = normalizeKeyStore(await runtimeStorage.loadPotluckKeyStore());
         } catch (error) {
             logger.error('[API Potluck] Failed to load key store from runtime storage:', error.message);
-            keyStore = loadKeyStoreFromFileSync();
+            keyStore = isDbOnlyAuthMode() ? createEmptyKeyStore() : loadKeyStoreFromFileSync();
         }
     } else {
-        keyStore = loadKeyStoreFromFileSync();
+        keyStore = isDbOnlyAuthMode() ? createEmptyKeyStore() : loadKeyStoreFromFileSync();
     }
 
     const config = getConfig();
@@ -199,7 +211,7 @@ function ensureLoaded() {
         return;
     }
 
-    keyStore = loadKeyStoreFromFileSync();
+    keyStore = isDbOnlyAuthMode() ? createEmptyKeyStore() : loadKeyStoreFromFileSync();
     const config = getConfig();
     currentPersistInterval = config.persistInterval || DEFAULT_CONFIG.persistInterval;
     ensurePersistTimer();
@@ -231,6 +243,9 @@ async function persistIfDirty() {
         if (runtimeStorage) {
             await runtimeStorage.savePotluckKeyStore(normalizeKeyStore(keyStore));
         } else {
+            if (isDbOnlyAuthMode()) {
+                throw new Error('Potluck key runtime storage is unavailable in db_only mode');
+            }
             const dir = path.dirname(KEYS_STORE_FILE);
             if (!existsSync(dir)) {
                 await fs.mkdir(dir, { recursive: true });

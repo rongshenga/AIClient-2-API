@@ -40,6 +40,10 @@ const OAUTH_PROVIDERS = {
  */
 const activeServers = new Map();
 
+function isBridgeAuthStorageMode() {
+    return String(CONFIG?.AUTH_STORAGE_MODE || '').toLowerCase() === 'bridge';
+}
+
 /**
  * 生成 HTML 响应页面
  * @param {boolean} isSuccess - 是否成功
@@ -375,6 +379,10 @@ export async function checkGeminiCredentialsDuplicate(providerType, refreshToken
         } catch (error) {
             logger.warn(`[Gemini Auth] Runtime credential inventory lookup failed for ${providerType}:`, error.message);
         }
+    }
+
+    if (!isBridgeAuthStorageMode()) {
+        return { isDuplicate: false };
     }
     
     try {

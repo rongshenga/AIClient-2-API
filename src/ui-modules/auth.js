@@ -94,11 +94,69 @@ function getRuntimeStorageBackend(runtimeStorage = null) {
 }
 
 function shouldDisableTokenStoreFallback(runtimeStorage = null) {
+    const authMode = resolveAuthStorageMode(runtimeStorage);
     const backend = getRuntimeStorageBackend(runtimeStorage);
+    if (authMode === 'db_only') {
+        return true;
+    }
     return backend === 'db' || backend === 'dual-write';
 }
 
+function resolveAuthStorageMode(runtimeStorage = null) {
+    const configuredMode = String(CONFIG?.AUTH_STORAGE_MODE || '').toLowerCase();
+    if (configuredMode === 'db_only' || configuredMode === 'bridge') {
+        return configuredMode;
+    }
+
+    const backend = getRuntimeStorageBackend(runtimeStorage);
+    return backend === 'db' || backend === 'dual-write' ? 'db_only' : 'bridge';
+}
+
+function isPasswordHashRecord(record) {
+    return Boolean(
+        record
+        && typeof record === 'object'
+        && typeof record.salt === 'string'
+        && typeof record.hash === 'string'
+    );
+}
+
+function verifyPasswordHash(password, record) {
+    if (!isPasswordHashRecord(record)) {
+        return false;
+    }
+
+    const digest = crypto.createHash('sha256').update(`${record.salt}:${String(password || '')}`).digest('hex');
+    return digest === record.hash;
+}
+
+async function readPasswordFromRuntimeStorage(runtimeStorage) {
+    if (!runtimeStorage || typeof runtimeStorage.getAdminPasswordHash !== 'function') {
+        return null;
+    }
+
+    try {
+        const record = await runtimeStorage.getAdminPasswordHash();
+        return isPasswordHashRecord(record) ? record : null;
+    } catch (error) {
+        logger.error('[Auth] Failed to read admin password from runtime storage:', error.message);
+        return null;
+    }
+}
+
 export async function readPasswordFile() {
+    const runtimeStorage = getSessionStorage();
+    const authMode = resolveAuthStorageMode(runtimeStorage);
+    const passwordRecord = await readPasswordFromRuntimeStorage(runtimeStorage);
+    if (passwordRecord) {
+        return passwordRecord;
+    }
+
+    if (authMode === 'db_only') {
+        logger.warn('[Auth] Runtime password record missing in db_only mode, fallback to default bootstrap password');
+        return DEFAULT_PASSWORD;
+    }
+
     const pwdFilePath = path.join(process.cwd(), 'configs', 'pwd');
     try {
         const password = await fs.readFile(pwdFilePath, 'utf8');
@@ -122,8 +180,12 @@ export async function readPasswordFile() {
 
 export async function validateCredentials(password) {
     const storedPassword = await readPasswordFile();
-    logger.info('[Auth] Validating password, stored password length:', storedPassword ? storedPassword.length : 0, ', input password length:', password ? password.length : 0);
-    const isValid = storedPassword && password === storedPassword;
+    const isHashedPassword = isPasswordHashRecord(storedPassword);
+    const storedPasswordLength = isHashedPassword ? String(storedPassword.hash || '').length : (storedPassword ? String(storedPassword).length : 0);
+    logger.info('[Auth] Validating password, stored password length:', storedPasswordLength, ', input password length:', password ? password.length : 0);
+    const isValid = isHashedPassword
+        ? verifyPasswordHash(password, storedPassword)
+        : (storedPassword && password === storedPassword);
     logger.info('[Auth] Password validation result:', isValid);
     return isValid;
 }
@@ -160,6 +222,11 @@ function getExpiryTime() {
 }
 
 async function readTokenStore() {
+    const runtimeStorage = getSessionStorage();
+    if (resolveAuthStorageMode(runtimeStorage) === 'db_only') {
+        return { tokens: {} };
+    }
+
     try {
         if (existsSync(TOKEN_STORE_FILE)) {
             const content = await fs.readFile(TOKEN_STORE_FILE, 'utf8');
@@ -174,6 +241,11 @@ async function readTokenStore() {
 }
 
 async function writeTokenStore(tokenStore) {
+    const runtimeStorage = getSessionStorage();
+    if (resolveAuthStorageMode(runtimeStorage) === 'db_only') {
+        return;
+    }
+
     try {
         await fs.writeFile(TOKEN_STORE_FILE, JSON.stringify(tokenStore, null, 2), 'utf8');
     } catch (error) {

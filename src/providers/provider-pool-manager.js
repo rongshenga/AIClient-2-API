@@ -134,6 +134,28 @@ export class ProviderPoolManager {
             rotateOnSelect: groupConfig.POOL_GROUP_ROTATE_ON_SELECT !== undefined ? Boolean(groupConfig.POOL_GROUP_ROTATE_ON_SELECT) : true
         };
         this._groupCursor = {};
+        this.authGroupPreloadSize = this._normalizePositiveInt(
+            groupConfig.AUTH_GROUP_PRELOAD_SIZE,
+            this.groupSelection.groupSize
+        );
+        this.authGroupPreloadAhead = this._normalizeNonNegativeInt(
+            groupConfig.AUTH_GROUP_PRELOAD_AHEAD,
+            1
+        );
+        this.authSecretCacheTtlMs = this._normalizePositiveInt(
+            groupConfig.AUTH_SECRET_CACHE_TTL_MS,
+            300000
+        );
+        this._authSecretCache = new Map();
+        this._authGroupPreloadQueue = [];
+        this._authGroupPreloadInFlight = new Set();
+        this._authGroupPreloadTimer = null;
+        this.authRuntimeMetrics = {
+            groupPreloadQueueLength: 0,
+            credentialCacheHits: 0,
+            credentialCacheMisses: 0,
+            coldLoadDurationMs: null
+        };
 
         // 默认不持久化每次选点的 lastUsed/_lastSelectionSeq，避免大号池频繁全量落盘
         this.persistSelectionState = groupConfig.PERSIST_SELECTION_STATE !== undefined
@@ -141,6 +163,57 @@ export class ProviderPoolManager {
             : false;
  
         this.initializeProviderStatus();
+    }
+
+    getAuthRuntimeMetrics() {
+        return {
+            groupPreload: {
+                queueLength: Number(this.authRuntimeMetrics?.groupPreloadQueueLength || 0)
+            },
+            credentialCache: {
+                hits: Number(this.authRuntimeMetrics?.credentialCacheHits || 0),
+                misses: Number(this.authRuntimeMetrics?.credentialCacheMisses || 0)
+            },
+            coldLoadDurationMs: Number.isFinite(this.authRuntimeMetrics?.coldLoadDurationMs)
+                ? this.authRuntimeMetrics.coldLoadDurationMs
+                : null
+        };
+    }
+
+    getStartupPreloadCandidates(providerType, providerConfigs = [], maxCount = 0) {
+        const enabledConfigs = Array.isArray(providerConfigs)
+            ? providerConfigs.filter((cfg) => cfg && !cfg.isDisabled)
+            : [];
+        if (enabledConfigs.length === 0 || maxCount <= 0) {
+            return [];
+        }
+
+        if (!this._shouldUseGroupSelection(providerType, enabledConfigs.length)) {
+            return enabledConfigs.slice(0, maxCount);
+        }
+
+        const groupSize = Math.max(1, this.authGroupPreloadSize);
+        const groupIndex = this._groupCursor[providerType] || 0;
+        const start = groupIndex * groupSize;
+        const end = Math.min(start + groupSize, enabledConfigs.length);
+        const groupCandidates = enabledConfigs.slice(start, end);
+
+        if (groupCandidates.length === 0) {
+            return enabledConfigs.slice(0, maxCount);
+        }
+
+        return groupCandidates.slice(0, maxCount);
+    }
+
+    preloadStartupAuthGroups(providerType, providerCount = 0) {
+        if (!this._shouldUseGroupSelection(providerType, providerCount)) {
+            return;
+        }
+
+        const groupSize = Math.max(1, this.authGroupPreloadSize);
+        const totalGroups = Math.max(1, Math.ceil(providerCount / groupSize));
+        const currentGroupIndex = this._groupCursor[providerType] || 0;
+        this._scheduleAheadGroupPreload(providerType, currentGroupIndex, totalGroups);
     }
 
     /**
@@ -284,7 +357,7 @@ export class ProviderPoolManager {
      * 检查所有节点的配置文件，如果发现即将过期则触发刷新
      */
     async checkAndRefreshExpiringNodes() {
-        this._log('info', 'Checking nodes for approaching expiration dates using credential files...');
+        this._log('info', 'Checking nodes for approaching expiration dates using runtime storage index...');
         const summary = {
             total: 0,
             eligible: 0,
@@ -295,8 +368,10 @@ export class ProviderPoolManager {
             errors: 0,
         };
         const nearExpiryByProvider = {};
+        const allowFileFallback = this._resolveAuthStorageMode() === 'bridge';
         
         for (const providerType in this.providerStatus) {
+            const dbExpiryByProviderId = await this._loadDbExpiryCandidatesByProvider(providerType);
             const providers = this.providerStatus[providerType];
             for (const providerStatus of providers) {
                 summary.total++;
@@ -306,33 +381,40 @@ export class ProviderPoolManager {
                 if (!config.isHealthy || config.isDisabled) continue;
                 summary.eligible++;
 
-                const configPath = this._getCredentialConfigPath(providerType, config);
+                const providerId = providerStatus.providerId || this._resolveProviderId(providerType, config);
+                const dbResult = providerId ? dbExpiryByProviderId.get(providerId) : null;
+                let isNearExpiry = dbResult?.isNearExpiry;
 
-                if (configPath && fs.existsSync(configPath)) {
-                    try {
-                        const isNearExpiry = this._isCredentialNearExpiry(providerType, configPath);
-                        if (isNearExpiry === null) {
-                            summary.unknownExpiry++;
-                            this._log('debug', `Node ${providerStatus.uuid} (${providerType}) expiry field not found or invalid. Skipping refresh.`);
+                if (isNearExpiry === undefined && allowFileFallback) {
+                    const configPath = this._getCredentialConfigPath(providerType, config);
+                    if (configPath && fs.existsSync(configPath)) {
+                        try {
+                            isNearExpiry = this._isCredentialNearExpiry(providerType, configPath);
+                        } catch (err) {
+                            summary.errors++;
+                            this._log('error', `Failed to check file expiry for node ${providerStatus.uuid}: ${err.message}`);
                             continue;
                         }
-
-                        if (isNearExpiry) {
-                            summary.nearExpiry++;
-                            summary.enqueued++;
-                            nearExpiryByProvider[providerType] = (nearExpiryByProvider[providerType] || 0) + 1;
-                            this._log('debug', `Node ${providerStatus.uuid} (${providerType}) is near expiration. Enqueuing refresh...`);
-                            this._enqueueRefresh(providerType, providerStatus);
-                        } else {
-                            this._log('debug', `Node ${providerStatus.uuid} (${providerType}) is not near expiration. Skipping refresh.`);
-                        }
-                    } catch (err) {
-                        summary.errors++;
-                        this._log('error', `Failed to check expiry for node ${providerStatus.uuid}: ${err.message}`);
+                    } else {
+                        summary.noCredentialFile++;
+                        this._log('debug', `Node ${providerStatus.uuid} (${providerType}) has no compatibility credential file path.`);
                     }
+                }
+
+                if (isNearExpiry === null || isNearExpiry === undefined) {
+                    summary.unknownExpiry++;
+                    this._log('debug', `Node ${providerStatus.uuid} (${providerType}) expiry field not found or invalid. Skipping refresh.`);
+                    continue;
+                }
+
+                if (isNearExpiry) {
+                    summary.nearExpiry++;
+                    summary.enqueued++;
+                    nearExpiryByProvider[providerType] = (nearExpiryByProvider[providerType] || 0) + 1;
+                    this._log('debug', `Node ${providerStatus.uuid} (${providerType}) is near expiration. Enqueuing refresh...`);
+                    this._enqueueRefresh(providerType, providerStatus);
                 } else {
-                    summary.noCredentialFile++;
-                    this._log('debug', `Node ${providerStatus.uuid} (${providerType}) has no valid config file path or file does not exist.`);
+                    this._log('debug', `Node ${providerStatus.uuid} (${providerType}) is not near expiration. Skipping refresh.`);
                 }
             }
         }
@@ -350,8 +432,124 @@ export class ProviderPoolManager {
         }
     }
 
+    _resolveAuthStorageMode() {
+        const configuredMode = String(this.globalConfig?.AUTH_STORAGE_MODE || '').toLowerCase();
+        if (configuredMode === 'db_only' || configuredMode === 'bridge') {
+            return configuredMode;
+        }
+
+        const backend = String(this.runtimeStorage?.getInfo?.()?.backend || this.runtimeStorage?.kind || '').toLowerCase();
+        return backend === 'db' || backend === 'dual-write' ? 'db_only' : 'bridge';
+    }
+
+    _resolveScopedProviderIds(providerType, options = {}) {
+        if (Array.isArray(options.providerIds)) {
+            return [...new Set(options.providerIds
+                .map((item) => (typeof item === 'string' ? item.trim() : ''))
+                .filter(Boolean))];
+        }
+
+        if (!Number.isFinite(options.warmupGroupIndex) || !Number.isFinite(options.warmupTotalGroups)) {
+            return [];
+        }
+
+        const providers = Array.isArray(this.providerStatus[providerType]) ? this.providerStatus[providerType] : [];
+        if (providers.length === 0) {
+            return [];
+        }
+
+        const totalGroups = Math.max(1, options.warmupTotalGroups);
+        const groupSize = Math.max(1, this.authGroupPreloadSize);
+        const normalizedGroupIndex = ((options.warmupGroupIndex % totalGroups) + totalGroups) % totalGroups;
+        const start = normalizedGroupIndex * groupSize;
+        if (start >= providers.length) {
+            return [];
+        }
+
+        const end = Math.min(start + groupSize, providers.length);
+        const scopedProviders = providers.slice(start, end);
+        return scopedProviders
+            .map((provider) => buildStableProviderId(providerType, provider?.config || {}))
+            .filter(Boolean);
+    }
+
+    async _loadDbExpiryCandidatesByProvider(providerType, options = {}) {
+        const runtimeStorage = this.runtimeStorage;
+        if (!runtimeStorage || typeof runtimeStorage.listCredentialExpiryCandidates !== 'function') {
+            return new Map();
+        }
+
+        const startedAt = Date.now();
+        try {
+            const scopedProviderIds = this._resolveScopedProviderIds(providerType, options);
+            const rows = await runtimeStorage.listCredentialExpiryCandidates(providerType, {
+                limit: Math.max(20000, scopedProviderIds.length || 0),
+                offset: 0,
+                providerIds: scopedProviderIds.length > 0 ? scopedProviderIds : undefined
+            });
+            if (!Array.isArray(rows) || rows.length === 0) {
+                return new Map();
+            }
+
+            const resultMap = new Map();
+            const now = Date.now();
+            const ttlMs = Math.max(1000, this.authSecretCacheTtlMs);
+            for (const row of rows) {
+                const providerId = row.provider_id || row.providerId;
+                if (!providerId || resultMap.has(providerId)) {
+                    continue;
+                }
+
+                const secretUpdatedAt = row.secret_updated_at || row.secretUpdatedAt || null;
+                const cached = this._authSecretCache.get(providerId);
+                const isCacheValid = cached
+                    && cached.expireAt > now
+                    && cached.secretUpdatedAt === secretUpdatedAt;
+
+                let isNearExpiry;
+                if (isCacheValid) {
+                    this.authRuntimeMetrics.credentialCacheHits += 1;
+                    isNearExpiry = cached.isNearExpiry;
+                } else {
+                    this.authRuntimeMetrics.credentialCacheMisses += 1;
+                    let payload = null;
+                    if (row.encrypted_payload && typeof row.encrypted_payload === 'string') {
+                        try {
+                            payload = JSON.parse(row.encrypted_payload);
+                        } catch {
+                            payload = null;
+                        }
+                    }
+                    const credentials = payload && typeof payload === 'object' && !Array.isArray(payload)
+                        ? payload
+                        : {};
+                    const expiryTimestamp = this._extractExpiryTimestamp(providerType, credentials);
+                    isNearExpiry = expiryTimestamp === null
+                        ? (providerType.startsWith('openai-codex') ? true : null)
+                        : expiryTimestamp <= (Date.now() + this._getNearExpiryThresholdMinutes(providerType) * 60 * 1000);
+
+                    this._authSecretCache.set(providerId, {
+                        isNearExpiry,
+                        secretUpdatedAt,
+                        expireAt: now + ttlMs
+                    });
+                }
+
+                resultMap.set(providerId, {
+                    isNearExpiry
+                });
+            }
+
+            this.authRuntimeMetrics.coldLoadDurationMs = Date.now() - startedAt;
+            return resultMap;
+        } catch (error) {
+            this._log('warn', `Failed to query credential expiry index for ${providerType}: ${error.message}`);
+            return new Map();
+        }
+    }
+
     /**
-     * 根据 providerType 获取凭证文件路径
+     * 根据 providerType 获取凭证文件路径（仅兼容/导入用途）
      * @private
      */
     _getCredentialConfigPath(providerType, config) {
@@ -937,6 +1135,68 @@ export class ProviderPoolManager {
             this._groupCursor[providerType] = (selectedGroupIndex + 1) % totalGroups;
         } else {
             this._groupCursor[providerType] = selectedGroupIndex;
+        }
+    }
+
+    _scheduleAheadGroupPreload(providerType, selectedGroupIndex, totalGroups) {
+        if (!Number.isFinite(totalGroups) || totalGroups <= 1 || selectedGroupIndex < 0) {
+            return;
+        }
+        if (this.authGroupPreloadAhead <= 0) {
+            return;
+        }
+
+        for (let step = 1; step <= this.authGroupPreloadAhead; step++) {
+            const groupIndex = (selectedGroupIndex + step) % totalGroups;
+            const taskKey = `${providerType}::${groupIndex}`;
+            if (this._authGroupPreloadInFlight.has(taskKey)
+                || this._authGroupPreloadQueue.some((task) => task.key === taskKey)) {
+                continue;
+            }
+
+            this._authGroupPreloadQueue.push({
+                key: taskKey,
+                providerType,
+                groupIndex,
+                totalGroups
+            });
+        }
+
+        this.authRuntimeMetrics.groupPreloadQueueLength = this._authGroupPreloadQueue.length;
+        if (!this._authGroupPreloadTimer) {
+            this._authGroupPreloadTimer = setTimeout(() => {
+                this._processAuthGroupPreloadQueue().catch((error) => {
+                    this._log('warn', `Ahead preload failed: ${error.message}`);
+                });
+            }, 0);
+            if (typeof this._authGroupPreloadTimer.unref === 'function') {
+                this._authGroupPreloadTimer.unref();
+            }
+        }
+    }
+
+    async _processAuthGroupPreloadQueue() {
+        if (this._authGroupPreloadTimer) {
+            clearTimeout(this._authGroupPreloadTimer);
+            this._authGroupPreloadTimer = null;
+        }
+
+        while (this._authGroupPreloadQueue.length > 0) {
+            const task = this._authGroupPreloadQueue.shift();
+            this.authRuntimeMetrics.groupPreloadQueueLength = this._authGroupPreloadQueue.length;
+            if (!task?.key || this._authGroupPreloadInFlight.has(task.key)) {
+                continue;
+            }
+
+            this._authGroupPreloadInFlight.add(task.key);
+            try {
+                await this._loadDbExpiryCandidatesByProvider(task.providerType, {
+                    warmupGroupIndex: task.groupIndex,
+                    warmupTotalGroups: task.totalGroups
+                });
+            } finally {
+                this._authGroupPreloadInFlight.delete(task.key);
+            }
         }
     }
 
@@ -1577,6 +1837,7 @@ export class ProviderPoolManager {
 
         // 分组场景下根据策略轮转游标
         if (selectedGroupIndex >= 0) {
+            this._scheduleAheadGroupPreload(providerType, selectedGroupIndex, selectedGroupCount);
             this._advanceGroupCursor(providerType, selectedGroupIndex, selectedGroupCount);
         }
 

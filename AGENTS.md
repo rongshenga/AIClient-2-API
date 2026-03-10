@@ -53,6 +53,9 @@ Keep this managed block so 'openspec update' can refresh the instructions.
 - Use `supertest` for HTTP endpoint checks when applicable.
 - Before opening a PR, run `npm test` and `npm run test:coverage`.
 
+## Change Verification Requirement
+- After any code change, verify the behavior with `chrome-devtools` and confirm the result matches expectations before finalizing.
+
 ## Commit & Pull Request Guidelines
 - Follow Conventional Commits seen in history: `feat:`, `fix:`, `refactor:`, `docs:`, `chore:`.
 - Optional scopes are encouraged (for example, `fix(codex): ...`).

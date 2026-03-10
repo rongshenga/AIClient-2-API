@@ -1,7 +1,6 @@
 import { getServiceAdapter, serviceInstances } from '../providers/adapter.js';
 import logger from '../utils/logger.js';
 import { ProviderPoolManager } from '../providers/provider-pool-manager.js';
-import deepmerge from 'deepmerge';
 import * as fs from 'fs';
 import { promises as pfs } from 'fs';
 import * as path from 'path';
@@ -177,6 +176,8 @@ export async function autoLinkProviderConfigs(config, options = {}) {
 export async function initApiService(config, isReady = false) {
 
     if (config.providerPools && Object.keys(config.providerPools).length > 0) {
+        // 避免后续 deep copy 超大 providerPools 对象导致内存爆炸
+        const { providerPools: _ignoredProviderPools, ...baseNodeConfig } = config;
         providerPoolManager = new ProviderPoolManager(config.providerPools, {
             globalConfig: config,
             runtimeStorage: config?.runtimeStorage || getRuntimeStorage() || null,
@@ -239,7 +240,9 @@ export async function initApiService(config, isReady = false) {
 
             const enabledProviderConfigs = providerConfigs.filter(cfg => !cfg.isDisabled);
             const providerBudget = Math.max(0, Math.min(startupPreloadMaxPerProvider, remainingTotalBudget));
-            const preloadConfigs = enabledProviderConfigs.slice(0, providerBudget);
+            const preloadConfigs = providerPoolManager
+                ? providerPoolManager.getStartupPreloadCandidates(providerType, enabledProviderConfigs, providerBudget)
+                : enabledProviderConfigs.slice(0, providerBudget);
             const providerSkippedByLimit = Math.max(0, enabledProviderConfigs.length - preloadConfigs.length);
 
             logger.info(
@@ -254,11 +257,11 @@ export async function initApiService(config, isReady = false) {
             for (const providerConfig of preloadConfigs) {
                 try {
                     // 合并全局配置和节点配置
-                    const nodeConfig = deepmerge(config, {
+                    const nodeConfig = {
+                        ...baseNodeConfig,
                         ...providerConfig,
                         MODEL_PROVIDER: providerType
-                    });
-                    delete nodeConfig.providerPools; // 移除 providerPools 避免递归
+                    };
                     
                     // 初始化服务适配器
                     getServiceAdapter(nodeConfig);
@@ -293,6 +296,10 @@ export async function initApiService(config, isReady = false) {
                     `[Initialization] Provider '${providerType}' has ${providerFailed} failed node(s). ` +
                     `Sample: ${sampleText || 'none'}`
                 );
+            }
+
+            if (providerPoolManager) {
+                providerPoolManager.preloadStartupAuthGroups(providerType, enabledProviderConfigs.length);
             }
 
             if (remainingTotalBudget <= 0) {
@@ -367,8 +374,8 @@ export async function getApiService(config, requestedModel = null, options = {})
         const selectedProviderConfig = await providerPoolManager.selectProvider(config.MODEL_PROVIDER, actualModelName, { ...options, skipUsageCount: true });
         if (selectedProviderConfig) {
             // 合并选中的提供者配置到当前请求的 config 中
-            serviceConfig = deepmerge(config, selectedProviderConfig);
-            delete serviceConfig.providerPools; // 移除 providerPools 属性
+            const { providerPools: _ignoredProviderPools, ...baseConfig } = config;
+            serviceConfig = { ...baseConfig, ...selectedProviderConfig };
             config.uuid = serviceConfig.uuid;
             config.customName = serviceConfig.customName;
             const customNameDisplay = serviceConfig.customName ? ` (${serviceConfig.customName})` : '';
@@ -433,8 +440,8 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
             const { config: selectedProviderConfig, actualProviderType: selectedType, isFallback: fallbackUsed, actualModel: fallbackModel } = selectedResult;
             
             // 合并选中的提供者配置到当前请求的 config 中
-            serviceConfig = deepmerge(config, selectedProviderConfig);
-            delete serviceConfig.providerPools;
+            const { providerPools: _ignoredProviderPools, ...baseConfig } = config;
+            serviceConfig = { ...baseConfig, ...selectedProviderConfig };
             
             actualProviderType = selectedType;
             isFallback = fallbackUsed;

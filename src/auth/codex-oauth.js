@@ -80,6 +80,10 @@ const MAX_CODEX_REFRESH_CONCURRENCY = CODEX_CONCURRENCY_PROFILE.maxRefreshConcur
  */
 const activeServers = new Map();
 
+function isBridgeAuthStorageMode() {
+    return String(CONFIG?.AUTH_STORAGE_MODE || '').toLowerCase() === 'bridge';
+}
+
 /**
  * 关闭指定端口的活动服务器
  */
@@ -1017,6 +1021,10 @@ async function buildCodexDuplicateIndex(targetDir) {
         } catch (error) {
             logger.warn(`${CODEX_OAUTH_CONFIG.logPrefix} Runtime credential inventory lookup failed: ${error.message}`);
         }
+    }
+
+    if (!isBridgeAuthStorageMode()) {
+        return { refreshTokenIndex, identityIndex };
     }
 
     if (!fs.existsSync(targetDir)) {

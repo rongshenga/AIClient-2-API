@@ -276,6 +276,61 @@ describe('Provider API runtime storage compatibility', () => {
         expect(JSON.parse(deleteUnhealthyRes.body).deletedCount).toBe(0);
     });
 
+    test('should delete only matching unhealthy providers by errorType and keep others', async () => {
+        const { currentConfig } = await createDbConfig({
+            'grok-custom': [
+                {
+                    uuid: 'grok-healthy',
+                    customName: 'Healthy',
+                    GROK_COOKIE_TOKEN: 'healthy-token',
+                    isHealthy: true,
+                    errorCount: 0
+                },
+                {
+                    uuid: 'grok-auth',
+                    customName: 'Auth Unhealthy',
+                    GROK_COOKIE_TOKEN: 'auth-token',
+                    isHealthy: false,
+                    errorCount: 2,
+                    lastErrorMessage: '401 Unauthorized'
+                },
+                {
+                    uuid: 'grok-timeout',
+                    customName: 'Timeout Unhealthy',
+                    GROK_COOKIE_TOKEN: 'timeout-token',
+                    isHealthy: false,
+                    errorCount: 3,
+                    lastErrorMessage: 'Request timeout'
+                }
+            ]
+        });
+
+        const deleteReq = {
+            url: '/api/providers/grok-custom/delete-unhealthy?errorType=auth'
+        };
+        const deleteRes = createMockRes();
+        await handleDeleteUnhealthyProviders(deleteReq, deleteRes, currentConfig, null, 'grok-custom');
+        const deletePayload = JSON.parse(deleteRes.body);
+
+        expect(deletePayload.deletedCount).toBe(1);
+        expect(deletePayload.appliedErrorType).toBe('auth');
+        expect(deletePayload.deletedProviders.map((item) => item.uuid)).toEqual(['grok-auth']);
+
+        const snapshot = await readRuntimeSnapshot();
+        expect(snapshot['grok-custom'].map((item) => item.uuid).sort()).toEqual(['grok-healthy', 'grok-timeout']);
+
+        const listReq = {
+            url: '/api/providers/grok-custom?page=1&limit=10&healthFilter=unhealthy&errorType=timeout'
+        };
+        const listRes = createMockRes();
+        await handleGetProviderType(listReq, listRes, currentConfig, null, 'grok-custom');
+        const listPayload = JSON.parse(listRes.body);
+
+        expect(listPayload.errorType).toBe('timeout');
+        expect(listPayload.filteredCount).toBe(1);
+        expect(listPayload.providers.map((item) => item.uuid)).toEqual(['grok-timeout']);
+    });
+
     test('should persist batch import and quick link through runtime storage in db mode', async () => {
         const { currentConfig } = await createDbConfig();
 

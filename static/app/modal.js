@@ -6,6 +6,7 @@ import { t } from './i18n.js';
 
 // 分页配置
 const PROVIDERS_PER_PAGE = 5;
+const PROVIDER_ERROR_TYPE_FILTERS = ['all', 'auth', 'quota', 'timeout', 'network', 'other', 'unknown'];
 let currentPage = 1;
 let allProviders = [];
 let currentProviders = [];
@@ -17,6 +18,7 @@ let currentTotalPages = 1;
 let currentSort = null;
 let cachedModels = []; // 缓存模型列表
 let currentHealthFilter = 'all';
+let currentErrorTypeFilter = 'all';
 
 function normalizePage(value, fallback = 1) {
     const parsed = Number.parseInt(value, 10);
@@ -24,6 +26,14 @@ function normalizePage(value, fallback = 1) {
         return fallback;
     }
     return parsed;
+}
+
+function normalizeErrorTypeFilter(value, fallback = 'all') {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (!normalized) {
+        return fallback;
+    }
+    return PROVIDER_ERROR_TYPE_FILTERS.includes(normalized) ? normalized : fallback;
 }
 
 function buildProviderPageUrl(providerType, page = 1) {
@@ -36,6 +46,7 @@ function buildProviderPageUrl(providerType, page = 1) {
         params.set('sort', currentSort);
     }
     params.set('healthFilter', currentHealthFilter);
+    params.set('errorType', currentErrorTypeFilter);
 
     return `/providers/${encodeURIComponent(providerType)}?${params.toString()}`;
 }
@@ -54,10 +65,13 @@ async function fetchProviderPage(providerType, page = 1) {
 function applyProviderModalPayload(data = {}, { resetFilter = false } = {}) {
     const validFilters = ['all', 'healthy', 'unhealthy'];
     const payloadHealthFilter = validFilters.includes(data.healthFilter) ? data.healthFilter : 'all';
+    const payloadErrorType = normalizeErrorTypeFilter(data.errorType, 'all');
     if (resetFilter) {
         currentHealthFilter = 'all';
+        currentErrorTypeFilter = 'all';
     } else {
         currentHealthFilter = payloadHealthFilter;
+        currentErrorTypeFilter = payloadErrorType;
     }
 
     allProviders = Array.isArray(data.providers) ? data.providers : [];
@@ -88,6 +102,56 @@ function getUnhealthyCountEstimate() {
     }
 
     return allProviders.filter(provider => !provider.isHealthy).length;
+}
+
+function classifyProviderErrorType(provider = {}) {
+    const message = String(provider?.lastErrorMessage || '').toLowerCase();
+    if (!message) {
+        return 'unknown';
+    }
+
+    if (/\b(401|403)\b/.test(message)
+        || /\b(unauthorized|forbidden|accessdenied|invalidtoken|expiredtoken)\b/i.test(message)) {
+        return 'auth';
+    }
+
+    if (/\b(429)\b/.test(message)
+        || /\b(too many requests|rate limit|ratelimit|quota|insufficient)\b/i.test(message)) {
+        return 'quota';
+    }
+
+    if (/\b(timeout|timed out|etimedout|deadline exceeded)\b/i.test(message)) {
+        return 'timeout';
+    }
+
+    if (/\b(network|econnreset|econnrefused|enotfound|fetch failed|socket hang up)\b/i.test(message)) {
+        return 'network';
+    }
+
+    return 'other';
+}
+
+function getDeleteUnhealthyErrorTypeLabel(errorType = 'all') {
+    const normalized = String(errorType || 'all').toLowerCase();
+    const keyMap = {
+        all: 'modal.provider.deleteUnhealthy.errorType.all',
+        auth: 'modal.provider.deleteUnhealthy.errorType.auth',
+        quota: 'modal.provider.deleteUnhealthy.errorType.quota',
+        timeout: 'modal.provider.deleteUnhealthy.errorType.timeout',
+        network: 'modal.provider.deleteUnhealthy.errorType.network',
+        other: 'modal.provider.deleteUnhealthy.errorType.other',
+        unknown: 'modal.provider.deleteUnhealthy.errorType.unknown'
+    };
+    return t(keyMap[normalized] || keyMap.all);
+}
+
+function getUnhealthyCountEstimateByErrorType(errorType = 'all') {
+    const normalized = String(errorType || 'all').toLowerCase();
+    if (normalized === 'all') {
+        return getUnhealthyCountEstimate();
+    }
+
+    return allProviders.filter(provider => !provider.isHealthy && classifyProviderErrorType(provider) === normalized).length;
 }
 
 /**
@@ -124,6 +188,17 @@ function updateProviderFilterButtonsState(modal) {
         const buttonFilter = button.getAttribute('data-filter');
         button.classList.toggle('active', buttonFilter === currentHealthFilter);
     });
+}
+
+function updateProviderErrorTypeFilterState(modal) {
+    if (!modal) return;
+
+    const errorTypeFilterSelect = modal.querySelector('#providerErrorTypeFilter');
+    if (!errorTypeFilterSelect) {
+        return;
+    }
+
+    errorTypeFilterSelect.value = normalizeErrorTypeFilter(currentErrorTypeFilter, 'all');
 }
 
 /**
@@ -207,6 +282,17 @@ function applyProviderHealthFilter(healthFilter = 'all', resetPage = true, scrol
     if (!modal) return;
 
     updateProviderFilterButtonsState(modal);
+    updateProviderErrorTypeFilterState(modal);
+    void goToProviderPage(resetPage ? 1 : currentPage, scrollToTop, true);
+}
+
+function applyProviderErrorTypeFilter(errorType = 'all', resetPage = true, scrollToTop = true) {
+    currentErrorTypeFilter = normalizeErrorTypeFilter(errorType, 'all');
+
+    const modal = document.querySelector('.provider-modal');
+    if (!modal) return;
+
+    updateProviderErrorTypeFilterState(modal);
     void goToProviderPage(resetPage ? 1 : currentPage, scrollToTop, true);
 }
 
@@ -289,6 +375,18 @@ function showProviderManagerModal(data) {
                 <div class="provider-filter-bar">
                     <span class="provider-filter-label" data-i18n="modal.provider.filter.label">${t('modal.provider.filter.label')}</span>
                     <div class="provider-filter-actions">
+                        <label class="provider-filter-select">
+                            <span data-i18n="modal.provider.filter.errorType">${t('modal.provider.filter.errorType')}</span>
+                            <select id="providerErrorTypeFilter" class="form-control" onchange="window.applyProviderErrorTypeFilter(this.value)">
+                                <option value="all" data-i18n="modal.provider.deleteUnhealthy.errorType.all">${t('modal.provider.deleteUnhealthy.errorType.all')}</option>
+                                <option value="auth" data-i18n="modal.provider.deleteUnhealthy.errorType.auth">${t('modal.provider.deleteUnhealthy.errorType.auth')}</option>
+                                <option value="quota" data-i18n="modal.provider.deleteUnhealthy.errorType.quota">${t('modal.provider.deleteUnhealthy.errorType.quota')}</option>
+                                <option value="timeout" data-i18n="modal.provider.deleteUnhealthy.errorType.timeout">${t('modal.provider.deleteUnhealthy.errorType.timeout')}</option>
+                                <option value="network" data-i18n="modal.provider.deleteUnhealthy.errorType.network">${t('modal.provider.deleteUnhealthy.errorType.network')}</option>
+                                <option value="other" data-i18n="modal.provider.deleteUnhealthy.errorType.other">${t('modal.provider.deleteUnhealthy.errorType.other')}</option>
+                                <option value="unknown" data-i18n="modal.provider.deleteUnhealthy.errorType.unknown">${t('modal.provider.deleteUnhealthy.errorType.unknown')}</option>
+                            </select>
+                        </label>
                         <button class="provider-filter-btn active" data-filter="all" data-i18n="modal.provider.filter.all" onclick="window.applyProviderHealthFilter('all')">
                             ${t('modal.provider.filter.all')}
                         </button>
@@ -318,6 +416,7 @@ function showProviderManagerModal(data) {
     // 添加模态框事件监听
     addModalEventListeners(modal);
     updateProviderFilterButtonsState(modal);
+    updateProviderErrorTypeFilterState(modal);
     
     // 先获取该提供商类型的模型列表（只调用一次API）
     const pageProviders = currentProviders;
@@ -413,6 +512,7 @@ async function goToProviderPage(page, scrollToTop = true, forceReload = false) {
         const data = await fetchProviderPage(currentProviderType, targetPage);
         applyProviderModalPayload(data);
         updateProviderFilterButtonsState(modal);
+        updateProviderErrorTypeFilterState(modal);
         renderProviderListWithPagination(modal, { scrollToTop });
     } catch (error) {
         console.error('Failed to load provider page:', error);
@@ -1199,6 +1299,7 @@ async function refreshProviderConfig(providerType) {
         if (modal && modal.getAttribute('data-provider-type') === providerType) {
             applyProviderModalPayload(data);
             updateProviderFilterButtonsState(modal);
+            updateProviderErrorTypeFilterState(modal);
             renderProviderListWithPagination(modal, { scrollToTop: false });
         }
         
@@ -1923,14 +2024,22 @@ async function refreshProviderHealthStatus(uuid, event) {
  */
 async function deleteUnhealthyProviders(providerType) {
     // 先获取不健康节点数量
-    const unhealthyCount = getUnhealthyCountEstimate();
+    const selectedErrorType = normalizeErrorTypeFilter(currentErrorTypeFilter, 'all');
+    const unhealthyCount = getUnhealthyCountEstimateByErrorType(selectedErrorType);
     
     if (unhealthyCount === 0) {
         showToast(t('common.info'), t('modal.provider.deleteUnhealthy.noUnhealthy'), 'info');
         return;
     }
     
-    if (!confirm(t('modal.provider.deleteUnhealthyConfirm', { type: providerType, count: unhealthyCount }))) {
+    const errorTypeLabel = getDeleteUnhealthyErrorTypeLabel(selectedErrorType);
+    const confirmKey = selectedErrorType !== 'all'
+        ? 'modal.provider.deleteUnhealthyConfirmByError'
+        : 'modal.provider.deleteUnhealthyConfirm';
+    const confirmPayload = selectedErrorType !== 'all'
+        ? { type: providerType, count: unhealthyCount, errorType: errorTypeLabel }
+        : { type: providerType, count: unhealthyCount };
+    if (!confirm(t(confirmKey, confirmPayload))) {
         return;
     }
     
@@ -1938,7 +2047,7 @@ async function deleteUnhealthyProviders(providerType) {
         showToast(t('common.info'), t('modal.provider.deleteUnhealthy.deleting'), 'info');
         
         const response = await window.apiClient.delete(
-            `/providers/${encodeURIComponent(providerType)}/delete-unhealthy`
+            `/providers/${encodeURIComponent(providerType)}/delete-unhealthy${selectedErrorType !== 'all' ? `?errorType=${encodeURIComponent(selectedErrorType)}` : ''}`
         );
         
         if (response.success) {
@@ -1948,11 +2057,39 @@ async function deleteUnhealthyProviders(providerType) {
                 'success'
             );
             
-            // 重新加载配置
-            await window.apiClient.post('/reload-config');
-            
-            // 刷新提供商配置显示
+            const deletedCount = Number(response.deletedCount) || 0;
+
+            if (deletedCount > 0) {
+                // 立即从弹窗列表中移除已删除节点，避免必须关闭再打开
+                const deletedUuids = new Set((response.deletedProviders || []).map((item) => item?.uuid).filter(Boolean));
+
+                if (deletedUuids.size > 0) {
+                    allProviders = allProviders.filter((provider) => !deletedUuids.has(provider?.uuid));
+                } else {
+                    if (selectedErrorType === 'all') {
+                        allProviders = allProviders.filter((provider) => provider?.isHealthy === true);
+                    } else {
+                        allProviders = allProviders.filter((provider) => {
+                            if (provider?.isHealthy === true) {
+                                return true;
+                            }
+                            return classifyProviderErrorType(provider) !== selectedErrorType;
+                        });
+                    }
+                }
+
+                currentTotalCount = Math.max(0, currentTotalCount - deletedCount);
+                currentHealthyCount = allProviders.filter((provider) => provider?.isHealthy === true && !provider?.isDisabled).length;
+                currentFilteredCount = allProviders.length;
+            }
+
+            // 刷新主列表和弹窗内分页
             await refreshProviderConfig(providerType);
+
+            if (deletedCount > 0) {
+                // 删除后自动切到全部视图，避免筛选导致“空页但实际还有数据”
+                applyProviderHealthFilter('all', true, false);
+            }
         } else {
             showToast(t('common.error'), t('modal.provider.deleteUnhealthy.failed'), 'error');
         }
@@ -2068,6 +2205,7 @@ export {
     renderProviderList,
     goToProviderPage,
     applyProviderHealthFilter,
+    applyProviderErrorTypeFilter,
     executeRefreshProviderUuidAction,
     refreshProviderUuid,
     refreshProviderHealthStatus
@@ -2090,5 +2228,6 @@ window.refreshUnhealthyUuids = refreshUnhealthyUuids;
 window.showGrokBatchImportModal = showGrokBatchImportModal;
 window.goToProviderPage = goToProviderPage;
 window.applyProviderHealthFilter = applyProviderHealthFilter;
+window.applyProviderErrorTypeFilter = applyProviderErrorTypeFilter;
 window.refreshProviderUuid = refreshProviderUuid;
 window.refreshProviderHealthStatus = refreshProviderHealthStatus;

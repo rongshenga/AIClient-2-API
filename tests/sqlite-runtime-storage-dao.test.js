@@ -269,6 +269,49 @@ describe('SqliteRuntimeStorage DAO SQL', () => {
         })).resolves.toEqual([]);
     });
 
+    test('should build credential secret blob upsert SQL with transactional semantics', async () => {
+        mockClient.query.mockResolvedValueOnce([
+            {
+                credential_asset_id: 'asset-1',
+                encrypted_payload: '{"refresh_token":"abc"}'
+            }
+        ]);
+
+        await expect(storage.upsertCredentialSecretBlob('asset-1', {
+            refresh_token: 'abc'
+        }, {
+            payloadVersion: 'v2',
+            keyVersion: 'k1',
+            checksum: 'sha256:demo'
+        })).resolves.toMatchObject({
+            credential_asset_id: 'asset-1'
+        });
+
+        const sql = mockClient.exec.mock.calls[0][0];
+        expect(sql).toContain('BEGIN IMMEDIATE;');
+        expect(sql).toContain('INSERT INTO credential_secret_blobs');
+        expect(sql).toContain("ON CONFLICT(credential_asset_id) DO UPDATE SET");
+        expect(sql).toContain("'asset-1'");
+        expect(sql).toContain("'v2'");
+        expect(sql).toContain("'k1'");
+        expect(sql.trim().endsWith('COMMIT;')).toBe(true);
+    });
+
+    test('should build expiry candidate query with provider filter and pagination', async () => {
+        mockClient.query.mockResolvedValueOnce([]);
+
+        await expect(storage.listCredentialExpiryCandidates('gemini-cli-oauth', {
+            limit: 88,
+            offset: 12
+        })).resolves.toEqual([]);
+
+        const sql = mockClient.query.mock.calls[0][0];
+        expect(sql).toContain("r.provider_type = 'gemini-cli-oauth'");
+        expect(sql).toContain('FROM provider_registrations r');
+        expect(sql).toContain('LEFT JOIN credential_secret_blobs s');
+        expect(sql).toContain('LIMIT 88 OFFSET 12');
+    });
+
     test('should export provider compat snapshot with secret fields and runtime aliases mapped', async () => {
         mockClient.query
             .mockResolvedValueOnce([{ count: 1 }])

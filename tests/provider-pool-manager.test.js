@@ -1,4 +1,5 @@
 import { jest } from '@jest/globals';
+import * as fs from 'fs';
 
 const mockLogger = {
     info: jest.fn(),
@@ -617,5 +618,79 @@ describe('ProviderPoolManager refresh recovery', () => {
         });
 
         jest.useRealTimers();
+    });
+
+    test('should enqueue near-expiry providers from runtime storage candidates in db_only mode', async () => {
+        const runtimeStorage = {
+            listCredentialExpiryCandidates: jest.fn(async () => [])
+        };
+        const manager = new ProviderPoolManager({
+            'gemini-cli-oauth': [
+                {
+                    uuid: 'gemini-db-1',
+                    customName: 'Gemini DB One',
+                    GEMINI_OAUTH_CREDS_FILE_PATH: 'configs/gemini/legacy.json',
+                    isHealthy: true,
+                    isDisabled: false
+                }
+            ]
+        }, {
+            globalConfig: {
+                LOG_LEVEL: 'error',
+                AUTH_STORAGE_MODE: 'db_only'
+            },
+            runtimeStorage,
+            saveDebounceTime: 1000
+        });
+
+        const providerEntry = manager.providerStatus['gemini-cli-oauth'][0];
+        runtimeStorage.listCredentialExpiryCandidates.mockResolvedValueOnce([
+            {
+                provider_id: providerEntry.providerId,
+                encrypted_payload: JSON.stringify({
+                    expiry_date: Date.now() + 5 * 60 * 1000
+                })
+            }
+        ]);
+        manager._enqueueRefresh = jest.fn();
+
+        await manager.checkAndRefreshExpiringNodes();
+        expect(runtimeStorage.listCredentialExpiryCandidates).toHaveBeenCalledWith('gemini-cli-oauth', expect.any(Object));
+        expect(manager._enqueueRefresh).toHaveBeenCalledWith('gemini-cli-oauth', providerEntry);
+    });
+
+    test('should not fallback to credential files when db_only mode has no expiry candidate', async () => {
+        const runtimeStorage = {
+            listCredentialExpiryCandidates: jest.fn(async () => [])
+        };
+        const readSpy = jest.spyOn(fs, 'readFileSync');
+        const existsSpy = jest.spyOn(fs, 'existsSync').mockReturnValue(true);
+
+        const manager = new ProviderPoolManager({
+            'gemini-cli-oauth': [
+                {
+                    uuid: 'gemini-db-2',
+                    customName: 'Gemini DB Two',
+                    GEMINI_OAUTH_CREDS_FILE_PATH: 'configs/gemini/legacy.json',
+                    isHealthy: true,
+                    isDisabled: false
+                }
+            ]
+        }, {
+            globalConfig: {
+                LOG_LEVEL: 'error',
+                AUTH_STORAGE_MODE: 'db_only'
+            },
+            runtimeStorage,
+            saveDebounceTime: 1000
+        });
+        manager._enqueueRefresh = jest.fn();
+
+        await manager.checkAndRefreshExpiringNodes();
+        expect(manager._enqueueRefresh).not.toHaveBeenCalled();
+        expect(readSpy).not.toHaveBeenCalled();
+
+        readSpy.mockRestore();
+        existsSpy.mockRestore();
     });
 });

@@ -237,4 +237,34 @@ describe('Provider API Summary', () => {
         expect(payload.sort).toBeNull();
         expect(payload.providers.map(item => item.uuid)).toEqual(['gemini-2', 'gemini-1']);
     });
+
+    test('should filter provider details by error type when query parameter is provided', async () => {
+        const req = {
+            url: '/api/providers/gemini-cli-oauth?page=1&limit=10&healthFilter=unhealthy&errorType=auth'
+        };
+        const res = createMockRes();
+        const currentConfig = {};
+        const providers = [
+            { uuid: 'gemini-healthy', customName: 'Healthy', isHealthy: true, isDisabled: false, usageCount: 1, errorCount: 0 },
+            { uuid: 'gemini-auth', customName: 'Auth Error', isHealthy: false, isDisabled: false, usageCount: 0, errorCount: 3, lastErrorMessage: '401 Unauthorized' },
+            { uuid: 'gemini-timeout', customName: 'Timeout Error', isHealthy: false, isDisabled: false, usageCount: 0, errorCount: 2, lastErrorMessage: 'Request timeout' },
+            { uuid: 'gemini-unknown', customName: 'Unknown Error', isHealthy: false, isDisabled: false, usageCount: 0, errorCount: 1 }
+        ];
+        const providerPoolManager = {
+            providerPools: {
+                'gemini-cli-oauth': providers
+            }
+        };
+
+        const handled = await handleGetProviderType(req, res, currentConfig, providerPoolManager, 'gemini-cli-oauth');
+        expect(handled).toBe(true);
+        expect(res.statusCode).toBe(200);
+
+        const payload = JSON.parse(res.body);
+        expect(payload.healthFilter).toBe('unhealthy');
+        expect(payload.errorType).toBe('auth');
+        expect(payload.filteredCount).toBe(1);
+        expect(payload.returnedCount).toBe(1);
+        expect(payload.providers.map((item) => item.uuid)).toEqual(['gemini-auth']);
+    });
 });

@@ -64,6 +64,59 @@ function getUploadConfigSource(req) {
     }
 }
 
+function normalizePositiveInt(value, fallback = null) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function resolveUploadConfigLimit(currentConfig = {}) {
+    const configured = normalizePositiveInt(currentConfig?.UPLOAD_CONFIGS_MAX_RESULTS, null);
+    if (configured === null) {
+        // 默认限制返回数量，避免大号池导致 UI 内存暴涨
+        return 1000;
+    }
+    return configured;
+}
+
+function resolveUploadConfigListOptions(req, currentConfig = {}) {
+    const options = {};
+    try {
+        const requestUrl = new URL(req?.url || '/', 'http://127.0.0.1');
+        const limit = normalizePositiveInt(requestUrl.searchParams.get('limit'), null);
+        const offset = normalizePositiveInt(requestUrl.searchParams.get('offset'), 0);
+        const sort = requestUrl.searchParams.get('sort');
+        const sourceKind = requestUrl.searchParams.get('sourceKind');
+
+        if (limit !== null) {
+            options.limit = limit;
+        } else {
+            const defaultLimit = resolveUploadConfigLimit(currentConfig);
+            if (defaultLimit !== null) {
+                options.limit = defaultLimit;
+            }
+        }
+
+        if (Number.isFinite(offset) && offset >= 0) {
+            options.offset = offset;
+        }
+
+        if (sort === 'asc' || sort === 'desc') {
+            options.sort = sort;
+        }
+
+        if (typeof sourceKind === 'string' && sourceKind.trim()) {
+            options.sourceKind = sourceKind.trim();
+        }
+    } catch {
+        const defaultLimit = resolveUploadConfigLimit(currentConfig);
+        if (defaultLimit !== null) {
+            options.limit = defaultLimit;
+        }
+    }
+
+    return options;
+}
+
 function mapRuntimeCredentialAssetToConfigItem(asset = {}) {
     const rawPath = String(asset.source_path || '').replace(/\\/g, '/');
     const normalizedPath = rawPath.replace(/^\.\//, '');
@@ -99,9 +152,10 @@ function mapRuntimeCredentialAssetToConfigItem(asset = {}) {
     };
 }
 
-async function buildRuntimeConfigInventory(currentConfig = {}) {
+async function buildRuntimeConfigInventory(currentConfig = {}, options = {}) {
     const assets = await listCredentialAssetsWithRuntimeStorage(currentConfig, null, {
-        sort: 'desc'
+        sort: 'desc',
+        ...options
     });
 
     if (!Array.isArray(assets) || assets.length === 0) {
@@ -118,20 +172,28 @@ export async function handleGetUploadConfigs(req, res, currentConfig, providerPo
     const debugEnabled = isUploadConfigDebugEnabled(req, currentConfig);
     const startedAt = Date.now();
     const source = getUploadConfigSource(req);
+    const listOptions = source === 'runtime' ? resolveUploadConfigListOptions(req, currentConfig) : {};
 
     logUploadConfigDebug(debugEnabled, 'GET /api/upload-configs started', {
         path: req?.url || '/api/upload-configs',
-        source
+        source,
+        listOptions
     });
 
     try {
         const configFiles = source === 'scan'
             ? await scanConfigFiles(currentConfig, providerPoolManager, { debugEnabled })
-            : await buildRuntimeConfigInventory(currentConfig);
+            : await buildRuntimeConfigInventory(currentConfig, listOptions);
+        if (source === 'runtime' && Number.isFinite(listOptions?.limit) && Array.isArray(configFiles)) {
+            if (configFiles.length >= listOptions.limit) {
+                logger.warn(`[UI API] Upload configs list truncated at ${listOptions.limit} items (adjust UPLOAD_CONFIGS_MAX_RESULTS or query limit/offset).`);
+            }
+        }
         logUploadConfigDebug(debugEnabled, 'GET /api/upload-configs completed', {
             count: Array.isArray(configFiles) ? configFiles.length : 0,
             durationMs: Date.now() - startedAt,
-            source
+            source,
+            listOptions
         });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(configFiles));
