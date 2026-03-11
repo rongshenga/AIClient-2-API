@@ -552,11 +552,7 @@ describe('Runtime storage migration service', () => {
         expect(verifyResult.databaseSummary).toMatchObject({
             sessionCount: 1
         });
-        expect(verifyResult.featureFlagFallback).toMatchObject({
-            RUNTIME_STORAGE_BACKEND: 'file',
-            RUNTIME_STORAGE_DUAL_WRITE: false,
-            triggeredBy: 'verifyRuntimeStorageMigration'
-        });
+        expect(verifyResult.featureFlagFallback).toBeNull();
         expect(verifyResult.acceptanceSummary.credentials).toMatchObject({
             dedupeHitCount: 1
         });

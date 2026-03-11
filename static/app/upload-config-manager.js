@@ -17,7 +17,7 @@ function logUploadConfigUiDebug(message, payload = null, level = 'log') {
 }
 
 function isConfigSectionActive() {
-    const configSection = document.getElementById('config');
+    const configSection = document.getElementById('upload-config');
     return Boolean(configSection && configSection.classList.contains('active'));
 }
 
@@ -952,7 +952,7 @@ function initUploadConfigManager() {
 
     if (!uploadConfigSectionListenerBound && typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
         window.addEventListener('ui:section-activated', (event) => {
-            if (event?.detail?.sectionId !== 'config') {
+            if (event?.detail?.sectionId !== 'upload-config') {
                 return;
             }
             void ensureInitialConfigListLoaded('section_activated');
@@ -960,7 +960,7 @@ function initUploadConfigManager() {
         uploadConfigSectionListenerBound = true;
     }
 
-    // 若初始化时已在配置页，立即触发首次加载；否则延迟到用户切换到配置页
+    // 若初始化时已在凭据页，立即触发首次加载；否则延迟到用户切换到凭据页
     if (isConfigSectionActive()) {
         void ensureInitialConfigListLoaded('init_active_section');
     }

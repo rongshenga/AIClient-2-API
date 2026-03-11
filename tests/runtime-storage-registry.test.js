@@ -7,13 +7,11 @@ const mockLogger = {
     error: jest.fn()
 };
 
-describe('Runtime storage registry fallback', () => {
+describe('Runtime storage registry db-only', () => {
     let closeRuntimeStorage;
     let getRuntimeStorage;
     let initializeRuntimeStorage;
     let loadProviderPoolsCompatSnapshot;
-    let MockFileRuntimeStorage;
-    let fallbackStorage;
     let mockCreateRuntimeStorage;
     let preferredStorage;
 
@@ -21,20 +19,9 @@ describe('Runtime storage registry fallback', () => {
         jest.resetModules();
 
         preferredStorage = {
-            initialize: jest.fn(),
+            initialize: jest.fn(async () => preferredStorage),
             close: jest.fn(),
             getInfo: jest.fn(() => ({ backend: 'db' })),
-            replaceProviderPoolsSnapshot: jest.fn(async (providerPools = {}) => providerPools),
-            getCredentialSecretBlob: jest.fn(async () => null),
-            upsertCredentialSecretBlob: jest.fn(async (_id, payload = null) => payload),
-            listCredentialExpiryCandidates: jest.fn(async () => []),
-            getAdminPasswordHash: jest.fn(async () => null),
-            saveAdminPasswordHash: jest.fn(async (record = {}) => record)
-        };
-        fallbackStorage = {
-            initialize: jest.fn(async () => fallbackStorage),
-            close: jest.fn(),
-            getInfo: jest.fn(() => ({ backend: 'file' })),
             loadProviderPoolsSnapshot: jest.fn(async () => ({})),
             replaceProviderPoolsSnapshot: jest.fn(async (providerPools = {}) => providerPools),
             getCredentialSecretBlob: jest.fn(async () => null),
@@ -44,7 +31,6 @@ describe('Runtime storage registry fallback', () => {
             saveAdminPasswordHash: jest.fn(async (record = {}) => record)
         };
         mockCreateRuntimeStorage = jest.fn(() => preferredStorage);
-        MockFileRuntimeStorage = jest.fn(() => fallbackStorage);
 
         jest.doMock('../src/utils/logger.js', () => ({
             __esModule: true,
@@ -53,10 +39,6 @@ describe('Runtime storage registry fallback', () => {
         jest.doMock('../src/storage/runtime-storage-factory.js', () => ({
             __esModule: true,
             createRuntimeStorage: mockCreateRuntimeStorage
-        }));
-        jest.doMock('../src/storage/backends/file-runtime-storage.js', () => ({
-            __esModule: true,
-            FileRuntimeStorage: MockFileRuntimeStorage
         }));
 
         ({
@@ -77,196 +59,110 @@ describe('Runtime storage registry fallback', () => {
         mockLogger.error.mockClear();
     });
 
-    test('should fallback to file backend when db initialization fails and fallback is enabled', async () => {
-        preferredStorage.initialize.mockRejectedValue(new Error('db init failed'));
+    test('should initialize runtime storage in db-only mode', async () => {
+        const config = {
+            RUNTIME_STORAGE_BACKEND: 'file'
+        };
 
-        const storage = await initializeRuntimeStorage({
-            RUNTIME_STORAGE_BACKEND: 'db',
-            RUNTIME_STORAGE_FALLBACK_TO_FILE: true
+        const storage = await initializeRuntimeStorage(config);
+        expect(storage).toBeTruthy();
+        expect(getRuntimeStorage()).toBeTruthy();
+        expect(mockCreateRuntimeStorage).toHaveBeenCalledTimes(1);
+
+        const info = storage.getInfo();
+        expect(info).toMatchObject({
+            backend: 'db',
+            requestedBackend: 'db',
+            authoritativeSource: 'database',
+            dualWriteEnabled: false,
+            fallbackEnabled: false,
+            featureFlagRollback: null
         });
-
-        expect(storage.getInfo().backend).toBe('file');
-        expect(getRuntimeStorage().getInfo().backend).toBe('file');
-        expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('Activated file fallback'));
+        expect(config.RUNTIME_STORAGE_INFO).toMatchObject({
+            backend: 'db',
+            requestedBackend: 'db'
+        });
     });
 
-    test('should rethrow initialization error when file fallback is disabled', async () => {
+    test('should rethrow initialization error without fallback', async () => {
         preferredStorage.initialize.mockRejectedValue(new Error('db init failed'));
 
-        await expect(initializeRuntimeStorage({
-            RUNTIME_STORAGE_BACKEND: 'db',
-            RUNTIME_STORAGE_FALLBACK_TO_FILE: false
-        })).rejects.toThrow('db init failed');
-
+        await expect(initializeRuntimeStorage({ RUNTIME_STORAGE_BACKEND: 'db' })).rejects.toThrow('db init failed');
         expect(mockLogger.warn).not.toHaveBeenCalled();
     });
 
-    test('should retry provider mutation on file backend after db write failure', async () => {
-        const config = {
-            RUNTIME_STORAGE_BACKEND: 'db',
-            RUNTIME_STORAGE_FALLBACK_TO_FILE: true
-        };
+    test('should surface provider write failure from db backend', async () => {
         const dbWriteError = new Error('database is locked');
         dbWriteError.code = 'SQLITE_BUSY';
         preferredStorage.replaceProviderPoolsSnapshot.mockRejectedValue(dbWriteError);
 
-        const storage = await initializeRuntimeStorage(config);
-        const providerPools = {
-            'grok-custom': [
-                {
-                    uuid: 'grok-fallback-1'
-                }
-            ]
-        };
-
-        await expect(storage.replaceProviderPoolsSnapshot(providerPools)).resolves.toEqual(providerPools);
-        expect(config.RUNTIME_STORAGE_BACKEND).toBe('file');
-        expect(config.RUNTIME_STORAGE_DUAL_WRITE).toBe(false);
-        expect(storage.getInfo()).toMatchObject({
-            backend: 'file',
-            requestedBackend: 'db',
-            authoritativeSource: 'file'
-        });
-        expect(storage.getInfo().lastFallback).toMatchObject({
-            status: 'applied',
-            triggeredBy: 'replaceProviderPoolsSnapshot',
-            toBackend: 'file'
-        });
-        expect(storage.getInfo().lastMutation).toMatchObject({
-            status: 'success',
-            backend: 'file',
-            recoveredViaFallback: true
-        });
-        expect(fallbackStorage.replaceProviderPoolsSnapshot).toHaveBeenCalledWith(providerPools);
-    });
-
-    test('should not fallback when dual-write secondary sync fails', async () => {
-        preferredStorage.getInfo.mockReturnValue({ backend: 'dual-write' });
-        const secondaryWriteError = new Error('secondary write failed');
-        secondaryWriteError.code = 'runtime_storage_secondary_write_failed';
-        secondaryWriteError.phase = 'write_secondary';
-        secondaryWriteError.domain = 'runtime_storage';
-        secondaryWriteError.details = {
-            storageRole: 'secondary'
-        };
-        preferredStorage.replaceProviderPoolsSnapshot.mockRejectedValue(secondaryWriteError);
-
         const config = {
-            RUNTIME_STORAGE_BACKEND: 'db',
-            RUNTIME_STORAGE_DUAL_WRITE: true,
-            RUNTIME_STORAGE_FALLBACK_TO_FILE: true
+            RUNTIME_STORAGE_BACKEND: 'db'
         };
         const storage = await initializeRuntimeStorage(config);
 
         await expect(storage.replaceProviderPoolsSnapshot({ 'grok-custom': [] })).rejects.toMatchObject({
-            code: 'runtime_storage_secondary_write_failed',
+            code: 'SQLITE_BUSY',
+            phase: 'write',
             domain: 'provider',
-            backend: 'dual-write',
-            retryable: false,
-            details: expect.objectContaining({
-                storageRole: 'secondary'
-            })
+            backend: 'db'
         });
-        expect(storage.getInfo()).toMatchObject({
-            backend: 'dual-write',
-            requestedBackend: 'dual-write',
+
+        const info = storage.getInfo();
+        expect(info).toMatchObject({
+            backend: 'db',
+            requestedBackend: 'db',
             authoritativeSource: 'database',
-            dualWriteEnabled: true,
             lastFallback: null
         });
-        expect(storage.getInfo().lastError).toMatchObject({
+        expect(info.lastError).toMatchObject({
             status: 'failed',
             operation: 'replaceProviderPoolsSnapshot',
-            backend: 'dual-write'
+            phase: 'write',
+            backend: 'db'
         });
-        expect(config.RUNTIME_STORAGE_BACKEND).toBe('db');
-        expect(config.RUNTIME_STORAGE_DUAL_WRITE).toBe(true);
-        expect(mockLogger.warn).not.toHaveBeenCalled();
     });
 
     test('should return empty snapshot when compat snapshot is requested without config', async () => {
         await expect(loadProviderPoolsCompatSnapshot({})).resolves.toEqual({});
         expect(mockCreateRuntimeStorage).not.toHaveBeenCalled();
     });
-test('should surface fallback retry failure when file fallback write also fails', async () => {
-    const config = {
-        RUNTIME_STORAGE_BACKEND: 'db',
-        RUNTIME_STORAGE_FALLBACK_TO_FILE: true
-    };
-    const dbWriteError = new Error('database is locked');
-    dbWriteError.code = 'SQLITE_BUSY';
-    preferredStorage.replaceProviderPoolsSnapshot.mockRejectedValue(dbWriteError);
-    fallbackStorage.replaceProviderPoolsSnapshot.mockRejectedValue(new Error('file write failed'));
 
-    const storage = await initializeRuntimeStorage(config);
+    test('should proxy auth password hash operations to active runtime storage', async () => {
+        const storage = await initializeRuntimeStorage({ RUNTIME_STORAGE_BACKEND: 'db' });
+        preferredStorage.getAdminPasswordHash.mockResolvedValueOnce({
+            version: 1,
+            algorithm: 'sha256-salt'
+        });
 
-    await expect(storage.replaceProviderPoolsSnapshot({ 'grok-custom': [] })).rejects.toMatchObject({
-        code: 'runtime_storage_fallback_retry_failed',
-        phase: 'fallback',
-        backend: 'file'
-    });
-    expect(storage.getInfo()).toMatchObject({
-        backend: 'file',
-        requestedBackend: 'db',
-        authoritativeSource: 'file'
-    });
-    expect(storage.getInfo().lastFallback).toMatchObject({
-        status: 'applied',
-        triggeredBy: 'replaceProviderPoolsSnapshot',
-        toBackend: 'file'
-    });
-    expect(storage.getInfo().lastError).toMatchObject({
-        status: 'failed',
-        phase: 'write',
-        backend: 'file'
-    });
-    expect(config.RUNTIME_STORAGE_BACKEND).toBe('file');
-    expect(config.RUNTIME_STORAGE_DUAL_WRITE).toBe(false);
-});
-
-test('should proxy auth password hash operations to active runtime storage', async () => {
-    const config = {
-        RUNTIME_STORAGE_BACKEND: 'db',
-        RUNTIME_STORAGE_FALLBACK_TO_FILE: true
-    };
-    const storage = await initializeRuntimeStorage(config);
-    preferredStorage.getAdminPasswordHash.mockResolvedValueOnce({
-        version: 1,
-        algorithm: 'sha256-salt'
+        await expect(storage.getAdminPasswordHash()).resolves.toMatchObject({
+            version: 1,
+            algorithm: 'sha256-salt'
+        });
+        await expect(storage.saveAdminPasswordHash({ version: 1 })).resolves.toMatchObject({ version: 1 });
+        expect(preferredStorage.getAdminPasswordHash).toHaveBeenCalledTimes(1);
+        expect(preferredStorage.saveAdminPasswordHash).toHaveBeenCalledWith({ version: 1 });
     });
 
-    await expect(storage.getAdminPasswordHash()).resolves.toMatchObject({
-        version: 1,
-        algorithm: 'sha256-salt'
-    });
-    await expect(storage.saveAdminPasswordHash({ version: 1 })).resolves.toMatchObject({ version: 1 });
-    expect(preferredStorage.getAdminPasswordHash).toHaveBeenCalledTimes(1);
-    expect(preferredStorage.saveAdminPasswordHash).toHaveBeenCalledWith({ version: 1 });
-});
+    test('should proxy credential secret and expiry candidate operations to active runtime storage', async () => {
+        const storage = await initializeRuntimeStorage({ RUNTIME_STORAGE_BACKEND: 'db' });
+        preferredStorage.getCredentialSecretBlob.mockResolvedValueOnce({
+            credential_asset_id: 'asset-1'
+        });
+        preferredStorage.listCredentialExpiryCandidates.mockResolvedValueOnce([
+            { provider_id: 'prov-1' }
+        ]);
 
-test('should proxy credential secret and expiry candidate operations to active runtime storage', async () => {
-    const config = {
-        RUNTIME_STORAGE_BACKEND: 'db',
-        RUNTIME_STORAGE_FALLBACK_TO_FILE: true
-    };
-    const storage = await initializeRuntimeStorage(config);
-    preferredStorage.getCredentialSecretBlob.mockResolvedValueOnce({
-        credential_asset_id: 'asset-1'
-    });
-    preferredStorage.listCredentialExpiryCandidates.mockResolvedValueOnce([
-        { provider_id: 'prov-1' }
-    ]);
+        await expect(storage.getCredentialSecretBlob('asset-1')).resolves.toMatchObject({
+            credential_asset_id: 'asset-1'
+        });
+        await expect(storage.upsertCredentialSecretBlob('asset-1', { foo: 'bar' })).resolves.toMatchObject({ foo: 'bar' });
+        await expect(storage.listCredentialExpiryCandidates('gemini-cli-oauth')).resolves.toEqual([
+            { provider_id: 'prov-1' }
+        ]);
 
-    await expect(storage.getCredentialSecretBlob('asset-1')).resolves.toMatchObject({
-        credential_asset_id: 'asset-1'
+        expect(preferredStorage.getCredentialSecretBlob).toHaveBeenCalledWith('asset-1');
+        expect(preferredStorage.upsertCredentialSecretBlob).toHaveBeenCalledWith('asset-1', { foo: 'bar' });
+        expect(preferredStorage.listCredentialExpiryCandidates).toHaveBeenCalledWith('gemini-cli-oauth');
     });
-    await expect(storage.upsertCredentialSecretBlob('asset-1', { foo: 'bar' })).resolves.toMatchObject({ foo: 'bar' });
-    await expect(storage.listCredentialExpiryCandidates('gemini-cli-oauth')).resolves.toEqual([
-        { provider_id: 'prov-1' }
-    ]);
-
-    expect(preferredStorage.getCredentialSecretBlob).toHaveBeenCalledWith('asset-1');
-    expect(preferredStorage.upsertCredentialSecretBlob).toHaveBeenCalledWith('asset-1', { foo: 'bar' });
-    expect(preferredStorage.listCredentialExpiryCandidates).toHaveBeenCalledWith('gemini-cli-oauth');
-});
 });

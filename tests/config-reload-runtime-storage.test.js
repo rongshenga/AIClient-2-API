@@ -321,7 +321,7 @@ describe('Config reload runtime storage compatibility', () => {
         expect(res.statusCode).toBe(200);
         const payload = JSON.parse(res.body);
         expect(payload.REQUIRED_API_KEY).toBe('123456');
-        expect(payload.RUNTIME_STORAGE_BACKEND).toBe('db');
+        expect(payload.RUNTIME_STORAGE_BACKEND).toBeUndefined();
         expect(payload.systemPrompt).toBe('system prompt');
         expect(payload.providerPools).toBeUndefined();
         expect(payload.SYSTEM_PROMPT_CONTENT).toBeUndefined();

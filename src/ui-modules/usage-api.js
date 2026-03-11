@@ -4,6 +4,7 @@ import { serviceInstances, getServiceAdapter } from '../providers/adapter.js';
 import { formatKiroUsage, formatGeminiUsage, formatAntigravityUsage, formatCodexUsage, formatGrokUsage } from '../services/usage-service.js';
 import { readUsageCache, readUsageCacheSummary, writeUsageCache, readProviderUsageCache, updateProviderUsageCache } from './usage-cache.js';
 import { broadcastEvent } from './event-broadcast.js';
+import { getRequestBody } from '../utils/common.js';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { getRuntimeStorage } from '../storage/runtime-storage-registry.js';
@@ -27,8 +28,9 @@ const DEFAULT_PROVIDER_USAGE_CACHE_READ_TIMEOUT_MS = 5000;
 const DEFAULT_PROVIDER_USAGE_INSTANCE_TIMEOUT_MS = 30000;
 const DEFAULT_USAGE_SYNC_QUERY_MAX_PROVIDER_COUNT = 500;
 const DEFAULT_USAGE_TASK_PERSIST_INTERVAL_MS = 1000;
-const DEFAULT_PROVIDER_USAGE_PAGE_LIMIT = 100;
-const MAX_PROVIDER_USAGE_PAGE_LIMIT = 500;
+const DEFAULT_PROVIDER_USAGE_PAGE_LIMIT = 30;
+const PROVIDER_USAGE_REFRESH_SCOPE_PAGE = 'page';
+const PROVIDER_USAGE_REFRESH_SCOPE_PROVIDER_ALL = 'provider_all';
 const usageRefreshTasks = new Map();
 const usageRefreshTaskPersistState = new Map();
 
@@ -192,7 +194,23 @@ function getUsageTaskStorage() {
 }
 
 function isTerminalUsageRefreshTask(task) {
-    return task?.status === 'completed' || task?.status === 'failed';
+    return task?.status === 'completed' || task?.status === 'failed' || task?.status === 'canceled';
+}
+
+function isActiveUsageRefreshTask(task) {
+    return task?.status === 'running' || task?.status === 'canceling';
+}
+
+function normalizeProviderRefreshScope(value) {
+    if (typeof value !== 'string') {
+        return PROVIDER_USAGE_REFRESH_SCOPE_PAGE;
+    }
+
+    const normalized = value.trim().toLowerCase();
+    if (normalized === PROVIDER_USAGE_REFRESH_SCOPE_PROVIDER_ALL) {
+        return PROVIDER_USAGE_REFRESH_SCOPE_PROVIDER_ALL;
+    }
+    return PROVIDER_USAGE_REFRESH_SCOPE_PAGE;
 }
 
 function clearUsageRefreshTaskPersistState(taskId) {
@@ -366,16 +384,43 @@ function parseBoolean(value) {
 
 function parseProviderUsagePageQuery(url) {
     const rawPage = parsePositiveInt(url?.searchParams?.get('page'));
-    const rawLimit = parsePositiveInt(url?.searchParams?.get('limit'));
 
     const page = Math.max(1, rawPage || 1);
-    const limit = Math.min(Math.max(1, rawLimit || DEFAULT_PROVIDER_USAGE_PAGE_LIMIT), MAX_PROVIDER_USAGE_PAGE_LIMIT);
+    const limit = DEFAULT_PROVIDER_USAGE_PAGE_LIMIT;
 
     return {
         page,
         limit,
         offset: (page - 1) * limit
     };
+}
+
+function parseProviderRefreshScopeFromUrl(url) {
+    return normalizeProviderRefreshScope(url?.searchParams?.get('scope'));
+}
+
+async function parseUsageTaskAction(req) {
+    const host = req?.headers?.host || '127.0.0.1';
+    const requestUrl = new URL(req?.url || '/', `http://${host}`);
+    const queryAction = requestUrl.searchParams.get('action');
+    if (typeof queryAction === 'string' && queryAction.trim()) {
+        return queryAction.trim().toLowerCase();
+    }
+
+    if (typeof req?.on !== 'function') {
+        return '';
+    }
+
+    try {
+        const requestBody = await getRequestBody(req);
+        if (typeof requestBody?.action === 'string' && requestBody.action.trim()) {
+            return requestBody.action.trim().toLowerCase();
+        }
+    } catch (error) {
+        return '';
+    }
+
+    return '';
 }
 
 function paginateProviderUsageResult(result = {}, pageQuery = null) {
@@ -567,22 +612,28 @@ function createUsageRefreshTask(input = {}) {
     pruneUsageRefreshTasks();
 
     const now = Date.now();
+    const normalizedPage = parsePositiveInt(input.page);
+    const normalizedLimit = parsePositiveInt(input.limit);
     const task = {
         id: randomUUID(),
         type: input.type || 'provider',
         providerType: input.providerType || null,
+        scope: input.scope || null,
+        page: normalizedPage ? Math.max(1, normalizedPage) : null,
+        limit: normalizedLimit ? Math.max(1, normalizedLimit) : null,
         status: 'running',
         createdAt: new Date(now).toISOString(),
         createdAtMs: now,
         startedAt: new Date(now).toISOString(),
         finishedAt: null,
+        cancelRequestedAt: null,
         error: null,
         result: null,
         progress: {
             totalProviders: input.type === 'all' ? supportedProviders.length : 1,
             processedProviders: 0,
             currentProvider: input.providerType || null,
-            totalInstances: 0,
+            totalInstances: Number.isFinite(Number(input.totalInstances)) ? Number(input.totalInstances) : 0,
             processedInstances: 0,
             successCount: 0,
             errorCount: 0,
@@ -602,7 +653,7 @@ function findRunningUsageRefreshTask(type, providerType = null) {
     pruneUsageRefreshTasks();
 
     for (const task of usageRefreshTasks.values()) {
-        if (!task || task.status !== 'running' || task.type !== type) {
+        if (!task || !isActiveUsageRefreshTask(task) || task.type !== type) {
             continue;
         }
 
@@ -621,7 +672,7 @@ function findRunningUsageRefreshTask(type, providerType = null) {
  * @param {Object} task - 刷新任务
  */
 function broadcastUsageRefreshTaskUpdate(task) {
-    if (!task || (task.status !== 'completed' && task.status !== 'failed')) {
+    if (!task || !isTerminalUsageRefreshTask(task)) {
         return;
     }
 
@@ -649,7 +700,7 @@ function pruneUsageRefreshTasks() {
             continue;
         }
 
-        if ((task.status === 'completed' || task.status === 'failed') && task.finishedAt) {
+        if (isTerminalUsageRefreshTask(task) && task.finishedAt) {
             const finishedMs = new Date(task.finishedAt).getTime();
             if (Number.isFinite(finishedMs) && now - finishedMs > USAGE_TASK_RETENTION_MS) {
                 usageRefreshTasks.delete(taskId);
@@ -663,7 +714,7 @@ function pruneUsageRefreshTasks() {
     }
 
     const sortedRemovable = Array.from(usageRefreshTasks.values())
-        .filter(task => task && task.status !== 'running')
+        .filter(task => task && !isActiveUsageRefreshTask(task))
         .sort((a, b) => (a.createdAtMs || 0) - (b.createdAtMs || 0));
 
     let removeCount = usageRefreshTasks.size - MAX_USAGE_TASK_RECORDS;
@@ -805,7 +856,7 @@ function normalizeCachedInstanceResult(providerType, provider, cachedInstance) {
  * @param {Object|null} cachedProviderData - 提供商缓存
  * @returns {Array<Object>} 候选列表
  */
-function createProviderRefreshCandidates(providerType, providers, cachedProviderData = null) {
+function createProviderRefreshCandidates(providerType, providers, cachedProviderData = null, options = {}) {
     const cachedInstanceMap = new Map();
     const cachedInstances = Array.isArray(cachedProviderData?.instances) ? cachedProviderData.instances : [];
 
@@ -816,7 +867,7 @@ function createProviderRefreshCandidates(providerType, providers, cachedProvider
         }
     });
 
-    return providers
+    const providerCandidates = providers
         .map((provider, originalIndex) => {
             const cacheKey = getProviderInstanceCacheKey(provider, originalIndex);
             const cachedInstance = cachedInstanceMap.get(cacheKey) || null;
@@ -830,16 +881,71 @@ function createProviderRefreshCandidates(providerType, providers, cachedProvider
                     cachedInstance?.lastRefreshedAt || cachedInstance?.timestamp || cachedProviderData?.timestamp
                 )
             };
-        })
-        .sort((left, right) => {
-            if (left.priorityMissing !== right.priorityMissing) {
-                return left.priorityMissing - right.priorityMissing;
-            }
-            if (left.priorityTimestampMs !== right.priorityTimestampMs) {
-                return left.priorityTimestampMs - right.priorityTimestampMs;
-            }
-            return left.originalIndex - right.originalIndex;
         });
+
+    if (options.preserveOrder === true) {
+        return providerCandidates;
+    }
+
+    return providerCandidates.sort((left, right) => {
+        if (left.priorityMissing !== right.priorityMissing) {
+            return left.priorityMissing - right.priorityMissing;
+        }
+        if (left.priorityTimestampMs !== right.priorityTimestampMs) {
+            return left.priorityTimestampMs - right.priorityTimestampMs;
+        }
+        return left.originalIndex - right.originalIndex;
+    });
+}
+
+function buildProviderRefreshCandidatesForScope(providerType, currentConfig, providerPoolManager, options = {}) {
+    const scope = normalizeProviderRefreshScope(options.scope);
+    const page = Math.max(1, parsePositiveInt(options.page) || 1);
+    const limit = DEFAULT_PROVIDER_USAGE_PAGE_LIMIT;
+    const providers = getProvidersForType(providerType, currentConfig, providerPoolManager);
+    const orderedCandidates = createProviderRefreshCandidates(providerType, providers, null, {
+        preserveOrder: true
+    });
+
+    if (scope === PROVIDER_USAGE_REFRESH_SCOPE_PROVIDER_ALL) {
+        return {
+            scope,
+            page: 1,
+            limit,
+            totalCandidates: orderedCandidates.length,
+            candidates: orderedCandidates.map((candidate, index) => ({
+                ...candidate,
+                refreshIndex: index
+            }))
+        };
+    }
+
+    const offset = Math.max(0, (page - 1) * limit);
+    const slicedCandidates = orderedCandidates.slice(offset, offset + limit).map((candidate, index) => ({
+        ...candidate,
+        refreshIndex: index
+    }));
+
+    return {
+        scope,
+        page,
+        limit,
+        totalCandidates: slicedCandidates.length,
+        candidates: slicedCandidates
+    };
+}
+
+function toUsageTaskResponsePayload(task) {
+    return {
+        taskId: task.id,
+        type: task.type,
+        providerType: task.providerType,
+        status: task.status,
+        scope: task.scope || null,
+        page: task.page || null,
+        limit: task.limit || null,
+        pollIntervalMs: USAGE_TASK_DEFAULT_POLL_INTERVAL_MS
+    };
 }
 
 /**
@@ -875,8 +981,8 @@ function buildProviderUsageSnapshot(providerType, result) {
  * @param {string} providerType - 提供商类型
  * @param {Object} result - 当前聚合结果
  */
-async function persistProviderUsageSnapshot(providerType, result) {
-    await updateProviderUsageCache(providerType, buildProviderUsageSnapshot(providerType, result));
+async function persistProviderUsageSnapshot(providerType, result, cacheOptions = {}) {
+    await updateProviderUsageCache(providerType, buildProviderUsageSnapshot(providerType, result), cacheOptions);
 }
 
 /**
@@ -1045,18 +1151,21 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
     const startedAt = Date.now();
     const lifecycleLoggingEnabled = shouldEnableUsageLifecycleLogging(currentConfig);
     const providers = getProvidersForType(providerType, currentConfig, providerPoolManager);
+    const targetCandidates = Array.isArray(options.targetCandidates) ? options.targetCandidates : null;
+    const useFrozenCandidates = targetCandidates !== null;
     logUsageLifecycle(lifecycleLoggingEnabled, `Preparing provider usage refresh for ${providerType}`, {
-        providerCount: providers.length
+        providerCount: providers.length,
+        useFrozenCandidates
     });
     const result = {
         providerType,
-        instances: new Array(providers.length),
-        totalCount: providers.length,
+        instances: new Array(useFrozenCandidates ? targetCandidates.length : providers.length),
+        totalCount: useFrozenCandidates ? targetCandidates.length : providers.length,
         successCount: 0,
         errorCount: 0
     };
     const hasCachedProviderData = Object.prototype.hasOwnProperty.call(options, 'cachedProviderData');
-    const skipCacheRead = options.skipCacheRead === true || hasCachedProviderData;
+    const skipCacheRead = options.skipCacheRead === true || hasCachedProviderData || useFrozenCandidates;
     let cachedProviderData = hasCachedProviderData ? options.cachedProviderData : null;
     const cacheReadStartedAt = Date.now();
     const cacheReadTimeoutMs = resolveProviderUsageCacheReadTimeout(currentConfig);
@@ -1080,17 +1189,23 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
         durationMs: Date.now() - cacheReadStartedAt,
         timeoutMs: skipCacheRead ? null : cacheReadTimeoutMs
     });
-    const providerCandidates = createProviderRefreshCandidates(providerType, providers, cachedProviderData);
+    const providerCandidates = useFrozenCandidates
+        ? targetCandidates
+        : createProviderRefreshCandidates(providerType, providers, cachedProviderData);
     logUsageLifecycle(lifecycleLoggingEnabled, `Provider usage refresh candidates prepared for ${providerType}`, {
         providerType,
         candidateCount: providerCandidates.length,
-        durationMs: Date.now() - startedAt
+        durationMs: Date.now() - startedAt,
+        useFrozenCandidates
     });
 
-    providerCandidates.forEach((candidate) => {
+    providerCandidates.forEach((candidate, candidateIndex) => {
         const cachedInstance = normalizeCachedInstanceResult(providerType, candidate.provider, candidate.cachedInstance);
         if (cachedInstance) {
-            result.instances[candidate.originalIndex] = cachedInstance;
+            const targetIndex = useFrozenCandidates
+                ? (Number.isFinite(Number(candidate.refreshIndex)) ? Number(candidate.refreshIndex) : candidateIndex)
+                : candidate.originalIndex;
+            result.instances[targetIndex] = cachedInstance;
         }
     });
 
@@ -1119,6 +1234,9 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
     }
 
     const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+    const isCancellationRequested = typeof options.isCancellationRequested === 'function'
+        ? options.isCancellationRequested
+        : null;
     let processedInstances = 0;
     let successCount = 0;
     let errorCount = 0;
@@ -1159,6 +1277,10 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
     };
 
     const maybePersistSnapshot = async (force = false) => {
+        if (options.disableInterimSnapshot === true) {
+            return;
+        }
+
         if (processedInstances === 0) {
             return;
         }
@@ -1170,7 +1292,7 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
             return;
         }
 
-        await persistProviderUsageSnapshot(providerType, result);
+        await persistProviderUsageSnapshot(providerType, result, options.cacheWriteOptions || {});
         lastPersistAt = now;
         lastPersistProcessed = processedInstances;
     };
@@ -1184,6 +1306,15 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
     emitProgress(true, 1);
 
     for (let groupIndex = 0; groupIndex < providerGroups.length; groupIndex++) {
+        if (isCancellationRequested && isCancellationRequested()) {
+            logUsageLifecycle(lifecycleLoggingEnabled, `Provider usage refresh canceled at group boundary for ${providerType}`, {
+                providerType,
+                processedInstances,
+                totalInstances: result.totalCount
+            });
+            break;
+        }
+
         const groupCandidates = providerGroups[groupIndex];
         const currentGroup = groupIndex + 1;
         emitProgress(true, currentGroup);
@@ -1195,7 +1326,7 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
             totalInstances: result.totalCount
         });
 
-        await mapWithConcurrency(groupCandidates, queryConcurrency, async (candidate) => {
+        await mapWithConcurrency(groupCandidates, queryConcurrency, async (candidate, candidateIndex) => {
             const instanceTimeoutMs = resolveProviderUsageInstanceTimeout(currentConfig);
             const instanceResult = await withTimeout(
                 ({ signal, timeoutMs }) => queryUsageForProviderInstance(providerType, candidate.provider, {
@@ -1228,7 +1359,10 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
                 errorCount += 1;
             }
             delete instanceResult.errorStatus;
-            result.instances[candidate.originalIndex] = instanceResult;
+            const targetIndex = useFrozenCandidates
+                ? (Number.isFinite(Number(candidate.refreshIndex)) ? Number(candidate.refreshIndex) : candidateIndex)
+                : candidate.originalIndex;
+            result.instances[targetIndex] = instanceResult;
             emitProgress(false, currentGroup);
             return instanceResult;
         });
@@ -1247,9 +1381,9 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
 
     const snapshot = buildProviderUsageSnapshot(providerType, result);
     result.instances = snapshot.instances;
-    result.successCount = snapshot.successCount;
-    result.errorCount = snapshot.errorCount;
-    result.processedCount = snapshot.processedCount;
+    result.successCount = successCount;
+    result.errorCount = errorCount;
+    result.processedCount = processedInstances;
     result.timestamp = snapshot.timestamp;
     emitProgress(true, totalGroups);
 
@@ -1377,6 +1511,12 @@ function getProviderDisplayName(provider, providerType) {
  */
 function startProviderUsageRefreshTask(currentConfig, providerPoolManager, providerType, options = {}) {
     const lifecycleLoggingEnabled = shouldEnableUsageLifecycleLogging(currentConfig);
+    const normalizedScope = normalizeProviderRefreshScope(options.scope);
+    const requestedPage = Math.max(1, parsePositiveInt(options.page) || 1);
+    const targetPlan = buildProviderRefreshCandidatesForScope(providerType, currentConfig, providerPoolManager, {
+        scope: normalizedScope,
+        page: requestedPage
+    });
     const existingTask = findRunningUsageRefreshTask('provider', providerType);
     if (existingTask) {
         logUsageLifecycle(lifecycleLoggingEnabled, `Provider refresh task reused for ${providerType}`, {
@@ -1387,12 +1527,20 @@ function startProviderUsageRefreshTask(currentConfig, providerPoolManager, provi
 
     const task = createUsageRefreshTask({
         type: 'provider',
-        providerType
+        providerType,
+        scope: targetPlan.scope,
+        page: targetPlan.scope === PROVIDER_USAGE_REFRESH_SCOPE_PAGE ? targetPlan.page : null,
+        limit: targetPlan.limit,
+        totalInstances: targetPlan.totalCandidates
     });
     const startedAt = Date.now();
 
     logUsageLifecycle(lifecycleLoggingEnabled, `Provider refresh task created for ${providerType}`, {
         taskId: task.id,
+        scope: targetPlan.scope,
+        page: targetPlan.scope === PROVIDER_USAGE_REFRESH_SCOPE_PAGE ? targetPlan.page : null,
+        limit: targetPlan.limit,
+        targetCount: targetPlan.totalCandidates,
         usageConcurrency: options.usageConcurrency ?? null,
         groupSize: options.groupSize ?? null,
         groupMinPoolSize: options.groupMinPoolSize ?? null
@@ -1404,10 +1552,16 @@ function startProviderUsageRefreshTask(currentConfig, providerPoolManager, provi
                 taskId: task.id
             });
             const usageResults = await getProviderTypeUsage(providerType, currentConfig, providerPoolManager, {
+                targetCandidates: targetPlan.candidates,
                 usageConcurrency: options.usageConcurrency,
                 groupSize: options.groupSize,
                 groupMinPoolSize: options.groupMinPoolSize,
                 skipCacheRead: true,
+                disableInterimSnapshot: targetPlan.scope === PROVIDER_USAGE_REFRESH_SCOPE_PAGE,
+                cacheWriteOptions: {
+                    mergeWithExisting: targetPlan.scope === PROVIDER_USAGE_REFRESH_SCOPE_PAGE
+                },
+                isCancellationRequested: () => task.status === 'canceling' || Boolean(task.cancelRequestedAt),
                 onProgress: (progress) => {
                     task.progress = {
                         ...task.progress,
@@ -1420,34 +1574,62 @@ function startProviderUsageRefreshTask(currentConfig, providerPoolManager, provi
                 }
             });
 
-            await updateProviderUsageCache(providerType, usageResults);
+            await updateProviderUsageCache(providerType, usageResults, {
+                mergeWithExisting: targetPlan.scope === PROVIDER_USAGE_REFRESH_SCOPE_PAGE
+            });
 
-            task.status = 'completed';
+            const canceled = task.status === 'canceling' || Boolean(task.cancelRequestedAt);
+            task.status = canceled ? 'canceled' : 'completed';
             task.finishedAt = new Date().toISOString();
             task.progress = {
                 ...task.progress,
                 totalProviders: 1,
                 processedProviders: 1,
                 currentProvider: providerType,
-                percent: 100
+                percent: canceled
+                    ? calcProgressPercent(
+                        Number(task.progress?.processedInstances || 0),
+                        Number(task.progress?.totalInstances || targetPlan.totalCandidates)
+                    )
+                    : 100
             };
             task.result = {
                 providerType,
+                scope: targetPlan.scope,
+                page: targetPlan.scope === PROVIDER_USAGE_REFRESH_SCOPE_PAGE ? targetPlan.page : null,
+                limit: targetPlan.limit,
                 timestamp: new Date().toISOString(),
                 totalCount: usageResults.totalCount || 0,
+                processedCount: usageResults.processedCount || 0,
                 successCount: usageResults.successCount || 0,
                 errorCount: usageResults.errorCount || 0
             };
-            logUsageLifecycle(lifecycleLoggingEnabled, `Provider refresh task completed for ${providerType}`, {
+            logUsageLifecycle(
+                lifecycleLoggingEnabled,
+                `Provider refresh task ${canceled ? 'canceled' : 'completed'} for ${providerType}`,
+                {
                 taskId: task.id,
                 durationMs: Date.now() - startedAt,
                 totalCount: task.result.totalCount,
+                processedCount: task.result.processedCount,
                 successCount: task.result.successCount,
-                errorCount: task.result.errorCount
-            });
+                errorCount: task.result.errorCount,
+                scope: targetPlan.scope,
+                page: targetPlan.scope === PROVIDER_USAGE_REFRESH_SCOPE_PAGE ? targetPlan.page : null
+                }
+            );
             await persistUsageRefreshTask(task, { force: true });
             broadcastUsageRefreshTaskUpdate(task);
         } catch (error) {
+            if (task.status === 'canceling') {
+                task.status = 'canceled';
+                task.finishedAt = new Date().toISOString();
+                task.error = null;
+                await persistUsageRefreshTask(task, { force: true });
+                broadcastUsageRefreshTaskUpdate(task);
+                return;
+            }
+
             task.status = 'failed';
             task.finishedAt = new Date().toISOString();
             task.error = error.message || String(error);
@@ -1793,11 +1975,13 @@ export async function handleGetProviderUsage(req, res, currentConfig, providerPo
         const groupSize = parsePositiveInt(url.searchParams.get('groupSize'));
         const groupMinPoolSize = parsePositiveInt(url.searchParams.get('groupMinPoolSize'));
         const pageQuery = parseProviderUsagePageQuery(url);
+        const refreshScope = parseProviderRefreshScopeFromUrl(url);
 
         logUsageRequestDebug(debugEnabled, `GET /api/usage/${providerType} started`, {
             providerType,
             refresh,
             useAsyncTask,
+            refreshScope,
             usageConcurrency,
             groupSize,
             groupMinPoolSize,
@@ -1806,21 +1990,25 @@ export async function handleGetProviderUsage(req, res, currentConfig, providerPo
         });
 
         if (refresh && useAsyncTask) {
-            // TODO: 重新设计用量批量刷新逻辑后，再恢复调用方入口。
-            logUsageRequestDebug(debugEnabled, `GET /api/usage/${providerType} async refresh entry disabled`, {
+            const task = startProviderUsageRefreshTask(currentConfig, providerPoolManager, providerType, {
+                usageConcurrency,
+                groupSize,
+                groupMinPoolSize,
+                scope: refreshScope,
+                page: pageQuery.page
+            });
+
+            logUsageRequestDebug(debugEnabled, `GET /api/usage/${providerType} async refresh task started`, {
                 providerType,
                 refresh,
                 useAsyncTask,
+                scope: refreshScope,
+                page: pageQuery.page,
+                taskId: task.id,
                 durationMs: Date.now() - startedAt
-            }, 'warn');
-            res.writeHead(503, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({
-                error: {
-                    code: 'usage_batch_refresh_entry_disabled',
-                    message: 'Usage batch refresh entry is temporarily disabled. TODO: redesign usage refresh flow before re-enabling.',
-                    entryType: 'provider'
-                }
-            }));
+            });
+            res.writeHead(202, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(toUsageTaskResponsePayload(task)));
             return true;
         }
         
@@ -1932,19 +2120,24 @@ export async function handleGetProviderUsage(req, res, currentConfig, providerPo
     }
 }
 
+async function findUsageRefreshTask(taskId) {
+    pruneUsageRefreshTasks();
+    let task = usageRefreshTasks.get(taskId);
+    if (!task) {
+        task = await loadPersistedUsageRefreshTask(taskId);
+        if (task) {
+            usageRefreshTasks.set(task.id, task);
+        }
+    }
+    return task || null;
+}
+
 /**
  * 获取后台刷新任务进度
  */
 export async function handleGetUsageRefreshTask(req, res, taskId) {
     try {
-        pruneUsageRefreshTasks();
-        let task = usageRefreshTasks.get(taskId);
-        if (!task) {
-            task = await loadPersistedUsageRefreshTask(taskId);
-            if (task) {
-                usageRefreshTasks.set(task.id, task);
-            }
-        }
+        const task = await findUsageRefreshTask(taskId);
 
         if (!task) {
             res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -1961,9 +2154,13 @@ export async function handleGetUsageRefreshTask(req, res, taskId) {
             type: task.type,
             providerType: task.providerType,
             status: task.status,
+            scope: task.scope || null,
+            page: task.page || null,
+            limit: task.limit || null,
             createdAt: task.createdAt,
             startedAt: task.startedAt,
             finishedAt: task.finishedAt,
+            cancelRequestedAt: task.cancelRequestedAt || null,
             error: task.error,
             progress: task.progress,
             result: task.result,
@@ -1979,6 +2176,56 @@ export async function handleGetUsageRefreshTask(req, res, taskId) {
         res.end(JSON.stringify({
             error: {
                 message: 'Failed to get usage refresh task status: ' + error.message
+            }
+        }));
+        return true;
+    }
+}
+
+export async function handlePostUsageRefreshTask(req, res, taskId) {
+    try {
+        const action = await parseUsageTaskAction(req);
+        if (action !== 'cancel') {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                error: {
+                    message: 'Unsupported usage task action'
+                }
+            }));
+            return true;
+        }
+
+        const task = await findUsageRefreshTask(taskId);
+        if (!task) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                error: {
+                    message: 'Usage refresh task not found'
+                }
+            }));
+            return true;
+        }
+
+        if (task.status === 'running') {
+            task.status = 'canceling';
+            task.cancelRequestedAt = new Date().toISOString();
+            await persistUsageRefreshTask(task, { force: true });
+        }
+
+        const responsePayload = {
+            ...toUsageTaskResponsePayload(task),
+            cancelRequestedAt: task.cancelRequestedAt || null
+        };
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(responsePayload));
+        return true;
+    } catch (error) {
+        logger.error('[Usage API] Failed to cancel usage refresh task:', error);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            error: {
+                message: 'Failed to cancel usage refresh task: ' + error.message
             }
         }));
         return true;

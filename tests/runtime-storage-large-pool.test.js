@@ -243,7 +243,7 @@ describe('Runtime storage large-pool boundaries', () => {
         });
 
         expect(snapshot['gemini-cli-oauth']).toHaveLength(2001);
-        expect(state.countQueries).toBe(2);
+        expect(state.countQueries).toBe(1);
         expect(state.providerQueries.map((item) => [item.limit, item.offset])).toEqual([
             [2000, 0],
             [2000, 2000]

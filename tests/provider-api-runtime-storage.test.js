@@ -626,7 +626,7 @@ describe('Provider API runtime storage compatibility', () => {
         expect(mockLogger.error).toHaveBeenCalled();
     });
 
-    test('should rollback to file backend when db mutation fails and fallback is enabled', async () => {
+    test('should keep db backend when provider mutation fails', async () => {
         const { currentConfig } = await createDbConfig();
 
         const managedState = getRuntimeStorage().__getManagedState();
@@ -647,28 +647,19 @@ describe('Provider API runtime storage compatibility', () => {
         const res = createMockRes();
         await handleAddProvider({}, res, currentConfig, null);
 
-        expect(res.statusCode).toBe(200);
+        expect(res.statusCode).toBe(500);
         expect(JSON.parse(res.body)).toMatchObject({
-            success: true,
-            providerType: 'grok-custom'
+            error: expect.objectContaining({
+                code: 'SQLITE_BUSY',
+                phase: 'write',
+                domain: 'provider'
+            })
         });
         expect(currentConfig.RUNTIME_STORAGE_INFO).toMatchObject({
-            backend: 'file',
-            authoritativeSource: 'file'
+            backend: 'db',
+            authoritativeSource: 'database'
         });
-        expect(currentConfig.RUNTIME_STORAGE_BACKEND).toBe('file');
-        expect(currentConfig.RUNTIME_STORAGE_DUAL_WRITE).toBe(false);
-        expect(currentConfig.RUNTIME_STORAGE_INFO.lastFallback).toMatchObject({
-            status: 'applied',
-            triggeredBy: 'replaceProviderPoolsSnapshot',
-            toBackend: 'file'
-        });
-
-        const fallbackSnapshot = JSON.parse(await fs.readFile(currentConfig.PROVIDER_POOLS_FILE_PATH, 'utf8'));
-        expect(fallbackSnapshot['grok-custom'][0]).toMatchObject({
-            customName: 'Fallback Grok',
-            GROK_COOKIE_TOKEN: 'fallback-token'
-        });
+        expect(currentConfig.RUNTIME_STORAGE_INFO.lastFallback).toBeNull();
     });
 
     test('should keep provider reads consistent across manager, compat snapshot, provider api and legacy export after partial update', async () => {
@@ -924,16 +915,9 @@ describe('Provider API runtime storage compatibility', () => {
         managedState.activeStorage.storage.replaceProviderPoolsSnapshot = originalReplace;
     });
 
-    test('should expose dual-write secondary failures without applying file fallback', async () => {
+    test('should ignore dual-write config and keep runtime storage in db mode', async () => {
         const { currentConfig } = await createDbConfig({}, {
             RUNTIME_STORAGE_DUAL_WRITE: true
-        });
-
-        const managedState = getRuntimeStorage().__getManagedState();
-        managedState.activeStorage.rawStorage.secondaryStorage.replaceProviderPoolsSnapshot = jest.fn(async () => {
-            const error = new Error('secondary sync failed');
-            error.code = 'EIO';
-            throw error;
         });
 
         mockGetRequestBody.mockResolvedValueOnce({
@@ -948,12 +932,15 @@ describe('Provider API runtime storage compatibility', () => {
         await handleAddProvider({}, res, currentConfig, null);
 
         const payload = JSON.parse(res.body);
-        expect(res.statusCode).toBe(500);
-        expect(payload.error.code).toBe('runtime_storage_secondary_write_failed');
-        expect(payload.error.retryable).toBe(false);
-        expect(payload.diagnostics.runtimeStorage.backend).toBe('dual-write');
-        expect(payload.diagnostics.runtimeStorage.lastFallback).toBeNull();
-        expect(currentConfig.RUNTIME_STORAGE_INFO.backend).toBe('dual-write');
+        expect(res.statusCode).toBe(200);
+        expect(payload.success).toBe(true);
+        expect(payload.providerType).toBe('grok-custom');
+        expect(payload.provider).toMatchObject({
+            customName: 'Dual Write Grok'
+        });
+        expect(currentConfig.RUNTIME_STORAGE_INFO.backend).toBe('db');
+        expect(currentConfig.RUNTIME_STORAGE_INFO.requestedBackend).toBe('db');
+        expect(currentConfig.RUNTIME_STORAGE_INFO.dualWriteEnabled).toBe(false);
         expect(currentConfig.RUNTIME_STORAGE_INFO.lastFallback).toBeNull();
     });
 
@@ -1016,8 +1003,7 @@ describe('Provider API runtime storage compatibility', () => {
 
         expect(currentConfig.RUNTIME_STORAGE_INFO.lastValidation).toMatchObject({
             status: 'fail',
-            runId: 'run-validation-1',
-            fallbackApplied: true
+            runId: 'run-validation-1'
         });
         expect(currentConfig.RUNTIME_STORAGE_INFO.crashRecovery).toMatchObject({
             durableBoundary: 'only_committed_transactions_and_successful_flush_batches_are_durable',
@@ -1027,12 +1013,9 @@ describe('Provider API runtime storage compatibility', () => {
             durableBoundary: 'only_committed_transactions_and_successful_flush_batches_are_durable',
             lossWindow: 'unflushed_hot_state_only'
         });
-        expect(currentConfig.RUNTIME_STORAGE_INFO.lastFallback).toMatchObject({
-            status: 'applied',
-            triggeredBy: 'verifyRuntimeStorageMigration'
-        });
-        expect(currentConfig.RUNTIME_STORAGE_INFO.backend).toBe('file');
-        expect(currentConfig.RUNTIME_STORAGE_INFO.authoritativeSource).toBe('file');
+        expect(currentConfig.RUNTIME_STORAGE_INFO.lastFallback).toBeNull();
+        expect(currentConfig.RUNTIME_STORAGE_INFO.backend).toBe('db');
+        expect(currentConfig.RUNTIME_STORAGE_INFO.authoritativeSource).toBe('database');
     });
 
 test('should validate provider type config shape and custom name boundaries before persisting', async () => {

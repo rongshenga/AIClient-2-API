@@ -80,7 +80,6 @@ function createDiagnosticsContainer() {
         '#runtimeStorageSource': createMockElement(),
         '#runtimeStorageProviderSummary': createMockElement(),
         '#runtimeStorageValidation': createMockElement(),
-        '#runtimeStorageFallback': createMockElement(),
         '#runtimeStorageError': createMockElement(),
         '#runtimeStorageAlert': createMockElement({ hidden: true, dataset: {} }),
         '#runtimeStorageReloadBtn': createMockElement(),
@@ -140,14 +139,6 @@ function createTreeElement(initial = {}) {
             return node;
         }
 
-        if (selector === '.btn-toggle-cards' && String(element.innerHTML || '').includes('btn-toggle-cards')) {
-            const iconNode = createTreeElement();
-            const buttonNode = createTreeElement({ className: 'btn-toggle-cards' });
-            buttonNode.querySelector = jest.fn((childSelector) => childSelector === 'i' ? iconNode : null);
-            virtualNodes.set(selector, buttonNode);
-            return buttonNode;
-        }
-
         if (selector === 'i' && String(element.innerHTML || '').includes('<i')) {
             const iconNode = createTreeElement();
             virtualNodes.set(selector, iconNode);
@@ -191,7 +182,6 @@ describe('frontend event stream and usage manager', () => {
     let usageEmpty;
     let usageContent;
     let usageLastUpdate;
-    let refreshUsageBtn;
     let fetchCalls;
     let serverTimeValue;
 
@@ -215,7 +205,6 @@ describe('frontend event stream and usage manager', () => {
         usageEmpty = createMockElement({ style: { display: 'none' } });
         usageContent = createMockElement();
         usageLastUpdate = createMockElement({ dataset: {} });
-        refreshUsageBtn = createMockElement({ disabled: false });
         serverTimeValue = createMockElement();
 
         global.CustomEvent = class CustomEvent {
@@ -240,7 +229,6 @@ describe('frontend event stream and usage manager', () => {
                     usageEmpty: usageEmpty,
                     usageContent: usageContent,
                     usageLastUpdate: usageLastUpdate,
-                    refreshUsageBtn: refreshUsageBtn,
                     serverTimeValue: serverTimeValue
                 };
                 return mapping[id] || null;
@@ -266,7 +254,13 @@ describe('frontend event stream and usage manager', () => {
             t: (key, params = {}) => {
                 if (key === 'usage.taskCompleted') return '刷新完成';
                 if (key === 'usage.taskFailed') return '刷新失败';
+                if (key === 'usage.taskCanceled') return '刷新已取消';
+                if (key === 'usage.taskCancel') return '取消刷新';
+                if (key === 'usage.taskCanceling') return '取消中...';
                 if (key === 'usage.allProviders') return '全部提供商';
+                if (key === 'usage.refreshScope.page') return '当前页';
+                if (key === 'usage.refreshScope.providerAll') return '该提供商全部账号';
+                if (key === 'usage.refreshEstimateConfirm') return `${params.provider}:${params.count}:${params.seconds}`;
                 if (key === 'usage.taskProgress') return `${params.provider}|${params.processed}/${params.total}|${params.percent}`;
                 if (key === 'usage.loading') return '加载中';
                 if (key === 'usage.taskStarted') return '任务已开始';
@@ -474,13 +468,19 @@ describe('frontend event stream and usage manager', () => {
                     })
                 };
             }
-            if (String(url) === '/api/usage/gemini-cli-oauth?page=1&limit=100') {
+            if (String(url) === '/api/usage/gemini-cli-oauth?page=1&limit=30') {
                 return {
                     ok: true,
                     status: 200,
                     statusText: 'OK',
                     json: async () => ({
-                        totalCount: 1,
+                        totalCount: 31,
+                        availableCount: 31,
+                        page: 1,
+                        limit: 30,
+                        totalPages: 2,
+                        hasPrevPage: false,
+                        hasNextPage: true,
                         successCount: 1,
                         errorCount: 0,
                         processedCount: 1,
@@ -513,75 +513,51 @@ describe('frontend event stream and usage manager', () => {
         const titleDiv = header.querySelector('.usage-group-title');
         await titleDiv.trigger('click');
 
-        expect(fetchCalls).toContain('/api/usage/gemini-cli-oauth?page=1&limit=100');
+        expect(fetchCalls).toContain('/api/usage/gemini-cli-oauth?page=1&limit=30');
         expect(groupContainer.dataset.detailsLoaded).toBe('true');
 
         const content = groupContainer.querySelector('.usage-group-content');
         expect(content.children.some((child) => String(child.className || '').includes('usage-cards-grid'))).toBe(true);
+        const pagination = content.querySelector('.usage-group-pagination');
+        expect(pagination).toBeTruthy();
+        expect(Array.isArray(pagination.children)).toBe(true);
+        expect(pagination.children).toHaveLength(3);
+        expect(pagination.children.some((child) => String(child.className || '').includes('usage-group-page-status'))).toBe(true);
+        expect(pagination.children.some((child) => String(child.className || '').includes('usage-page-info'))).toBe(false);
 
         global.document.createElement = originalCreateElement;
     });
 
-    test('should toggle loading state and button disablement during successful usage refresh', async () => {
+    test('should toggle loading state during successful usage refresh', async () => {
         usageSection.classList.add('active');
-        let taskStatusPollCount = 0;
-        global.fetch = jest.fn(async (url) => {
+        let resolveFetchUsage;
+        global.fetch = jest.fn((url) => {
             fetchCalls.push(String(url));
-            if (String(url) === '/api/usage?refresh=true&async=true') {
-                return {
-                    ok: true,
-                    json: async () => ({
-                        taskId: 'task-1',
-                        pollIntervalMs: 1
-                    })
-                };
-            }
-            if (String(url) === '/api/usage/tasks/task-1') {
-                taskStatusPollCount += 1;
-                return {
-                    ok: true,
-                    json: async () => taskStatusPollCount == 1
-                        ? {
-                            status: 'running',
-                            providerType: 'grok-custom',
-                            pollIntervalMs: 1,
-                            progress: {
-                                currentProvider: 'grok-custom',
-                                processedInstances: 1,
-                                totalInstances: 2,
-                                percent: 50
-                            }
-                        }
-                        : {
-                            status: 'completed',
-                            providerType: 'grok-custom'
-                        }
-                };
-            }
             if (String(url) === '/api/usage') {
-                return {
-                    ok: true,
-                    json: async () => ({
-                        providers: {},
-                        fromCache: true,
-                        timestamp: '2026-03-06T10:00:00.000Z',
-                        serverTime: '2026-03-06T10:00:01.000Z'
-                    })
-                };
+                return new Promise((resolve) => {
+                    resolveFetchUsage = () => resolve({
+                        ok: true,
+                        json: async () => ({
+                            providers: {},
+                            fromCache: true,
+                            timestamp: '2026-03-06T10:00:00.000Z',
+                            serverTime: '2026-03-06T10:00:01.000Z'
+                        })
+                    });
+                });
             }
             throw new Error(`Unexpected fetch: ${url}`);
         });
 
         const refreshPromise = usageManagerModule.refreshUsage();
-        expect(refreshUsageBtn.disabled).toBe(true);
         expect(usageLoading.style.display).toBe('block');
+        resolveFetchUsage();
         await refreshPromise;
 
-        expect(refreshUsageBtn.disabled).toBe(false);
+        expect(fetchCalls).toEqual(['/api/usage']);
         expect(usageLoading.style.display).toBe('none');
-        expect(usageLoadingText.textContent).toBe('加载中');
-        expect(showToast).toHaveBeenCalledWith('提示', '任务已开始', 'info');
-        expect(showToast).toHaveBeenCalledWith('成功', '刷新完成', 'success');
+        expect(usageLoadingText.textContent).toBe('');
+        expect(showToast).not.toHaveBeenCalled();
         expect(serverTimeValue.textContent).toBeTruthy();
     });
 
@@ -687,7 +663,7 @@ describe('frontend event stream and usage manager', () => {
                 };
             }
 
-            if (String(url) === '/api/usage/gemini-cli-oauth?refresh=true&async=true') {
+            if (String(url) === '/api/usage/gemini-cli-oauth?refresh=true&async=true&scope=page&page=1') {
                 return {
                     ok: true,
                     status: 202,
@@ -724,7 +700,7 @@ describe('frontend event stream and usage manager', () => {
                 };
             }
 
-            if (String(url) === '/api/usage/gemini-cli-oauth?page=1&limit=100') {
+            if (String(url) === '/api/usage/gemini-cli-oauth?page=1&limit=30') {
                 return {
                     ok: true,
                     status: 200,
@@ -782,12 +758,139 @@ describe('frontend event stream and usage manager', () => {
 
         await usageManagerModule.refreshProviderUsage('gemini-cli-oauth');
 
-        expect(fetchCalls).toContain('/api/usage/gemini-cli-oauth?page=1&limit=100');
+        expect(fetchCalls).toContain('/api/usage/gemini-cli-oauth?refresh=true&async=true&scope=page&page=1');
+        expect(fetchCalls).toContain('/api/usage/gemini-cli-oauth?page=1&limit=30');
         expect(fetchCalls.filter((url) => url === '/api/usage')).toHaveLength(2);
 
         const refreshedGroup = usageContent.children[0];
         expect(refreshedGroup.classList.contains('collapsed')).toBe(false);
         expect(refreshedGroup.dataset.detailsLoaded).toBe('true');
+
+        global.document.createElement = originalCreateElement;
+    });
+
+    test('should send cancel request for provider task and show canceled toast', async () => {
+        const originalCreateElement = global.document.createElement;
+        global.document.createElement = jest.fn(() => createTreeElement());
+        usageSection.classList.add('active');
+        global.window.confirm = jest.fn(() => true);
+
+        let taskStatusPollCount = 0;
+        let cancelRequested = false;
+        global.fetch = jest.fn(async (url, options = {}) => {
+            fetchCalls.push(String(url));
+
+            if (String(url) === '/api/usage') {
+                return {
+                    ok: true,
+                    status: 200,
+                    statusText: 'OK',
+                    json: async () => ({
+                        providers: {
+                            'gemini-cli-oauth': {
+                                totalCount: 2500,
+                                successCount: 2500,
+                                errorCount: 0,
+                                processedCount: 2500,
+                                instances: []
+                            }
+                        },
+                        timestamp: '2026-03-06T10:00:00.000Z',
+                        serverTime: '2026-03-06T10:00:10.000Z'
+                    })
+                };
+            }
+
+            if (String(url) === '/api/usage/gemini-cli-oauth?refresh=true&async=true&scope=provider_all') {
+                return {
+                    ok: true,
+                    status: 202,
+                    statusText: 'Accepted',
+                    json: async () => ({
+                        taskId: 'provider-task-cancel-1',
+                        status: 'running',
+                        providerType: 'gemini-cli-oauth',
+                        scope: 'provider_all',
+                        limit: 30,
+                        pollIntervalMs: 1
+                    })
+                };
+            }
+
+            if (String(url) === '/api/usage/tasks/provider-task-cancel-1' && String(options.method || 'GET').toUpperCase() === 'POST') {
+                cancelRequested = true;
+                return {
+                    ok: true,
+                    status: 200,
+                    statusText: 'OK',
+                    json: async () => ({
+                        taskId: 'provider-task-cancel-1',
+                        status: 'canceling',
+                        providerType: 'gemini-cli-oauth',
+                        cancelRequestedAt: '2026-03-06T10:00:11.000Z'
+                    })
+                };
+            }
+
+            if (String(url) === '/api/usage/tasks/provider-task-cancel-1') {
+                taskStatusPollCount += 1;
+                const status = cancelRequested
+                    ? (taskStatusPollCount > 2 ? 'canceled' : 'canceling')
+                    : 'running';
+                return {
+                    ok: true,
+                    status: 200,
+                    statusText: 'OK',
+                    json: async () => ({
+                        status,
+                        providerType: 'gemini-cli-oauth',
+                        pollIntervalMs: 1,
+                        progress: {
+                            currentProvider: 'gemini-cli-oauth',
+                            processedInstances: 2,
+                            totalInstances: 10,
+                            percent: 20
+                        }
+                    })
+                };
+            }
+
+            if (String(url) === '/api/usage/gemini-cli-oauth?page=1&limit=30') {
+                return {
+                    ok: true,
+                    status: 200,
+                    statusText: 'OK',
+                    json: async () => ({
+                        totalCount: 2500,
+                        successCount: 2500,
+                        errorCount: 0,
+                        processedCount: 2500,
+                        timestamp: '2026-03-06T10:00:20.000Z',
+                        instances: []
+                    })
+                };
+            }
+
+            throw new Error(`Unexpected fetch: ${url}`);
+        });
+
+        await usageManagerModule.loadUsage();
+        await usageManagerModule.refreshProviderUsage('gemini-cli-oauth', { scope: 'provider_all' });
+
+        const group = usageContent.children[0];
+        const indicator = group.querySelector('.usage-task-indicator');
+        const cancelBtn = indicator?.querySelector('.btn-usage-task-cancel');
+        expect(cancelBtn).toBeTruthy();
+        await cancelBtn.trigger('click', { stopPropagation: jest.fn() });
+
+        await new Promise((resolve) => setTimeout(resolve, 60));
+
+        const cancelCall = global.fetch.mock.calls.find(([requestUrl, requestOptions]) => (
+            String(requestUrl) === '/api/usage/tasks/provider-task-cancel-1'
+            && String(requestOptions?.method || 'GET').toUpperCase() === 'POST'
+        ));
+        expect(cancelCall).toBeTruthy();
+        expect(showToast).toHaveBeenCalledWith('提示', '刷新已取消', 'info');
 
         global.document.createElement = originalCreateElement;
     });
@@ -855,17 +958,12 @@ describe('frontend runtime storage diagnostics panel', () => {
     test('should build storage diagnostics view models with alerts permissions and suggested run id', () => {
         const viewModel = providerManagerModule.buildRuntimeStorageDiagnosticsViewModel({
             runtimeStorage: {
-                backend: 'dual-write',
+                backend: 'db',
                 requestedBackend: 'db',
                 authoritativeSource: 'database',
-                dualWriteEnabled: true,
-                lastFallback: {
-                    status: 'applied',
-                    triggeredBy: 'replaceProviderPoolsSnapshot',
-                    toBackend: 'file'
-                },
-                featureFlagRollback: {
-                    runId: 'run-fallback-1'
+                lastValidation: {
+                    overallStatus: 'warn',
+                    runId: 'run-validate-1'
                 }
             },
             providerSummary: {
@@ -876,21 +974,19 @@ describe('frontend runtime storage diagnostics panel', () => {
             hasAdminAccess: false
         });
 
-        expect(viewModel.storageMode).toBe('dual-write');
-        expect(viewModel.storageModeLabel).toBe('双写');
+        expect(viewModel.storageMode).toBe('db');
+        expect(viewModel.storageModeLabel).toBe('数据库');
         expect(viewModel.sourceOfTruthLabel).toBe('数据库');
         expect(viewModel.readOnly).toBe(true);
         expect(viewModel.alert).toMatchObject({
             type: 'warning',
-            message: '已通过 replaceProviderPoolsSnapshot 回退到 文件'
+            message: '校验状态：warn · run-validate-1'
         });
         expect(viewModel.diagnostics).toMatchObject({
-            validation: '--',
-            fallback: '已应用 · replaceProviderPoolsSnapshot',
-            dualWriteEnabled: true,
+            validation: 'warn · run-validate-1',
             lastErrorMessage: '--'
         });
-        expect(viewModel.suggestedRunId).toBe('run-fallback-1');
+        expect(viewModel.suggestedRunId).toBe('run-validate-1');
         expect(viewModel.actions.rollback.disabled).toBe(true);
 
         const errorViewModel = providerManagerModule.buildRuntimeStorageDiagnosticsViewModel({}, {

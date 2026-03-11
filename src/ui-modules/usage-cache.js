@@ -1,11 +1,7 @@
-import { existsSync } from 'fs';
 import logger from '../utils/logger.js';
-import { promises as fs } from 'fs';
-import path from 'path';
 import { getRuntimeStorage } from '../storage/runtime-storage-registry.js';
 
-const USAGE_CACHE_FILE = path.join(process.cwd(), 'configs', 'usage-cache.json');
-const USAGE_CACHE_TMP_FILE = `${USAGE_CACHE_FILE}.tmp`;
+const DEFAULT_PROVIDER_USAGE_PAGE_LIMIT = 30;
 let usageCacheWriteQueue = Promise.resolve();
 
 function createUsageCacheReadTimeoutError(message, timeoutMs, details = {}) {
@@ -128,7 +124,7 @@ function normalizeProviderUsagePageOptions(options = {}) {
 
     return {
         page: Number.isFinite(rawPage) && rawPage > 0 ? rawPage : 1,
-        limit: Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 100
+        limit: Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : DEFAULT_PROVIDER_USAGE_PAGE_LIMIT
     };
 }
 
@@ -216,13 +212,6 @@ function enqueueUsageCacheWrite(writer) {
     return run;
 }
 
-async function writeUsageCacheFile(usageData) {
-    await fs.mkdir(path.dirname(USAGE_CACHE_FILE), { recursive: true });
-    await fs.writeFile(USAGE_CACHE_TMP_FILE, JSON.stringify(usageData, null, 2), 'utf8');
-    await fs.rename(USAGE_CACHE_TMP_FILE, USAGE_CACHE_FILE);
-    logger.info('[Usage Cache] Usage data cached to', USAGE_CACHE_FILE);
-}
-
 function getUsageStorage() {
     const runtimeStorage = getRuntimeStorage();
     if (!runtimeStorage || typeof runtimeStorage.loadUsageCacheSnapshot !== 'function') {
@@ -231,31 +220,58 @@ function getUsageStorage() {
     return runtimeStorage;
 }
 
-function getRuntimeStorageBackend(runtimeStorage = null) {
-    const storage = runtimeStorage || getRuntimeStorage();
-    if (!storage) {
-        return null;
+function getUsageInstanceMergeKey(instance = {}, index = 0) {
+    if (instance?.uuid) {
+        return `uuid:${instance.uuid}`;
     }
-
-    try {
-        const info = typeof storage.getInfo === 'function' ? storage.getInfo() : null;
-        if (info?.backend && typeof info.backend === 'string') {
-            return info.backend.toLowerCase();
-        }
-    } catch {
-        // ignore
+    if (instance?.name) {
+        return `name:${instance.name}`;
     }
-
-    if (storage.kind && typeof storage.kind === 'string') {
-        return storage.kind.toLowerCase();
+    if (instance?.customName) {
+        return `name:${instance.customName}`;
     }
-
-    return null;
+    return `index:${index}`;
 }
 
-function shouldDisableUsageFileFallback(runtimeStorage = null) {
-    const backend = getRuntimeStorageBackend(runtimeStorage);
-    return backend === 'db' || backend === 'dual-write';
+function mergeProviderUsageSnapshots(providerType, existingSnapshot = {}, incomingSnapshot = {}) {
+    const normalizedExisting = normalizeProviderUsage(providerType, existingSnapshot, incomingSnapshot?.timestamp || null);
+    const normalizedIncoming = normalizeProviderUsage(providerType, incomingSnapshot, normalizedExisting.timestamp);
+    const mergedInstances = [...(normalizedExisting.instances || [])];
+    const mergeKeyIndex = new Map();
+
+    mergedInstances.forEach((instance, index) => {
+        mergeKeyIndex.set(getUsageInstanceMergeKey(instance, index), index);
+    });
+
+    for (const incomingInstance of normalizedIncoming.instances || []) {
+        const mergeKey = getUsageInstanceMergeKey(incomingInstance);
+        const existingIndex = mergeKeyIndex.get(mergeKey);
+        if (Number.isFinite(existingIndex)) {
+            mergedInstances[existingIndex] = incomingInstance;
+            continue;
+        }
+
+        mergeKeyIndex.set(mergeKey, mergedInstances.length);
+        mergedInstances.push(incomingInstance);
+    }
+
+    const existingTotalCount = Number(normalizedExisting.totalCount ?? mergedInstances.length);
+    const incomingTotalCount = Number(normalizedIncoming.totalCount ?? normalizedIncoming.instances.length);
+    const mergedTotalCount = Math.max(existingTotalCount, incomingTotalCount, mergedInstances.length);
+    const mergedSuccessCount = mergedInstances.filter((instance) => instance?.success === true).length;
+    const mergedErrorCount = Math.max(0, mergedInstances.length - mergedSuccessCount);
+
+    return {
+        ...normalizedExisting,
+        ...normalizedIncoming,
+        providerType,
+        timestamp: normalizedIncoming.timestamp || new Date().toISOString(),
+        instances: mergedInstances,
+        totalCount: mergedTotalCount,
+        processedCount: mergedInstances.length,
+        successCount: mergedSuccessCount,
+        errorCount: mergedErrorCount
+    };
 }
 
 export async function readUsageCache(options = {}) {
@@ -267,67 +283,39 @@ export async function readUsageCache(options = {}) {
         ? options.debugLabel.trim()
         : 'readUsageCache';
     const runtimeStorage = getUsageStorage();
-    if (runtimeStorage) {
+    if (!runtimeStorage) {
+        return null;
+    }
+
+    try {
         const runtimeReadStartedAt = Date.now();
         logUsageCacheLifecycle(lifecycleLoggingEnabled, 'Runtime storage usage cache read started', {
             debugLabel,
             timeoutMs: runtimeReadTimeoutMs
         });
 
-        try {
-            const snapshot = await withUsageCacheReadTimeout(
-                async () => await runtimeStorage.loadUsageCacheSnapshot(),
-                runtimeReadTimeoutMs,
-                `Runtime storage usage cache read timed out after ${runtimeReadTimeoutMs}ms`,
-                {
-                    debugLabel,
-                    stage: 'runtimeStorage.loadUsageCacheSnapshot'
-                }
-            );
-            logUsageCacheLifecycle(lifecycleLoggingEnabled, 'Runtime storage usage cache read completed', {
+        const snapshot = await withUsageCacheReadTimeout(
+            async () => await runtimeStorage.loadUsageCacheSnapshot(),
+            runtimeReadTimeoutMs,
+            `Runtime storage usage cache read timed out after ${runtimeReadTimeoutMs}ms`,
+            {
                 debugLabel,
-                durationMs: Date.now() - runtimeReadStartedAt,
-                hit: Boolean(snapshot)
-            });
-            return snapshot ? normalizeUsageCache(snapshot) : null;
-        } catch (error) {
-            logger.warn('[Usage Cache] Failed to read usage cache from runtime storage:', {
-                debugLabel,
-                durationMs: Date.now() - runtimeReadStartedAt,
-                message: error.message,
-                code: error.code || null,
-                timeoutMs: error.timeoutMs || runtimeReadTimeoutMs
-            });
-            if (shouldDisableUsageFileFallback(runtimeStorage)) {
-                logUsageCacheLifecycle(lifecycleLoggingEnabled, 'Runtime storage usage cache fallback disabled', {
-                    debugLabel,
-                    backend: getRuntimeStorageBackend(runtimeStorage)
-                });
-                return null;
+                stage: 'runtimeStorage.loadUsageCacheSnapshot'
             }
-        }
-    }
-
-    try {
-        if (existsSync(USAGE_CACHE_FILE)) {
-            const fileReadStartedAt = Date.now();
-            const content = await fs.readFile(USAGE_CACHE_FILE, 'utf8');
-            const parsedCache = normalizeUsageCache(JSON.parse(content));
-            logUsageCacheLifecycle(lifecycleLoggingEnabled, 'File usage cache read completed', {
-                debugLabel,
-                durationMs: Date.now() - fileReadStartedAt,
-                hit: true,
-                filePath: USAGE_CACHE_FILE
-            });
-            return parsedCache;
-        }
-        logUsageCacheLifecycle(lifecycleLoggingEnabled, 'Usage cache file missing', {
+        );
+        logUsageCacheLifecycle(lifecycleLoggingEnabled, 'Runtime storage usage cache read completed', {
             debugLabel,
-            filePath: USAGE_CACHE_FILE
+            durationMs: Date.now() - runtimeReadStartedAt,
+            hit: Boolean(snapshot)
         });
-        return null;
+        return snapshot ? normalizeUsageCache(snapshot) : null;
     } catch (error) {
-        logger.warn('[Usage Cache] Failed to read usage cache:', error.message);
+        logger.warn('[Usage Cache] Failed to read usage cache from runtime storage:', {
+            debugLabel,
+            message: error.message,
+            code: error.code || null,
+            timeoutMs: error.timeoutMs || runtimeReadTimeoutMs
+        });
         return null;
     }
 }
@@ -362,11 +350,11 @@ export async function writeUsageCache(usageData) {
     try {
         await enqueueUsageCacheWrite(async () => {
             const runtimeStorage = getUsageStorage();
-            if (runtimeStorage && typeof runtimeStorage.replaceUsageCacheSnapshot === 'function') {
-                await runtimeStorage.replaceUsageCacheSnapshot(normalizedUsageData);
+            if (!runtimeStorage || typeof runtimeStorage.replaceUsageCacheSnapshot !== 'function') {
+                logger.warn('[Usage Cache] Runtime storage is unavailable, skip writing usage cache snapshot');
                 return;
             }
-            await writeUsageCacheFile(normalizedUsageData);
+            await runtimeStorage.replaceUsageCacheSnapshot(normalizedUsageData);
         });
     } catch (error) {
         logger.error('[Usage Cache] Failed to write usage cache:', error.message);
@@ -376,62 +364,50 @@ export async function writeUsageCache(usageData) {
 export async function readProviderUsageCache(providerType, options = {}) {
     const pageQuery = normalizeProviderUsagePageOptions(options);
     const runtimeStorage = getUsageStorage();
-    if (runtimeStorage && typeof runtimeStorage.loadProviderUsageSnapshot === 'function') {
-        try {
-            const snapshot = await runtimeStorage.loadProviderUsageSnapshot(providerType, pageQuery || undefined);
-            if (snapshot) {
-                const providerUsage = paginateProviderUsage(
-                    normalizeProviderUsage(providerType, snapshot, snapshot.timestamp || null),
-                    pageQuery
-                );
-                return {
-                    ...providerUsage,
-                    cachedAt: providerUsage.timestamp,
-                    fromCache: true,
-                    __pageApplied: pageQuery !== null
-                };
-            }
-            if (shouldDisableUsageFileFallback(runtimeStorage)) {
-                return null;
-            }
-        } catch (error) {
-            logger.warn(`[Usage Cache] Failed to read provider usage cache from runtime storage for ${providerType}:`, error.message);
-            if (shouldDisableUsageFileFallback(runtimeStorage)) {
-                return null;
-            }
-        }
+    if (!runtimeStorage || typeof runtimeStorage.loadProviderUsageSnapshot !== 'function') {
+        return null;
     }
 
-    const cache = await readUsageCache();
-    if (cache && cache.providers && cache.providers[providerType]) {
-        const providerUsage = paginateProviderUsage(
-            normalizeProviderUsage(providerType, cache.providers[providerType], cache.timestamp),
-            pageQuery
-        );
-        return {
-            ...providerUsage,
-            cachedAt: providerUsage.timestamp,
-            fromCache: true,
-            __pageApplied: pageQuery !== null
-        };
+    try {
+        const snapshot = await runtimeStorage.loadProviderUsageSnapshot(providerType, pageQuery || undefined);
+        if (snapshot) {
+            const providerUsage = paginateProviderUsage(
+                normalizeProviderUsage(providerType, snapshot, snapshot.timestamp || null),
+                pageQuery
+            );
+            return {
+                ...providerUsage,
+                cachedAt: providerUsage.timestamp,
+                fromCache: true,
+                __pageApplied: pageQuery !== null
+            };
+        }
+        return null;
+    } catch (error) {
+        logger.warn(`[Usage Cache] Failed to read provider usage cache from runtime storage for ${providerType}:`, error.message);
+        return null;
     }
-    return null;
 }
 
-export async function updateProviderUsageCache(providerType, usageData) {
+export async function updateProviderUsageCache(providerType, usageData, options = {}) {
     try {
         await enqueueUsageCacheWrite(async () => {
             const runtimeStorage = getUsageStorage();
-            const normalizedProviderUsage = normalizeProviderUsage(providerType, usageData, new Date().toISOString());
-            if (runtimeStorage && typeof runtimeStorage.upsertProviderUsageSnapshot === 'function') {
-                await runtimeStorage.upsertProviderUsageSnapshot(providerType, normalizedProviderUsage);
+            if (!runtimeStorage || typeof runtimeStorage.upsertProviderUsageSnapshot !== 'function') {
+                logger.warn(`[Usage Cache] Runtime storage is unavailable, skip updating provider usage cache: ${providerType}`);
                 return;
             }
 
-            const cache = (await readUsageCache()) || createEmptyUsageCache();
-            cache.providers[providerType] = normalizedProviderUsage;
-            cache.timestamp = new Date().toISOString();
-            await writeUsageCacheFile(cache);
+            const normalizedProviderUsage = normalizeProviderUsage(providerType, usageData, new Date().toISOString());
+            let snapshotToPersist = normalizedProviderUsage;
+            if (options.mergeWithExisting === true && typeof runtimeStorage.loadProviderUsageSnapshot === 'function') {
+                const existingSnapshot = await runtimeStorage.loadProviderUsageSnapshot(providerType);
+                if (existingSnapshot) {
+                    snapshotToPersist = mergeProviderUsageSnapshots(providerType, existingSnapshot, normalizedProviderUsage);
+                }
+            }
+
+            await runtimeStorage.upsertProviderUsageSnapshot(providerType, snapshotToPersist);
         });
     } catch (error) {
         logger.error('[Usage Cache] Failed to update provider usage cache:', error.message);

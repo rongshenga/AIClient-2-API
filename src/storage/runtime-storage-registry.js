@@ -1,9 +1,7 @@
 import logger from '../utils/logger.js';
-import { FileRuntimeStorage } from './backends/file-runtime-storage.js';
 import { createRuntimeStorage } from './runtime-storage-factory.js';
 import {
     getRuntimeStorageErrorClassification,
-    getRuntimeStorageErrorPolicy,
     serializeRuntimeStorageError,
     wrapRuntimeStorageError
 } from './runtime-storage-error.js';
@@ -50,12 +48,7 @@ function nowIso() {
 }
 
 function getRequestedBackend(config = {}) {
-    const normalized = String(config.RUNTIME_STORAGE_BACKEND || 'file').toLowerCase();
-    if (normalized === 'db') {
-        return config.RUNTIME_STORAGE_DUAL_WRITE ? 'dual-write' : 'db';
-    }
-
-    return 'file';
+    return 'db';
 }
 
 function getAuthoritativeSource(backend) {
@@ -159,26 +152,11 @@ export function buildRuntimeStorageCrashRecoveryDiagnostics() {
 }
 
 export function buildRuntimeStorageFeatureFlagFallback(config = {}, options = {}) {
-    return {
-        RUNTIME_STORAGE_BACKEND: 'file',
-        RUNTIME_STORAGE_DUAL_WRITE: false,
-        fallbackEnabled: config.RUNTIME_STORAGE_FALLBACK_TO_FILE !== false,
-        triggeredBy: options.triggeredBy || null,
-        reason: options.reason || null,
-        generatedAt: nowIso()
-    };
+    return null;
 }
 
 function applyFeatureFlagFallback(state, options = {}) {
-    const rollbackPlan = buildRuntimeStorageFeatureFlagFallback(state?.config || {}, options);
-
-    if (state?.config && typeof state.config === 'object') {
-        state.config.RUNTIME_STORAGE_BACKEND = rollbackPlan.RUNTIME_STORAGE_BACKEND;
-        state.config.RUNTIME_STORAGE_DUAL_WRITE = rollbackPlan.RUNTIME_STORAGE_DUAL_WRITE;
-    }
-
-    state.diagnostics.featureFlagRollback = rollbackPlan;
-    return rollbackPlan;
+    return null;
 }
 
 function buildRuntimeStorageInfo(state) {
@@ -193,9 +171,9 @@ function buildRuntimeStorageInfo(state) {
         requestedBackend: state?.diagnostics?.requestedBackend || getRequestedBackend(state?.config || {}),
         activeBackend,
         authoritativeSource: state?.diagnostics?.authoritativeSource || getAuthoritativeSource(activeBackend),
-        dualWriteEnabled: state?.diagnostics?.dualWriteEnabled === true,
-        fallbackEnabled: state?.diagnostics?.fallbackEnabled !== false,
-        featureFlagRollback: state?.diagnostics?.featureFlagRollback || buildRuntimeStorageFeatureFlagFallback(state?.config || {}),
+        dualWriteEnabled: false,
+        fallbackEnabled: false,
+        featureFlagRollback: null,
         crashRecovery: state?.diagnostics?.crashRecovery || buildRuntimeStorageCrashRecoveryDiagnostics(),
         lastCompatLoad: state?.diagnostics?.lastCompatLoad || null,
         lastMutation: state?.diagnostics?.lastMutation || null,
@@ -219,7 +197,7 @@ function updateActiveStorageState(state) {
     const activeBackend = getStorageBackend(state?.activeStorage);
     state.diagnostics.activeBackend = activeBackend;
     state.diagnostics.authoritativeSource = getAuthoritativeSource(activeBackend);
-    state.diagnostics.dualWriteEnabled = activeBackend === 'dual-write';
+    state.diagnostics.dualWriteEnabled = false;
     syncRuntimeStorageInfo(state);
 }
 
@@ -264,22 +242,7 @@ function recordOperationFailure(state, operation, error, storage) {
 }
 
 function shouldActivateFileFallback(state, error) {
-    if (!state || state.config?.RUNTIME_STORAGE_FALLBACK_TO_FILE === false) {
-        return false;
-    }
-
-    const backend = getStorageBackend(state.activeStorage);
-    if (backend === 'file') {
-        return false;
-    }
-
-    const errorCode = String(error?.code || '');
-    if (errorCode.startsWith('runtime_storage_secondary_')) {
-        return false;
-    }
-
-    const policy = getRuntimeStorageErrorPolicy(error);
-    return policy.fallbackToFile === true;
+    return false;
 }
 
 function resolveStorageErrorClassification(error, storage) {
@@ -302,61 +265,7 @@ function resolveStorageErrorCode(error, classification, fallbackCode) {
 }
 
 async function activateFileFallback(state, error, operation) {
-    const previousBackend = getStorageBackend(state.activeStorage);
-    if (previousBackend === 'file') {
-        return false;
-    }
-
-    try {
-        if (!state.fallbackStorage) {
-            state.fallbackStorage = new FileRuntimeStorage(state.config || {});
-        }
-        await state.fallbackStorage.initialize();
-        state.activeStorage = state.fallbackStorage;
-        const rollbackPlan = applyFeatureFlagFallback(state, {
-            triggeredBy: operation,
-            reason: error?.code || error?.message || 'runtime_storage_failure'
-        });
-
-        state.diagnostics.lastFallback = createDiagnosticEntry('applied', {
-            triggeredBy: operation,
-            fromBackend: previousBackend,
-            toBackend: 'file',
-            error: serializeRuntimeStorageError(error),
-            rollbackPlan
-        });
-        state.diagnostics.lastError = null;
-        updateActiveStorageState(state);
-        logger.warn(`[RuntimeStorage] Activated file fallback after ${operation}: ${error.message}`);
-        return true;
-    } catch (fallbackError) {
-        const wrappedFallbackError = wrapRuntimeStorageError(fallbackError, {
-            code: 'runtime_storage_fallback_failed',
-            phase: 'fallback',
-            domain: 'runtime_storage',
-            backend: 'file',
-            operation: 'activateFileFallback',
-            details: {
-                triggeredBy: operation
-            }
-        });
-
-        state.diagnostics.lastFallback = createDiagnosticEntry('failed', {
-            triggeredBy: operation,
-            fromBackend: previousBackend,
-            toBackend: 'file',
-            error: serializeRuntimeStorageError(wrappedFallbackError)
-        });
-        state.diagnostics.lastError = createDiagnosticEntry('failed', {
-            operation,
-            phase: 'fallback',
-            domain: 'runtime_storage',
-            backend: 'file',
-            error: serializeRuntimeStorageError(wrappedFallbackError)
-        });
-        updateActiveStorageState(state);
-        throw wrappedFallbackError;
-    }
+    return false;
 }
 
 async function executeStorageOperation(state, operation, args = []) {
@@ -385,35 +294,6 @@ async function executeStorageOperation(state, operation, args = []) {
 
         recordOperationFailure(state, operation, wrappedError, storage);
 
-        if (meta.allowFallback !== false && shouldActivateFileFallback(state, wrappedError)) {
-            const fallbackApplied = await activateFileFallback(state, wrappedError, operation);
-            if (fallbackApplied && operation !== 'close') {
-                const fallbackMethod = state.activeStorage?.[operation];
-                if (typeof fallbackMethod === 'function') {
-                    try {
-                        const fallbackResult = await fallbackMethod.apply(state.activeStorage, args);
-                        recordOperationSuccess(state, operation, fallbackResult, state.activeStorage, {
-                            recoveredViaFallback: true
-                        });
-                        return fallbackResult;
-                    } catch (fallbackError) {
-                        const wrappedFallbackError = wrapRuntimeStorageError(fallbackError, {
-                            code: fallbackError?.code || 'runtime_storage_fallback_retry_failed',
-                            phase: 'fallback',
-                            domain: meta.domain || 'runtime_storage',
-                            backend: getStorageBackend(state.activeStorage),
-                            operation,
-                            details: {
-                                fallbackAfter: wrappedError.code || wrappedError.message
-                            }
-                        });
-                        recordOperationFailure(state, operation, wrappedFallbackError, state.activeStorage);
-                        throw wrappedFallbackError;
-                    }
-                }
-            }
-        }
-
         throw wrappedError;
     }
 }
@@ -434,20 +314,12 @@ async function initializeManagedStorage(state) {
             operation: 'initialize'
         });
         recordOperationFailure(state, 'initialize', wrappedError, state.activeStorage);
-
-        if (shouldActivateFileFallback(state, wrappedError)) {
-            const fallbackApplied = await activateFileFallback(state, wrappedError, 'initialize');
-            if (fallbackApplied) {
-                return state.activeStorage;
-            }
-        }
-
         throw wrappedError;
     }
 }
 
 async function closeManagedStorage(state) {
-    const storages = new Set([state?.preferredStorage, state?.fallbackStorage, state?.activeStorage].filter(Boolean));
+    const storages = new Set([state?.preferredStorage, state?.activeStorage].filter(Boolean));
     const errors = [];
 
     for (const storage of storages) {
@@ -478,14 +350,13 @@ function createManagedRuntimeStorage(preferredStorage, config = {}) {
         config,
         preferredStorage,
         activeStorage: preferredStorage,
-        fallbackStorage: null,
         diagnostics: {
             requestedBackend: getRequestedBackend(config),
             activeBackend: getStorageBackend(preferredStorage),
             authoritativeSource: getAuthoritativeSource(getStorageBackend(preferredStorage)),
-            dualWriteEnabled: getStorageBackend(preferredStorage) === 'dual-write',
-            fallbackEnabled: config.RUNTIME_STORAGE_FALLBACK_TO_FILE !== false,
-            featureFlagRollback: buildRuntimeStorageFeatureFlagFallback(config)
+            dualWriteEnabled: false,
+            fallbackEnabled: false,
+            featureFlagRollback: null
         }
     };
 
@@ -513,9 +384,7 @@ function createManagedRuntimeStorage(preferredStorage, config = {}) {
             }
 
             if (property === '__applyFallback') {
-                return async (error, operation = 'manual_fallback') => {
-                    return await activateFileFallback(state, error, operation);
-                };
+                return async () => false;
             }
 
             const value = state.activeStorage?.[property];
@@ -616,37 +485,12 @@ export async function recordRuntimeStorageValidationStatus(report = {}, options 
         cutoverGate: report.cutoverGate || null,
         acceptanceSummary: report.acceptanceSummary || null,
         crashRecovery: report.crashRecovery || buildRuntimeStorageCrashRecoveryDiagnostics(),
-        featureFlagRollback: buildRuntimeStorageFeatureFlagFallback(runtimeStorageState.config || {}, {
-            triggeredBy: options.operation || 'verifyRuntimeStorageMigration',
-            reason: report.overallStatus && report.overallStatus !== 'pass'
-                ? `compat_diff_${report.overallStatus}`
-                : options.error?.code || options.error?.message || null
-        })
+        featureFlagRollback: null
     });
 
     runtimeStorageState.diagnostics.crashRecovery = payload.crashRecovery;
     runtimeStorageState.diagnostics.lastValidation = payload;
     updateActiveStorageState(runtimeStorageState);
-
-    if (status !== 'pass' && options.failoverOnFailure !== false) {
-        const validationError = wrapRuntimeStorageError(options.error || new Error('Runtime storage validation failed'), {
-            code: 'runtime_storage_validation_failed',
-            phase: 'validation',
-            domain: 'compatibility',
-            backend,
-            operation: options.operation || 'verifyRuntimeStorageMigration',
-            details: {
-                runId: payload.runId,
-                overallStatus: payload.overallStatus
-            }
-        });
-        await activateFileFallback(runtimeStorageState, validationError, options.operation || 'verifyRuntimeStorageMigration');
-        runtimeStorageState.diagnostics.lastValidation = {
-            ...payload,
-            fallbackApplied: true
-        };
-        updateActiveStorageState(runtimeStorageState);
-    }
 
     return runtimeStorageState.diagnostics.lastValidation;
 }

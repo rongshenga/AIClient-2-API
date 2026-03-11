@@ -163,10 +163,7 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         { flag: '--cron-near-minutes',    configKey: 'CRON_NEAR_MINUTES',      type: 'int' },
         { flag: '--cron-refresh-token',   configKey: 'CRON_REFRESH_TOKEN',     type: 'bool' },
         { flag: '--provider-pools-file',  configKey: 'PROVIDER_POOLS_FILE_PATH', type: 'string' },
-        { flag: '--runtime-storage-backend', configKey: 'RUNTIME_STORAGE_BACKEND', type: 'enum', validValues: ['file', 'db'] },
         { flag: '--runtime-storage-db-path', configKey: 'RUNTIME_STORAGE_DB_PATH', type: 'string' },
-        { flag: '--runtime-storage-dual-write', configKey: 'RUNTIME_STORAGE_DUAL_WRITE', type: 'bool' },
-        { flag: '--runtime-storage-fallback-to-file', configKey: 'RUNTIME_STORAGE_FALLBACK_TO_FILE', type: 'bool' },
         { flag: '--auth-storage-mode', configKey: 'AUTH_STORAGE_MODE', type: 'enum', validValues: ['db_only', 'bridge'] },
         { flag: '--auth-group-preload-size', configKey: 'AUTH_GROUP_PRELOAD_SIZE', type: 'int' },
         { flag: '--auth-group-preload-ahead', configKey: 'AUTH_GROUP_PRELOAD_AHEAD', type: 'int' },
@@ -230,6 +227,7 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
     currentConfig.AUTH_SECRET_CACHE_TTL_MS = Number.isFinite(Number.parseInt(currentConfig.AUTH_SECRET_CACHE_TTL_MS, 10))
         ? Math.max(1000, Number.parseInt(currentConfig.AUTH_SECRET_CACHE_TTL_MS, 10))
         : AUTH_STORAGE_DEFAULTS.AUTH_SECRET_CACHE_TTL_MS;
+    currentConfig.RUNTIME_STORAGE_BACKEND = 'db';
     normalizeConfiguredProviders(currentConfig);
 
     if (!currentConfig.SYSTEM_PROMPT_FILE_PATH) {
@@ -263,7 +261,7 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         currentConfig.RUNTIME_STORAGE_INFO = runtimeStorage.getInfo();
         const activeBackend = String(currentConfig.RUNTIME_STORAGE_INFO?.activeBackend || currentConfig.RUNTIME_STORAGE_INFO?.backend || '').toLowerCase();
         if (currentConfig.AUTH_STORAGE_MODE === 'db_only' && activeBackend === 'file') {
-            throw new Error('db_only mode rejected file fallback backend during startup');
+            throw new Error('db_only mode requires database runtime storage backend during startup');
         }
 
         if (authAutoMigration) {

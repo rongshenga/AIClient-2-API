@@ -3009,12 +3009,12 @@ LIMIT 1;
     async markInterruptedUsageRefreshTasks() {
         await this.initialize();
 
-        const runningRows = await this.client.query(`
-SELECT id
+        const interruptedRows = await this.client.query(`
+SELECT id, status
 FROM usage_refresh_tasks
-WHERE status = 'running';
+WHERE status IN ('running', 'canceling');
         `);
-        if (runningRows.length === 0) {
+        if (interruptedRows.length === 0) {
             return 0;
         }
 
@@ -3022,13 +3022,19 @@ WHERE status = 'running';
         await this.client.exec(`
 BEGIN IMMEDIATE;
 UPDATE usage_refresh_tasks
-SET status = 'failed',
-    error_message = COALESCE(error_message, 'Usage refresh task interrupted by process restart'),
+SET status = CASE
+    WHEN status = 'canceling' THEN 'canceled'
+    ELSE 'failed'
+END,
+    error_message = CASE
+        WHEN status = 'running' THEN COALESCE(error_message, 'Usage refresh task interrupted by process restart')
+        ELSE error_message
+    END,
     finished_at = COALESCE(finished_at, ${sqlValue(interruptedAt)})
-WHERE status = 'running';
+WHERE status IN ('running', 'canceling');
 COMMIT;
         `);
-        return runningRows.length;
+        return interruptedRows.length;
     }
 
     async #ensureUsageSchemaUpgrade() {

@@ -46,6 +46,7 @@ const passthrough = (value) => value;
 
 let handleGetProviderUsage;
 let handleGetUsageRefreshTask;
+let handlePostUsageRefreshTask;
 let handleGetUsage;
 
 function createMockRes() {
@@ -72,6 +73,29 @@ function buildProviderPool(prefix, count) {
         uuid: `${prefix}-${index}`,
         customName: `${prefix.toUpperCase()}-${index}`
     }));
+}
+
+async function getUsageTaskStatus(taskId) {
+    const res = createMockRes();
+    const handled = await handleGetUsageRefreshTask({}, res, taskId);
+    expect(handled).toBe(true);
+    expect(res.statusCode).toBe(200);
+    return JSON.parse(res.body);
+}
+
+async function waitForUsageTaskTerminal(taskId, timeoutMs = 5000) {
+    const startedAt = Date.now();
+    let lastStatus = null;
+    while (Date.now() - startedAt <= timeoutMs) {
+        const status = await getUsageTaskStatus(taskId);
+        lastStatus = status;
+        if (['completed', 'failed', 'canceled'].includes(status.status)) {
+            return status;
+        }
+        await sleep(20);
+    }
+
+    throw new Error(`usage task did not reach terminal state: ${taskId}, last=${lastStatus?.status || 'unknown'}`);
 }
 
 describe('Usage API Refresh Cache Strategy', () => {
@@ -115,6 +139,7 @@ describe('Usage API Refresh Cache Strategy', () => {
         const usageApiModule = await import('../src/ui-modules/usage-api.js');
         handleGetProviderUsage = usageApiModule.handleGetProviderUsage;
         handleGetUsageRefreshTask = usageApiModule.handleGetUsageRefreshTask;
+        handlePostUsageRefreshTask = usageApiModule.handlePostUsageRefreshTask;
         handleGetUsage = usageApiModule.handleGetUsage;
     });
 
@@ -139,7 +164,7 @@ describe('Usage API Refresh Cache Strategy', () => {
         }
     });
 
-    test('should reject provider async refresh entry', async () => {
+    test('should start provider async refresh task', async () => {
         const providerType = 'gemini-cli-oauth';
         const providers = buildProviderPool('gemini', 3);
 
@@ -163,13 +188,130 @@ describe('Usage API Refresh Cache Strategy', () => {
 
         const handled = await handleGetProviderUsage(req, res, currentConfig, providerPoolManager, providerType);
         expect(handled).toBe(true);
-        expect(res.statusCode).toBe(503);
-        expect(JSON.parse(res.body)).toEqual({
-            error: expect.objectContaining({
-                code: 'usage_batch_refresh_entry_disabled',
-                entryType: 'provider'
-            })
-        });
+        expect(res.statusCode).toBe(202);
+        expect(JSON.parse(res.body)).toEqual(expect.objectContaining({
+            type: 'provider',
+            providerType,
+            status: 'running',
+            scope: 'page',
+            page: 1,
+            limit: 30,
+            pollIntervalMs: expect.any(Number)
+        }));
+    });
+
+    test('should refresh page scope and provider_all scope with different target counts', async () => {
+        const providerType = 'openai-codex-oauth';
+        const providers = buildProviderPool('codex', 65);
+        mockUpdateProviderUsageCache.mockResolvedValue(undefined);
+
+        const currentConfig = {
+            providerPools: {
+                [providerType]: providers
+            },
+            USAGE_QUERY_CONCURRENCY_PER_PROVIDER: 8,
+            USAGE_QUERY_GROUP_SIZE: 4
+        };
+        const providerPoolManager = {
+            providerPools: {
+                [providerType]: providers
+            }
+        };
+
+        const pageReq = {
+            url: `/api/usage/${encodeURIComponent(providerType)}?refresh=true&async=true&scope=page&page=2`,
+            headers: {
+                host: 'localhost:3000'
+            }
+        };
+        const pageRes = createMockRes();
+        await handleGetProviderUsage(pageReq, pageRes, currentConfig, providerPoolManager, providerType);
+        expect(pageRes.statusCode).toBe(202);
+        const pageTaskPayload = JSON.parse(pageRes.body);
+        const pageTaskFinal = await waitForUsageTaskTerminal(pageTaskPayload.taskId, 8000);
+        expect(pageTaskFinal.status).toBe('completed');
+        expect(pageTaskFinal.scope).toBe('page');
+        expect(pageTaskFinal.page).toBe(2);
+        expect(pageTaskFinal.limit).toBe(30);
+        expect(pageTaskFinal.result).toEqual(expect.objectContaining({
+            totalCount: 30
+        }));
+
+        const providerAllReq = {
+            url: `/api/usage/${encodeURIComponent(providerType)}?refresh=true&async=true&scope=provider_all`,
+            headers: {
+                host: 'localhost:3000'
+            }
+        };
+        const providerAllRes = createMockRes();
+        await handleGetProviderUsage(providerAllReq, providerAllRes, currentConfig, providerPoolManager, providerType);
+        expect(providerAllRes.statusCode).toBe(202);
+        const providerAllTaskPayload = JSON.parse(providerAllRes.body);
+        const providerAllTaskFinal = await waitForUsageTaskTerminal(providerAllTaskPayload.taskId, 8000);
+        expect(providerAllTaskFinal.status).toBe('completed');
+        expect(providerAllTaskFinal.scope).toBe('provider_all');
+        expect(providerAllTaskFinal.page).toBe(null);
+        expect(providerAllTaskFinal.limit).toBe(30);
+        expect(providerAllTaskFinal.result).toEqual(expect.objectContaining({
+            totalCount: 65
+        }));
+    });
+
+    test('should cancel provider usage refresh task through POST action=cancel', async () => {
+        const providerType = 'grok-custom';
+        const providers = buildProviderPool('grok', 40);
+        for (const provider of providers) {
+            serviceInstances[`${providerType}${provider.uuid}`] = {
+                getUsageLimits: jest.fn(async () => {
+                    await sleep(20);
+                    return { usageBreakdown: [] };
+                })
+            };
+        }
+
+        const currentConfig = {
+            providerPools: {
+                [providerType]: providers
+            },
+            USAGE_QUERY_CONCURRENCY_PER_PROVIDER: 1
+        };
+        const providerPoolManager = {
+            providerPools: {
+                [providerType]: providers
+            }
+        };
+
+        const startReq = {
+            url: `/api/usage/${encodeURIComponent(providerType)}?refresh=true&async=true&scope=provider_all&groupSize=1`,
+            headers: {
+                host: 'localhost:3000'
+            }
+        };
+        const startRes = createMockRes();
+        await handleGetProviderUsage(startReq, startRes, currentConfig, providerPoolManager, providerType);
+        expect(startRes.statusCode).toBe(202);
+        const startPayload = JSON.parse(startRes.body);
+        expect(startPayload.taskId).toBeTruthy();
+
+        const cancelReq = {
+            url: `/api/usage/tasks/${encodeURIComponent(startPayload.taskId)}?action=cancel`,
+            headers: {
+                host: 'localhost:3000'
+            }
+        };
+        const cancelRes = createMockRes();
+        const cancelHandled = await handlePostUsageRefreshTask(cancelReq, cancelRes, startPayload.taskId);
+        expect(cancelHandled).toBe(true);
+        expect(cancelRes.statusCode).toBe(200);
+        expect(JSON.parse(cancelRes.body)).toEqual(expect.objectContaining({
+            taskId: startPayload.taskId,
+            status: 'canceling',
+            cancelRequestedAt: expect.any(String)
+        }));
+
+        const finalStatus = await waitForUsageTaskTerminal(startPayload.taskId, 10000);
+        expect(finalStatus.status).toBe('canceled');
+        expect(finalStatus.cancelRequestedAt).toEqual(expect.any(String));
     });
 
     test('should refresh uncached and oldest instances first on provider refresh', async () => {
@@ -311,7 +453,7 @@ describe('Usage API Refresh Cache Strategy', () => {
         });
     });
 
-    test('should reject provider async refresh entry with query overrides', async () => {
+    test('should accept provider async refresh entry with query overrides', async () => {
         const providerType = 'gemini-cli-oauth';
         const providers = buildProviderPool('gemini', 600);
         const currentConfig = {
@@ -326,7 +468,7 @@ describe('Usage API Refresh Cache Strategy', () => {
         };
 
         const req = {
-            url: `/api/usage/${encodeURIComponent(providerType)}?refresh=true&async=true&concurrency=0&groupSize=999999&groupMinPoolSize=1`,
+            url: `/api/usage/${encodeURIComponent(providerType)}?refresh=true&async=true&scope=provider_all&concurrency=0&groupSize=999999&groupMinPoolSize=1`,
             headers: {
                 host: 'localhost:3000'
             }
@@ -334,13 +476,15 @@ describe('Usage API Refresh Cache Strategy', () => {
         const res = createMockRes();
         const handled = await handleGetProviderUsage(req, res, currentConfig, providerPoolManager, providerType);
         expect(handled).toBe(true);
-        expect(res.statusCode).toBe(503);
-        expect(JSON.parse(res.body)).toEqual({
-            error: expect.objectContaining({
-                code: 'usage_batch_refresh_entry_disabled',
-                entryType: 'provider'
-            })
-        });
+        expect(res.statusCode).toBe(202);
+        expect(JSON.parse(res.body)).toEqual(expect.objectContaining({
+            type: 'provider',
+            providerType,
+            status: 'running',
+            scope: 'provider_all',
+            page: null,
+            limit: 30
+        }));
     });
 
     test('should pass timeout signal to adapter usage requests and abort timed out instance queries', async () => {
@@ -395,7 +539,7 @@ describe('Usage API Refresh Cache Strategy', () => {
         expect(seenOptions[0].signal.aborted).toBe(true);
     });
 
-    test('should paginate cached provider usage detail responses', async () => {
+    test('should force provider page limit to 30 when reading paginated cache', async () => {
         const providerType = 'gemini-cli-oauth';
         const providers = buildProviderPool('gemini', 3);
 
@@ -414,7 +558,7 @@ describe('Usage API Refresh Cache Strategy', () => {
         });
 
         const req = {
-            url: `/api/usage/${encodeURIComponent(providerType)}?page=2&limit=1`,
+            url: `/api/usage/${encodeURIComponent(providerType)}?page=2&limit=999`,
             headers: {
                 host: 'localhost:3000'
             }
@@ -438,14 +582,18 @@ describe('Usage API Refresh Cache Strategy', () => {
         const payload = JSON.parse(res.body);
         expect(mockReadProviderUsageCache).toHaveBeenCalledWith(providerType, expect.objectContaining({
             page: 2,
-            limit: 1
+            limit: 30
         }));
-        expect(payload.page).toBe(2);
-        expect(payload.limit).toBe(1);
-        expect(payload.totalPages).toBe(3);
+        expect(payload.page).toBe(1);
+        expect(payload.limit).toBe(30);
+        expect(payload.totalPages).toBe(1);
         expect(payload.availableCount).toBe(3);
-        expect(payload.instances).toHaveLength(1);
-        expect(payload.instances[0].uuid).toBe('gemini-1');
+        expect(payload.instances).toHaveLength(3);
+        expect(payload.instances.map((instance) => instance.uuid)).toEqual([
+            'gemini-0',
+            'gemini-1',
+            'gemini-2'
+        ]);
     });
 
     test('should reject large uncached provider detail async bootstrap', async () => {

@@ -341,19 +341,14 @@ describe('Runtime storage dashboard diagnostics UI', () => {
         expect(providersLoading.classList.contains('active')).toBe(false);
     });
 
-    test('should build diagnostics view model with fallback warning and readonly actions', async () => {
+    test('should build diagnostics view model in db-only mode with readonly actions', async () => {
         const { buildRuntimeStorageDiagnosticsViewModel } = await importProviderManagerModule();
 
         const viewModel = buildRuntimeStorageDiagnosticsViewModel({
             runtimeStorage: {
-                backend: 'dual-write',
+                backend: 'db',
                 requestedBackend: 'db',
                 authoritativeSource: 'database',
-                lastFallback: {
-                    status: 'applied',
-                    triggeredBy: 'verifyRuntimeStorageMigration',
-                    toBackend: 'file'
-                },
                 lastValidation: {
                     overallStatus: 'fail',
                     runId: 'run-42'
@@ -367,13 +362,13 @@ describe('Runtime storage dashboard diagnostics UI', () => {
             hasAdminAccess: false
         });
 
-        expect(viewModel.storageModeLabel).toBe('双写');
+        expect(viewModel.storageModeLabel).toBe('数据库');
         expect(viewModel.sourceOfTruthLabel).toBe('数据库');
         expect(viewModel.providerTypeCount).toBe(3);
         expect(viewModel.providerCount).toBe(9);
         expect(viewModel.readOnly).toBe(true);
         expect(viewModel.actions.reload.disabled).toBe(true);
-        expect(viewModel.alert.message).toContain('已通过');
+        expect(viewModel.alert.message).toContain('校验状态');
         expect(viewModel.diagnostics.validation).toContain('run-42');
     });
 

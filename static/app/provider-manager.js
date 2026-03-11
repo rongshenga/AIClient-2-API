@@ -61,20 +61,14 @@ function setProvidersSectionLoading(isLoading) {
  * @param {string} message - 加载文案
  */
 function getRuntimeStorageModeLabel(mode) {
-    if (mode === 'dual-write') {
-        return '双写';
-    }
     if (mode === 'db') {
         return '数据库';
-    }
-    if (mode === 'file') {
-        return '文件';
     }
     return '不可用';
 }
 
 function getRuntimeStorageSourceLabel(source) {
-    return source === 'database' ? '数据库' : '文件';
+    return source === 'database' ? '数据库' : '--';
 }
 
 function formatRuntimeStorageDiagnostic(entry, fallback = '--') {
@@ -114,11 +108,9 @@ export function buildRuntimeStorageDiagnosticsViewModel(systemInfo = {}, options
     const providerTypeCount = Number(providerSummary.providerTypeCount) || 0;
     const providerCount = Number(providerSummary.providerCount) || 0;
     const lastValidation = runtimeStorage.lastValidation || null;
-    const lastFallback = runtimeStorage.lastFallback || null;
     const lastError = runtimeStorage.lastError || null;
     const suggestedRunId = options.suggestedRunId
         || lastValidation?.runId
-        || runtimeStorage?.featureFlagRollback?.runId
         || '';
 
     let alert = null;
@@ -131,11 +123,6 @@ export function buildRuntimeStorageDiagnosticsViewModel(systemInfo = {}, options
         alert = {
             type: 'error',
             message: `最近一次运行时存储错误：${lastError.error.message}`
-        };
-    } else if (lastFallback?.status === 'applied') {
-        alert = {
-            type: 'warning',
-            message: `已通过 ${lastFallback.triggeredBy || 'runtime storage'} 回退到 ${getRuntimeStorageModeLabel(lastFallback.toBackend || 'file')}`
         };
     } else if (lastValidation && (lastValidation.overallStatus || lastValidation.status) && (lastValidation.overallStatus || lastValidation.status) !== 'pass') {
         alert = {
@@ -158,8 +145,6 @@ export function buildRuntimeStorageDiagnosticsViewModel(systemInfo = {}, options
         providerCount,
         diagnostics: {
             validation: formatRuntimeStorageDiagnostic(lastValidation),
-            fallback: formatRuntimeStorageDiagnostic(lastFallback),
-            dualWriteEnabled: runtimeStorage.dualWriteEnabled === true,
             lastErrorMessage: lastError?.error?.message || '--'
         },
         suggestedRunId,
@@ -225,10 +210,6 @@ function ensureRuntimeStorageDiagnosticsPanel() {
                 <div class="version-display-wrapper"><span class="info-value" id="runtimeStorageValidation">--</span></div>
             </div>
             <div class="info-item">
-                <span class="info-label"><i class="fas fa-arrow-rotate-left"></i> <span>最近回退</span></span>
-                <div class="version-display-wrapper"><span class="info-value" id="runtimeStorageFallback">--</span></div>
-            </div>
-            <div class="info-item">
                 <span class="info-label"><i class="fas fa-triangle-exclamation"></i> <span>最近错误</span></span>
                 <div class="version-display-wrapper"><span class="info-value" id="runtimeStorageError">--</span></div>
             </div>
@@ -248,7 +229,6 @@ export function renderRuntimeStorageDiagnostics(viewModel, container = ensureRun
     const sourceEl = container.querySelector('#runtimeStorageSource');
     const providerSummaryEl = container.querySelector('#runtimeStorageProviderSummary');
     const validationEl = container.querySelector('#runtimeStorageValidation');
-    const fallbackEl = container.querySelector('#runtimeStorageFallback');
     const errorEl = container.querySelector('#runtimeStorageError');
     const alertEl = container.querySelector('#runtimeStorageAlert');
     const reloadBtn = container.querySelector('#runtimeStorageReloadBtn');
@@ -259,7 +239,6 @@ export function renderRuntimeStorageDiagnostics(viewModel, container = ensureRun
     if (sourceEl) sourceEl.textContent = viewModel.sourceOfTruthLabel;
     if (providerSummaryEl) providerSummaryEl.textContent = `${viewModel.providerTypeCount} 种类型 / ${viewModel.providerCount} 个提供商`;
     if (validationEl) validationEl.textContent = viewModel.diagnostics.validation;
-    if (fallbackEl) fallbackEl.textContent = viewModel.diagnostics.fallback;
     if (errorEl) errorEl.textContent = viewModel.diagnostics.lastErrorMessage;
 
     if (alertEl) {

@@ -20,15 +20,15 @@ const usageProviderDetailsPromises = new Map();
 const usageProviderRefreshStates = new Map();
 const usageProviderRefreshWatchers = new Map();
 let usageLoadPromise = null;
-let supportedProvidersLoadPromise = null;
 let usageSectionListenerBound = false;
 let usageRefreshEventListenerBound = false;
 const DEFAULT_USAGE_TASK_POLL_INTERVAL_MS = 1200;
 const UI_DEBUG_SLOW_REQUEST_MS = 3000;
 const USAGE_TASK_MAX_POLL_MS = 10 * 60 * 1000;
 const USAGE_TASK_STALLED_PROGRESS_TIMEOUT_MS = 60 * 1000;
-const DEFAULT_USAGE_PROVIDER_DETAILS_PAGE_SIZE = 100;
+const DEFAULT_USAGE_PROVIDER_DETAILS_PAGE_SIZE = 30;
 const USAGE_BACKGROUND_REFRESH_MIN_TOTAL = 2000;
+const USAGE_PROVIDER_REFRESH_ESTIMATED_SECONDS_PER_ACCOUNT = 2;
 
 function logUsageUiDebug(message, payload = null, level = 'log') {
     if (typeof window.logUiDebug === 'function') {
@@ -158,6 +158,9 @@ function createUsageProviderRefreshState(providerType, taskStatus = {}, override
         providerType,
         taskId: overrides.taskId || taskStatus.taskId || null,
         status: overrides.status || taskStatus.status || 'running',
+        scope: overrides.scope || taskStatus.scope || null,
+        page: Number(overrides.page || taskStatus.page || 1),
+        limit: Number(overrides.limit || taskStatus.limit || DEFAULT_USAGE_PROVIDER_DETAILS_PAGE_SIZE),
         currentGroup,
         totalGroups,
         remainingGroups: totalGroups > 0 ? Math.max(totalGroups - currentGroup, 0) : 0,
@@ -214,9 +217,28 @@ function ensureUsageTaskIndicatorContainer(header) {
     fill.className = 'usage-task-progress-fill';
     bar.appendChild(fill);
 
+    const actions = document.createElement('div');
+    actions.className = 'usage-task-indicator-actions';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'btn-usage-task-cancel';
+    cancelBtn.textContent = t('usage.taskCancel');
+    cancelBtn.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        const providerType = indicator?.dataset?.providerType || '';
+        const taskId = indicator?.dataset?.taskId || '';
+        if (!providerType || !taskId) {
+            return;
+        }
+        await cancelUsageRefreshTask(providerType, taskId);
+    });
+    actions.appendChild(cancelBtn);
+
     indicator.appendChild(top);
     indicator.appendChild(meta);
     indicator.appendChild(bar);
+    indicator.appendChild(actions);
 
     const actionsContainer = header?.querySelector?.('.usage-group-actions')
         || findChildByClass(header, 'usage-group-actions')
@@ -227,6 +249,7 @@ function ensureUsageTaskIndicatorContainer(header) {
     indicator.__percent = percent;
     indicator.__meta = meta;
     indicator.__fill = fill;
+    indicator.__cancelBtn = cancelBtn;
     return indicator;
 }
 
@@ -243,7 +266,8 @@ function updateUsageProviderRefreshIndicator(providerType, groupContainer = null
 
     const indicator = ensureUsageTaskIndicatorContainer(header);
     const taskState = usageProviderRefreshStates.get(providerType);
-    if (!taskState || taskState.status !== 'running') {
+    const isTaskVisible = Boolean(taskState && (taskState.status === 'running' || taskState.status === 'canceling'));
+    if (!isTaskVisible) {
         indicator.hidden = true;
         indicator.style.display = 'none';
         return;
@@ -251,10 +275,19 @@ function updateUsageProviderRefreshIndicator(providerType, groupContainer = null
 
     indicator.hidden = false;
     indicator.style.display = 'flex';
-    indicator.__badge.textContent = t('usage.group.taskRunning');
+    indicator.dataset.providerType = providerType;
+    indicator.dataset.taskId = taskState.taskId || '';
+    indicator.__badge.textContent = taskState.status === 'canceling'
+        ? t('usage.taskCanceling')
+        : t('usage.group.taskRunning');
     indicator.__percent.textContent = `${Number(taskState.percent || 0).toFixed(1)}%`;
     indicator.__meta.textContent = buildUsageGroupTaskMeta(taskState);
     indicator.__fill.style.width = `${Math.max(0, Math.min(100, Number(taskState.percent || 0)))}%`;
+    if (indicator.__cancelBtn) {
+        const canceling = taskState.status === 'canceling';
+        indicator.__cancelBtn.disabled = canceling;
+        indicator.__cancelBtn.textContent = canceling ? t('usage.taskCanceling') : t('usage.taskCancel');
+    }
     indicator.title = buildUsageTaskProgressText({
         providerType,
         progress: {
@@ -396,7 +429,7 @@ function renderUsageGroupPlaceholder(content, providerSummary, state = 'idle') {
     content.innerHTML = `
         <div class="usage-empty">
             <i class="fas fa-layer-group"></i>
-            <p>${totalCount > 0 ? t('usage.group.expandAll') : t('usage.noInstances')}</p>
+            <p>${totalCount > 0 ? t('usage.group.clickToLoad') : t('usage.noInstances')}</p>
         </div>
     `;
     clearRenderedChildren(content);
@@ -449,10 +482,10 @@ function invalidateProviderUsageDetailsCache(providerType, groupContainer = null
     return targetGroup;
 }
 
-function buildProviderUsageDetailsUrl(providerType, page = 1, limit = DEFAULT_USAGE_PROVIDER_DETAILS_PAGE_SIZE) {
+function buildProviderUsageDetailsUrl(providerType, page = 1) {
     const searchParams = new URLSearchParams({
         page: String(Math.max(1, page)),
-        limit: String(Math.max(1, limit))
+        limit: String(DEFAULT_USAGE_PROVIDER_DETAILS_PAGE_SIZE)
     });
     return `/api/usage/${encodeURIComponent(providerType)}?${searchParams.toString()}`;
 }
@@ -467,7 +500,7 @@ function renderUsageGroupPagination(groupContainer, providerType, providerSummar
 
     const prevButton = document.createElement('button');
     prevButton.className = 'btn-usage-page btn-prev-page';
-    prevButton.textContent = 'Prev';
+    prevButton.textContent = t('usage.group.prevPage');
     prevButton.disabled = providerSummary.hasPrevPage !== true;
     prevButton.addEventListener('click', async (event) => {
         event.stopPropagation();
@@ -480,7 +513,7 @@ function renderUsageGroupPagination(groupContainer, providerType, providerSummar
 
     const nextButton = document.createElement('button');
     nextButton.className = 'btn-usage-page btn-next-page';
-    nextButton.textContent = 'Next';
+    nextButton.textContent = t('usage.group.nextPage');
     nextButton.disabled = providerSummary.hasNextPage !== true;
     nextButton.addEventListener('click', async (event) => {
         event.stopPropagation();
@@ -491,15 +524,16 @@ function renderUsageGroupPagination(groupContainer, providerType, providerSummar
         await loadProviderUsageDetailsPage(providerType, groupContainer, latestSummary, Number(latestSummary.page || 1) + 1);
     });
 
-    const pageInfo = document.createElement('span');
-    pageInfo.className = 'usage-page-info';
-    const availableCount = Number(providerSummary.availableCount || providerSummary.instances?.length || 0);
-    const rangeStart = availableCount > 0 ? ((Number(providerSummary.page || 1) - 1) * Number(providerSummary.limit || DEFAULT_USAGE_PROVIDER_DETAILS_PAGE_SIZE)) + 1 : 0;
-    const rangeEnd = Math.min(availableCount, Number(providerSummary.page || 1) * Number(providerSummary.limit || DEFAULT_USAGE_PROVIDER_DETAILS_PAGE_SIZE));
-    pageInfo.textContent = `${rangeStart}-${rangeEnd} / ${availableCount}`;
+    const pageStatus = document.createElement('span');
+    pageStatus.className = 'usage-group-page-status';
+    pageStatus.textContent = t('usage.group.pageStatus', {
+        page: Number(providerSummary.page || 1),
+        totalPages: Number(providerSummary.totalPages || 1),
+        count: Number(providerSummary.availableCount || providerSummary.totalCount || 0)
+    });
 
     pagination.appendChild(prevButton);
-    pagination.appendChild(pageInfo);
+    pagination.appendChild(pageStatus);
     pagination.appendChild(nextButton);
     return pagination;
 }
@@ -683,6 +717,53 @@ function buildUsageTaskProgressText(taskStatus, fallbackProviderName) {
     });
 }
 
+function estimateProviderRefreshDurationSeconds(totalCount) {
+    return Math.max(1, Math.ceil(Math.max(0, Number(totalCount || 0)) * USAGE_PROVIDER_REFRESH_ESTIMATED_SECONDS_PER_ACCOUNT));
+}
+
+function buildProviderRefreshStartUrl(providerType, options = {}) {
+    const scope = options.scope === 'provider_all' ? 'provider_all' : 'page';
+    const page = Math.max(1, Number(options.page || 1));
+    const searchParams = new URLSearchParams({
+        refresh: 'true',
+        async: 'true',
+        scope
+    });
+    if (scope === 'page') {
+        searchParams.set('page', String(page));
+    }
+    return `/api/usage/${encodeURIComponent(providerType)}?${searchParams.toString()}`;
+}
+
+function resolveProviderRefreshScope(providerType, providerSummary = {}, options = {}) {
+    const providerName = getProviderDisplayName(providerType);
+    const currentPage = Math.max(1, Number(options.page || providerSummary.page || 1));
+    const totalCount = Math.max(0, Number(providerSummary.totalCount || 0));
+    const requestedScope = options.scope === 'provider_all' ? 'provider_all' : 'page';
+
+    if (requestedScope === 'page') {
+        return {
+            scope: 'page',
+            page: currentPage
+        };
+    }
+
+    const estimatedSeconds = estimateProviderRefreshDurationSeconds(totalCount);
+    const confirmed = window.confirm(t('usage.refreshEstimateConfirm', {
+        provider: providerName,
+        count: totalCount,
+        seconds: estimatedSeconds
+    }));
+    if (!confirmed) {
+        return null;
+    }
+
+    return {
+        scope: 'provider_all',
+        page: currentPage
+    };
+}
+
 /**
  * 启动后台刷新任务并轮询完成
  * @param {string} startUrl - 启动任务接口
@@ -717,6 +798,43 @@ async function startUsageRefreshTask(startUrl, loadingEl = null) {
     setUsageLoadingText(loadingEl, t('usage.taskPreparing'));
 
     return startPayload;
+}
+
+async function cancelUsageRefreshTask(providerType, taskId) {
+    if (!providerType || !taskId) {
+        return null;
+    }
+
+    try {
+        const response = await fetch(`/api/usage/tasks/${encodeURIComponent(taskId)}`, {
+            method: 'POST',
+            headers: {
+                ...getAuthHeaders(),
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ action: 'cancel' })
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const payload = await response.json();
+        setUsageProviderRefreshState(providerType, {
+            ...payload,
+            taskId
+        }, {
+            taskId,
+            status: payload.status || 'canceling'
+        });
+        return payload;
+    } catch (error) {
+        console.error(`取消提供商 ${providerType} 用量刷新任务失败:`, error);
+        if (isUsageSectionActive()) {
+            showToast(t('common.error'), `${t('usage.taskFailed')}: ${error.message}`, 'error');
+        }
+        return null;
+    }
 }
 
 async function pollUsageRefreshTask(taskId, initialPollIntervalMs, loadingEl, fallbackProviderName, options = {}) {
@@ -755,7 +873,7 @@ async function pollUsageRefreshTask(taskId, initialPollIntervalMs, loadingEl, fa
             }
         }
 
-        if (taskStatus.status === 'running') {
+        if (taskStatus.status === 'running' || taskStatus.status === 'canceling') {
             const progressSignature = buildUsageTaskProgressSignature(taskStatus);
             if (progressSignature !== lastProgressSignature) {
                 lastProgressSignature = progressSignature;
@@ -764,11 +882,15 @@ async function pollUsageRefreshTask(taskId, initialPollIntervalMs, loadingEl, fa
                     taskId,
                     progress: taskStatus.progress || {}
                 });
-            } else if (Date.now() - lastProgressAt >= USAGE_TASK_STALLED_PROGRESS_TIMEOUT_MS) {
+            } else if (taskStatus.status === 'running' && Date.now() - lastProgressAt >= USAGE_TASK_STALLED_PROGRESS_TIMEOUT_MS) {
                 throw new Error(`Usage refresh task stalled for ${USAGE_TASK_STALLED_PROGRESS_TIMEOUT_MS}ms: ${taskId}`);
             }
 
-            setUsageLoadingText(loadingEl, buildUsageTaskProgressText(taskStatus, fallbackProviderName));
+            if (taskStatus.status === 'canceling') {
+                setUsageLoadingText(loadingEl, t('usage.taskCanceling'));
+            } else {
+                setUsageLoadingText(loadingEl, buildUsageTaskProgressText(taskStatus, fallbackProviderName));
+            }
 
             if (typeof options.stopWhen === 'function' && options.stopWhen(taskStatus) === true) {
                 logUsageUiDebug('usage refresh task polling stopped early', {
@@ -793,6 +915,15 @@ async function pollUsageRefreshTask(taskId, initialPollIntervalMs, loadingEl, fa
             return taskStatus;
         }
 
+        if (taskStatus.status === 'canceled') {
+            logUsageUiDebug('usage refresh task canceled', {
+                taskId,
+                durationMs: Date.now() - startedAt,
+                result: taskStatus.result || null
+            });
+            return taskStatus;
+        }
+
         throw new Error(taskStatus.error || t('usage.taskFailed'));
     }
 }
@@ -806,8 +937,6 @@ export function updateUsageProviderConfigs(configs) {
     logUsageUiDebug('provider configs updated', {
         configCount: Array.isArray(configs) ? configs.length : 0
     });
-    // 重新触发列表加载，以应用最新的可见性过滤、名称和图标
-    void loadSupportedProviders();
     if (isUsageSectionActive()) {
         void loadUsage();
         return;
@@ -831,11 +960,6 @@ function shouldShowUsage(providerType) {
 export { setUsageLoadingText, buildUsageTaskProgressText, shouldShowUsage };
 
 export function initUsageManager() {
-    const refreshBtn = document.getElementById('refreshUsageBtn');
-    if (refreshBtn) {
-        refreshBtn.addEventListener('click', refreshUsage);
-    }
-
     if (!usageSectionListenerBound && typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
         window.addEventListener('ui:section-activated', (event) => {
             if (event?.detail?.sectionId !== 'usage') {
@@ -843,7 +967,6 @@ export function initUsageManager() {
             }
 
             logUsageUiDebug('usage section activated');
-            void loadSupportedProviders();
             void loadUsage();
         });
         usageSectionListenerBound = true;
@@ -867,95 +990,6 @@ export function initUsageManager() {
     
     if (isUsageSectionActive()) {
         void loadUsage();
-        void loadSupportedProviders();
-    }
-}
-
-/**
- * 加载支持用量查询的提供商列表
- */
-async function loadSupportedProviders() {
-    if (supportedProvidersLoadPromise) {
-        logUsageUiDebug('GET /api/usage/supported-providers reused in-flight request');
-        return await supportedProvidersLoadPromise;
-    }
-
-    const runner = async () => {
-    const listEl = document.getElementById('supportedProvidersList');
-    if (!listEl) return;
-
-    const startedAt = Date.now();
-    const pendingTimer = startUsageUiDebugPendingTimer('GET /api/usage/supported-providers');
-    logUsageUiDebug('GET /api/usage/supported-providers started');
-
-    try {
-        const response = await fetch('/api/usage/supported-providers', {
-            method: 'GET',
-            headers: getAuthHeaders()
-        });
-
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-        }
-
-        const providers = await response.json();
-        
-        listEl.innerHTML = '';
-        
-        // 按照 currentProviderConfigs 的顺序渲染，确保顺序一致性
-        const displayOrder = currentProviderConfigs 
-            ? currentProviderConfigs.map(c => c.id) 
-            : providers;
-
-        displayOrder.forEach(providerId => {
-            // 必须是后端支持且前端配置可见的提供商
-            const isSupported = providers.includes(providerId);
-            if (!isSupported) return;
-
-            if (currentProviderConfigs) {
-                const config = currentProviderConfigs.find(c => c.id === providerId);
-                if (config && config.visible === false) return;
-            }
-
-            const tag = document.createElement('span');
-            tag.className = 'provider-tag';
-            tag.textContent = getProviderDisplayName(providerId);
-            tag.title = t('usage.clickToRefreshConfirm') || '单击刷新该提供商用量（会二次确认）';
-            tag.setAttribute('data-i18n-title', 'usage.clickToRefreshConfirm');
-            
-            // 单击触发刷新，并做二次确认，避免误触
-            tag.addEventListener('click', () => {
-                const providerName = getProviderDisplayName(providerId);
-                const confirmed = window.confirm(t('usage.refreshProviderConfirm', { name: providerName }));
-                if (!confirmed) return;
-                refreshProviderUsage(providerId);
-            });
-            
-            listEl.appendChild(tag);
-        });
-
-        logUsageUiDebug('GET /api/usage/supported-providers completed', {
-            providerCount: Array.isArray(providers) ? providers.length : 0,
-            displayCount: Array.isArray(displayOrder) ? displayOrder.length : 0,
-            durationMs: Date.now() - startedAt
-        });
-    } catch (error) {
-        logUsageUiDebug('GET /api/usage/supported-providers failed', {
-            durationMs: Date.now() - startedAt,
-            message: error?.message || String(error)
-        }, 'error');
-        console.error('获取支持的提供商列表失败:', error);
-        listEl.innerHTML = `<span class="error-text" data-i18n="usage.failedToLoad">${t('usage.failedToLoad')}</span>`;
-    } finally {
-        clearUsageUiDebugPendingTimer(pendingTimer);
-    }
-    };
-
-    supportedProvidersLoadPromise = runner();
-    try {
-        return await supportedProvidersLoadPromise;
-    } finally {
-        supportedProvidersLoadPromise = null;
     }
 }
 
@@ -1107,45 +1141,7 @@ export async function loadUsage(options = {}) {
  * 刷新用量数据（强制从服务器获取最新数据）
  */
 export async function refreshUsage() {
-    const loadingEl = document.getElementById('usageLoading');
-    const errorEl = document.getElementById('usageError');
-    const emptyEl = document.getElementById('usageEmpty');
-    const refreshBtn = document.getElementById('refreshUsageBtn');
-
-    // 显示加载状态
-    if (loadingEl) loadingEl.style.display = 'block';
-    if (errorEl) errorEl.style.display = 'none';
-    if (emptyEl) emptyEl.style.display = 'none';
-    setUsageLoadingText(loadingEl, t('usage.loading'));
-    if (refreshBtn) refreshBtn.disabled = true;
-
-    try {
-        await runUsageRefreshTask('/api/usage?refresh=true&async=true', loadingEl, t('usage.allProviders'));
-        await loadUsage();
-        if (isUsageSectionActive()) {
-            showToast(t('common.success'), t('usage.taskCompleted'), 'success');
-        }
-    } catch (error) {
-        console.error('获取用量数据失败:', error);
-        
-        if (errorEl) {
-            errorEl.style.display = 'block';
-            const errorMsgEl = document.getElementById('usageErrorMessage');
-            if (errorMsgEl) {
-                errorMsgEl.textContent = error.message || (t('usage.title') + t('common.refresh.failed'));
-            }
-        }
-        
-        if (isUsageSectionActive()) {
-            showToast(t('common.error'), t('usage.taskFailed') + ': ' + error.message, 'error');
-        }
-    } finally {
-        if (loadingEl) {
-            loadingEl.style.display = 'none';
-            setUsageLoadingText(loadingEl, t('usage.loading'));
-        }
-        if (refreshBtn) refreshBtn.disabled = false;
-    }
+    await loadUsage({ bypassInFlight: true });
 }
 
 /**
@@ -1201,9 +1197,8 @@ function renderUsageData(data, container) {
  * 刷新特定提供商类型的用量数据
  * @param {string} providerType - 提供商类型
  */
-export async function refreshProviderUsage(providerType) {
+export async function refreshProviderUsage(providerType, options = {}) {
     const loadingEl = document.getElementById('usageLoading');
-    const refreshBtn = document.getElementById('refreshUsageBtn');
     let detachedRefresh = false;
 
     if (refreshingProviders.has(providerType)) {
@@ -1216,29 +1211,41 @@ export async function refreshProviderUsage(providerType) {
     // 显示加载状态
     if (loadingEl) loadingEl.style.display = 'block';
     setUsageLoadingText(loadingEl, t('usage.loading'));
-    if (refreshBtn) refreshBtn.disabled = true;
 
     try {
         const providerName = getProviderDisplayName(providerType);
         const previousGroup = findUsageProviderGroup(providerType);
         const shouldRestoreExpandedDetails = Boolean(previousGroup && !previousGroup.classList.contains('collapsed'));
-        const providerTotalCount = Number(previousGroup?.__usageProviderData?.totalCount || 0);
+        const providerSummary = previousGroup?.__usageProviderData || getUsageProviderSummary(providerType, {});
+        const providerTotalCount = Number(providerSummary.totalCount || 0);
+        const refreshScope = resolveProviderRefreshScope(providerType, providerSummary, options);
+        if (!refreshScope) {
+            refreshingProviders.delete(providerType);
+            return;
+        }
+        const refreshStartUrl = buildProviderRefreshStartUrl(providerType, refreshScope);
         invalidateProviderUsageDetailsCache(providerType, previousGroup);
 
         logUsageUiDebug('provider usage refresh started', {
             providerType,
             restoreExpandedDetails: shouldRestoreExpandedDetails,
-            providerTotalCount
+            providerTotalCount,
+            scope: refreshScope.scope,
+            page: refreshScope.page
         });
         showToast(t('common.info'), t('usage.refreshingProvider', { name: providerName }), 'info');
 
-        if (providerTotalCount >= USAGE_BACKGROUND_REFRESH_MIN_TOTAL) {
+        const shouldDetachToBackground = refreshScope.scope === 'provider_all'
+            && providerTotalCount >= USAGE_BACKGROUND_REFRESH_MIN_TOTAL;
+
+        if (shouldDetachToBackground) {
             detachedRefresh = true;
-            const taskPayload = await startUsageRefreshTask(`/api/usage/${providerType}?refresh=true&async=true`, loadingEl);
+            const taskPayload = await startUsageRefreshTask(refreshStartUrl, loadingEl);
             logUsageUiDebug('provider usage refresh detached to background task', {
                 providerType,
                 taskId: taskPayload?.taskId || null,
-                providerTotalCount
+                providerTotalCount,
+                scope: refreshScope.scope
             }, 'warn');
 
             setUsageProviderRefreshState(providerType, {
@@ -1251,8 +1258,8 @@ export async function refreshProviderUsage(providerType) {
             });
 
             void ensureBackgroundUsageRefreshPolling(providerType, taskPayload, providerName, {
-                debugContext: `/api/usage/${providerType}?refresh=true&async=true`,
-                onCompleted: async () => {
+                debugContext: refreshStartUrl,
+                onCompleted: async (finalStatus) => {
                     await loadUsage({ bypassInFlight: true });
 
                     const refreshedGroup = invalidateProviderUsageDetailsCache(providerType);
@@ -1266,7 +1273,12 @@ export async function refreshProviderUsage(providerType) {
                     }
 
                     if (isUsageSectionActive()) {
-                        showToast(t('common.success'), t('usage.taskCompleted'), 'success');
+                        const finishedStatus = finalStatus?.status || 'completed';
+                        if (finishedStatus === 'canceled') {
+                            showToast(t('common.info'), t('usage.taskCanceled'), 'info');
+                        } else {
+                            showToast(t('common.success'), t('usage.taskCompleted'), 'success');
+                        }
                     }
                     refreshingProviders.delete(providerType);
                 },
@@ -1283,7 +1295,7 @@ export async function refreshProviderUsage(providerType) {
             return;
         }
 
-        await runUsageRefreshTask(`/api/usage/${providerType}?refresh=true&async=true`, loadingEl, providerName);
+        const finalStatus = await runUsageRefreshTask(refreshStartUrl, loadingEl, providerName);
         await loadUsage({ bypassInFlight: true });
 
         const refreshedGroup = invalidateProviderUsageDetailsCache(providerType);
@@ -1300,6 +1312,10 @@ export async function refreshProviderUsage(providerType) {
         }
 
         if (isUsageSectionActive()) {
+            if (finalStatus?.status === 'canceled') {
+                showToast(t('common.info'), t('usage.taskCanceled'), 'info');
+                return;
+            }
             showToast(t('common.success'), t('usage.taskCompleted'), 'success');
         }
     } catch (error) {
@@ -1315,7 +1331,6 @@ export async function refreshProviderUsage(providerType) {
             loadingEl.style.display = 'none';
             setUsageLoadingText(loadingEl, t('usage.loading'));
         }
-        if (refreshBtn) refreshBtn.disabled = false;
     }
 }
 
@@ -1346,14 +1361,13 @@ function createProviderGroup(providerType, providerData) {
         <div class="usage-group-title">
             <i class="fas fa-chevron-right toggle-icon"></i>
             <i class="${providerIcon} provider-icon"></i>
-            <span class="provider-name">${providerDisplayName}</span>
+            <button type="button" class="provider-name provider-name-refresh" title="${t('usage.group.refreshPage')}">${providerDisplayName}</button>
             <span class="instance-count" data-i18n="usage.group.instances" data-i18n-params='{"count":"${instanceCount}"}'>${t('usage.group.instances', { count: instanceCount })}</span>
             <span class="success-count ${successCount === instanceCount ? 'all-success' : ''}" data-i18n="usage.group.success" data-i18n-params='{"count":"${successCount}","total":"${instanceCount}"}'>${t('usage.group.success', { count: successCount, total: instanceCount })}</span>
         </div>
         <div class="usage-group-actions">
-            <button class="btn-toggle-cards" title="${t('usage.group.expandAll')}">
-                <i class="fas fa-expand-alt"></i>
-            </button>
+            <button type="button" class="btn-usage-provider-refresh btn-usage-provider-refresh-page">${t('usage.group.refreshPage')}</button>
+            <button type="button" class="btn-usage-provider-refresh btn-usage-provider-refresh-all">${t('usage.group.refreshAll')}</button>
         </div>
     `;
     
@@ -1369,55 +1383,36 @@ function createProviderGroup(providerType, providerData) {
             }
         }
     });
+
+    const refreshNameButton = header.querySelector('.provider-name-refresh');
+    refreshNameButton?.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        await refreshProviderUsage(providerType, {
+            scope: 'page',
+            page: Number(groupContainer.__usageProviderData?.page || 1)
+        });
+    });
+
+    const refreshPageButton = header.querySelector('.btn-usage-provider-refresh-page');
+    refreshPageButton?.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        await refreshProviderUsage(providerType, {
+            scope: 'page',
+            page: Number(groupContainer.__usageProviderData?.page || 1)
+        });
+    });
+
+    const refreshAllButton = header.querySelector('.btn-usage-provider-refresh-all');
+    refreshAllButton?.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        await refreshProviderUsage(providerType, {
+            scope: 'provider_all',
+            page: Number(groupContainer.__usageProviderData?.page || 1)
+        });
+    });
     
     groupContainer.appendChild(header);
     updateUsageProviderRefreshIndicator(providerType, groupContainer);
-    
-    // 展开/折叠所有卡片按钮事件
-    const toggleCardsBtn = header.querySelector('.btn-toggle-cards');
-    toggleCardsBtn.addEventListener('click', async (e) => {
-        e.stopPropagation(); // 阻止事件冒泡到分组头部
-        try {
-            await ensureProviderUsageDetailsLoaded(providerType, groupContainer, providerSummary);
-        } catch (error) {
-            console.error(`加载提供商 ${providerType} 用量详情失败:`, error);
-            return;
-        }
-        
-        const cards = groupContainer.querySelectorAll('.usage-instance-card');
-        if (cards.length === 0) return;
-
-        // 分组折叠时，先展开分组并展开全部卡片，避免“点击无反馈”
-        if (groupContainer.classList.contains('collapsed')) {
-            groupContainer.classList.remove('collapsed');
-            cards.forEach(card => card.classList.remove('collapsed'));
-            const icon = toggleCardsBtn.querySelector('i');
-            icon.className = 'fas fa-compress-alt';
-            toggleCardsBtn.title = t('usage.group.collapseAll');
-            return;
-        }
-
-        const allCollapsed = Array.from(cards).every(card => card.classList.contains('collapsed'));
-        
-        // 如果全部折叠，则全部展开；否则全部折叠
-        cards.forEach(card => {
-            if (allCollapsed) {
-                card.classList.remove('collapsed');
-            } else {
-                card.classList.add('collapsed');
-            }
-        });
-        
-        // 更新按钮图标和提示文本
-        const icon = toggleCardsBtn.querySelector('i');
-        if (allCollapsed) {
-            icon.className = 'fas fa-compress-alt';
-            toggleCardsBtn.title = t('usage.group.collapseAll');
-        } else {
-            icon.className = 'fas fa-expand-alt';
-            toggleCardsBtn.title = t('usage.group.expandAll');
-        }
-    });
     
     // 分组内容（卡片网格）
     const content = document.createElement('div');

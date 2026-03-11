@@ -230,9 +230,9 @@
 
     <!-- Runtime Storage -->
     <div class="tutorial-panel">
-        <h3><i class="fas fa-database"></i> <span data-i18n="tutorial.storage.title">Runtime Storage (file/db)</span></h3>
+        <h3><i class="fas fa-database"></i> <span data-i18n="tutorial.storage.title">Runtime Storage (DB-only)</span></h3>
         <div class="tutorial-content">
-            <p data-i18n="tutorial.storage.desc">运行时数据存储后端可选 file 或 db。db 模式使用 sqlite，并支持与历史 JSON 文件互导与回滚。</p>
+            <p data-i18n="tutorial.storage.desc">运行时数据统一使用 sqlite 数据库存储（DB-only）。</p>
             <div class="config-section">
                 <h4 data-i18n="tutorial.storage.table.title">关键参数</h4>
                 <div class="config-table">
@@ -247,34 +247,16 @@
                         </thead>
                         <tbody>
                             <tr>
-                                <td><code>RUNTIME_STORAGE_BACKEND</code></td>
-                                <td>string</td>
-                                <td>file</td>
-                                <td data-i18n="tutorial.storage.backend">运行时存储后端：<code>file</code> 或 <code>db</code></td>
-                            </tr>
-                            <tr>
                                 <td><code>RUNTIME_STORAGE_DB_PATH</code></td>
                                 <td>string</td>
                                 <td>configs/runtime/runtime-storage.sqlite</td>
-                                <td data-i18n="tutorial.storage.dbPath">SQLite 数据库路径（仅 db 模式使用）</td>
-                            </tr>
-                            <tr>
-                                <td><code>RUNTIME_STORAGE_DUAL_WRITE</code></td>
-                                <td>boolean</td>
-                                <td>false</td>
-                                <td data-i18n="tutorial.storage.dualWrite">双写模式，便于迁移阶段同时写入 DB 与文件</td>
+                                <td data-i18n="tutorial.storage.dbPath">SQLite 数据库路径</td>
                             </tr>
                             <tr>
                                 <td><code>RUNTIME_STORAGE_AUTO_IMPORT_PROVIDER_POOLS</code></td>
                                 <td>boolean</td>
                                 <td>true</td>
-                                <td data-i18n="tutorial.storage.autoImport">启动时自动导入历史 provider pools 快照到 DB（仅 db 模式）</td>
-                            </tr>
-                            <tr>
-                                <td><code>RUNTIME_STORAGE_FALLBACK_TO_FILE</code></td>
-                                <td>boolean</td>
-                                <td>true</td>
-                                <td data-i18n="tutorial.storage.fallback">DB 读写异常时回退到文件存储</td>
+                                <td data-i18n="tutorial.storage.autoImport">启动时自动导入历史 provider pools 快照到 DB</td>
                             </tr>
                         </tbody>
                     </table>

@@ -17,6 +17,7 @@ let closeRuntimeStorage;
 let readUsageCache;
 let writeUsageCache;
 let readProviderUsageCache;
+let updateProviderUsageCache;
 let handleGetUsageRefreshTask;
 
 async function createTempDir(prefix) {
@@ -65,7 +66,7 @@ describe('Usage runtime storage integration', () => {
         }));
 
         ({ initializeRuntimeStorage, closeRuntimeStorage } = await import('../src/storage/runtime-storage-registry.js'));
-        ({ readUsageCache, writeUsageCache, readProviderUsageCache } = await import('../src/ui-modules/usage-cache.js'));
+        ({ readUsageCache, writeUsageCache, readProviderUsageCache, updateProviderUsageCache } = await import('../src/ui-modules/usage-cache.js'));
         ({ handleGetUsageRefreshTask } = await import('../src/ui-modules/usage-api.js'));
     });
 
@@ -179,6 +180,85 @@ describe('Usage runtime storage integration', () => {
         });
         expect(pagedProviderCache.instances).toHaveLength(2);
         expect(pagedProviderCache.instances.map((instance) => instance.uuid)).toEqual(['codex-3', 'codex-4']);
+    });
+
+    test('should merge page-scoped provider usage updates without clearing non-target instances', async () => {
+        const tempDir = await createTempDir('usage-runtime-storage-merge-');
+        const dbPath = path.join(tempDir, 'runtime.sqlite');
+        const config = {
+            RUNTIME_STORAGE_BACKEND: 'db',
+            RUNTIME_STORAGE_DB_PATH: dbPath,
+            PROVIDER_POOLS_FILE_PATH: path.join(tempDir, 'provider_pools.json')
+        };
+
+        await initializeRuntimeStorage(config);
+        await writeUsageCache({
+            timestamp: '2026-03-09T12:00:00.000Z',
+            providers: {
+                'openai-codex-oauth': {
+                    providerType: 'openai-codex-oauth',
+                    timestamp: '2026-03-09T12:00:00.000Z',
+                    totalCount: 4,
+                    successCount: 4,
+                    errorCount: 0,
+                    processedCount: 4,
+                    instances: Array.from({ length: 4 }, (_, index) => ({
+                        uuid: `codex-${index + 1}`,
+                        name: `Codex ${index + 1}`,
+                        success: true,
+                        usage: { usageBreakdown: [{ source: 'initial' }] },
+                        lastRefreshedAt: '2026-03-09T12:00:00.000Z'
+                    }))
+                }
+            }
+        });
+
+        await updateProviderUsageCache('openai-codex-oauth', {
+            providerType: 'openai-codex-oauth',
+            timestamp: '2026-03-09T12:05:00.000Z',
+            totalCount: 2,
+            successCount: 1,
+            errorCount: 1,
+            processedCount: 2,
+            instances: [
+                {
+                    uuid: 'codex-3',
+                    name: 'Codex 3',
+                    success: false,
+                    usage: { usageBreakdown: [{ source: 'page-refresh' }] },
+                    lastRefreshedAt: '2026-03-09T12:05:00.000Z'
+                },
+                {
+                    uuid: 'codex-4',
+                    name: 'Codex 4',
+                    success: true,
+                    usage: { usageBreakdown: [{ source: 'page-refresh' }] },
+                    lastRefreshedAt: '2026-03-09T12:05:00.000Z'
+                }
+            ]
+        }, {
+            mergeWithExisting: true
+        });
+
+        const mergedProviderCache = await readProviderUsageCache('openai-codex-oauth');
+        expect(mergedProviderCache).toMatchObject({
+            providerType: 'openai-codex-oauth',
+            totalCount: 4,
+            fromCache: true
+        });
+        expect(mergedProviderCache.instances).toHaveLength(4);
+        expect(mergedProviderCache.instances.map((instance) => instance.uuid)).toEqual([
+            'codex-1',
+            'codex-2',
+            'codex-3',
+            'codex-4'
+        ]);
+        expect(mergedProviderCache.instances[2]).toMatchObject({
+            uuid: 'codex-3',
+            success: false
+        });
+        expect(mergedProviderCache.instances[0].usage.usageBreakdown[0].source).toBe('initial');
+        expect(mergedProviderCache.instances[2].usage.usageBreakdown[0].source).toBe('page-refresh');
     });
 
     test('should expose persisted usage refresh task status through usage API after restart', async () => {

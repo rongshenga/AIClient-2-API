@@ -396,6 +396,10 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
         const taskId = decodeURIComponent(usageTaskMatch[1]);
         return await usageApi.handleGetUsageRefreshTask(req, res, taskId);
     }
+    if (method === 'POST' && usageTaskMatch) {
+        const taskId = decodeURIComponent(usageTaskMatch[1]);
+        return await usageApi.handlePostUsageRefreshTask(req, res, taskId);
+    }
 
     // Get usage limits for a specific provider type
     const usageProviderMatch = pathParam.match(/^\/api\/usage\/([^\/]+)$/);
