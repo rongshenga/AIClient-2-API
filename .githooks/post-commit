@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+if [ "${SKIP_VERSION_BUMP:-0}" = "1" ] || [ "${SKIP_VERSION_POST_COMMIT:-0}" = "1" ]; then
+    exit 0
+fi
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
+
+node src/scripts/version-manager.js post-commit

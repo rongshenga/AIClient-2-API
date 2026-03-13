@@ -81,6 +81,7 @@ function createDiagnosticsContainer() {
         '#runtimeStorageProviderSummary': createMockElement(),
         '#runtimeStorageValidation': createMockElement(),
         '#runtimeStorageError': createMockElement(),
+        '#runtimeStorageErrorMeta': createMockElement({ hidden: true }),
         '#runtimeStorageAlert': createMockElement({ hidden: true, dataset: {} }),
         '#runtimeStorageReloadBtn': createMockElement(),
         '#runtimeStorageExportBtn': createMockElement(),
@@ -1215,9 +1216,10 @@ describe('frontend runtime storage diagnostics panel', () => {
         expect(nodes['#runtimeStorageProviderSummary'].textContent).toBe('3 种类型 / 8 个提供商');
         expect(nodes['#runtimeStorageValidation'].textContent).toBe('失败 · run-1');
         expect(nodes['#runtimeStorageError'].textContent).toBe('database is locked');
+        expect(nodes['#runtimeStorageErrorMeta'].hidden).toBe(true);
         expect(nodes['#runtimeStorageAlert'].hidden).toBe(false);
-        expect(nodes['#runtimeStorageAlert'].textContent).toBe('最近一次运行时存储错误：database is locked');
-        expect(nodes['#runtimeStorageAlert'].dataset.level).toBe('error');
+        expect(nodes['#runtimeStorageAlert'].textContent).toBe('校验状态：失败 · run-1');
+        expect(nodes['#runtimeStorageAlert'].dataset.level).toBe('warning');
         expect(nodes['#runtimeStorageReloadBtn'].disabled).toBe(true);
         expect(nodes['#runtimeStorageReloadBtn']['aria-disabled']).toBe('true');
         expect(container.dataset.loading).toBe('true');
@@ -1251,9 +1253,11 @@ describe('frontend runtime storage diagnostics panel', () => {
 
         providerManagerModule.renderRuntimeStorageDiagnostics(viewModel, container);
 
-        expect(nodes['#runtimeStorageError'].textContent).toBe('FOREIGN KEY constraint failed (19) (+2 more)');
+        expect(nodes['#runtimeStorageError'].textContent).toBe('FOREIGN KEY constraint failed (19)');
+        expect(nodes['#runtimeStorageErrorMeta'].hidden).toBe(false);
+        expect(nodes['#runtimeStorageErrorMeta'].textContent).toBe('已展示最新 1 条，共 3 条，悬停查看完整详情');
         expect(nodes['#runtimeStorageError'].title).toBe(multilineMessage);
-        expect(nodes['#runtimeStorageAlert'].textContent).toBe('最近一次运行时存储错误：FOREIGN KEY constraint failed (19) (+2 more)');
+        expect(nodes['#runtimeStorageAlert'].textContent).toBe('错误上下文：共 3 条明细，悬停查看完整详情');
     });
 
     test('should execute reload export and rollback actions with loading toggles and refresh callbacks', async () => {

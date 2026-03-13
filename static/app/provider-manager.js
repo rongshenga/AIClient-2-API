@@ -97,29 +97,110 @@ function normalizeRuntimeStorageErrorLine(line) {
         .trim();
 }
 
+function splitRuntimeStorageErrorLines(message) {
+    return String(message || '')
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+}
+
 function formatRuntimeStorageErrorMessage(message, fallback = '--') {
     if (typeof message !== 'string' || message.trim() === '') {
         return fallback;
     }
 
-    const lines = message
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean);
+    const lines = splitRuntimeStorageErrorLines(message);
     if (lines.length === 0) {
         return fallback;
     }
-    if (lines.length === 1) {
-        return lines[0];
+
+    const latestLine = lines[lines.length - 1];
+    return normalizeRuntimeStorageErrorLine(latestLine) || latestLine;
+}
+
+function formatRuntimeStorageErrorTime(occurredAt) {
+    if (typeof occurredAt !== 'string' || occurredAt.trim() === '') {
+        return '';
     }
 
-    const normalizedLines = lines.map((line) => normalizeRuntimeStorageErrorLine(line) || line);
-    const uniqueNormalizedLines = Array.from(new Set(normalizedLines));
-    if (uniqueNormalizedLines.length === 1) {
-        return `${uniqueNormalizedLines[0]} (+${lines.length - 1} more)`;
+    const parsed = new Date(occurredAt);
+    if (Number.isNaN(parsed.getTime())) {
+        return '';
     }
 
-    return `${lines[0]} (+${lines.length - 1} more)`;
+    return parsed.toLocaleString();
+}
+
+function formatRuntimeStorageErrorPhase(phase) {
+    const phaseMap = {
+        close: '关闭',
+        export: '导出',
+        flush: '刷盘',
+        initialize: '初始化',
+        read: '读取',
+        runtime_storage: '运行时存储',
+        write: '写入'
+    };
+    return phaseMap[phase] || '';
+}
+
+function formatRuntimeStorageErrorClassification(classification) {
+    const classificationMap = {
+        backend_unavailable: '后端不可用',
+        constraint_conflict: '约束冲突',
+        data_error: '数据错误',
+        lock_conflict: '锁冲突',
+        migration_validation_failed: '迁移校验失败',
+        operation_failed: '操作失败',
+        parameter_error: '参数错误',
+        secondary_write_failed: '次级写入失败'
+    };
+    return classificationMap[classification] || '';
+}
+
+function buildRuntimeStorageErrorDiagnostics(lastError, fallback = '--') {
+    const rawMessage = typeof lastError?.error?.message === 'string'
+        ? lastError.error.message
+        : '';
+    const lines = splitRuntimeStorageErrorLines(rawMessage);
+    const summary = formatRuntimeStorageErrorMessage(rawMessage, fallback);
+    const hasRawDetails = rawMessage.trim() !== '' && rawMessage.trim() !== summary;
+    const metaSegments = [];
+    const contextSegments = [];
+    const occurredAtLabel = formatRuntimeStorageErrorTime(lastError?.occurredAt);
+    const phaseLabel = formatRuntimeStorageErrorPhase(lastError?.phase);
+    const classificationLabel = formatRuntimeStorageErrorClassification(lastError?.error?.classification);
+
+    if (lines.length > 1) {
+        metaSegments.push(`已展示最新 1 条，共 ${lines.length} 条，悬停查看完整详情`);
+        contextSegments.push(`共 ${lines.length} 条明细，悬停查看完整详情`);
+    } else if (hasRawDetails) {
+        metaSegments.push('悬停查看完整详情');
+        contextSegments.push('悬停查看完整详情');
+    }
+
+    if (occurredAtLabel) {
+        contextSegments.unshift(`记录于 ${occurredAtLabel}`);
+    }
+    if (lastError?.operation) {
+        contextSegments.push(`操作 ${lastError.operation}`);
+    }
+    if (phaseLabel) {
+        contextSegments.push(`阶段 ${phaseLabel}`);
+    }
+    if (classificationLabel) {
+        contextSegments.push(`分类 ${classificationLabel}`);
+    }
+
+    return {
+        lineCount: lines.length,
+        rawMessage,
+        summary,
+        metaMessage: metaSegments.join(' · '),
+        contextMessage: contextSegments.length > 0
+            ? `错误上下文：${contextSegments.join(' · ')}`
+            : null
+    };
 }
 
 export function buildRuntimeStorageDiagnosticsViewModel(systemInfo = {}, options = {}) {
@@ -134,10 +215,7 @@ export function buildRuntimeStorageDiagnosticsViewModel(systemInfo = {}, options
     const providerCount = Number(providerSummary.providerCount) || 0;
     const lastValidation = runtimeStorage.lastValidation || null;
     const lastError = runtimeStorage.lastError || null;
-    const lastErrorRawMessage = typeof lastError?.error?.message === 'string'
-        ? lastError.error.message
-        : '';
-    const lastErrorMessage = formatRuntimeStorageErrorMessage(lastErrorRawMessage);
+    const lastErrorDiagnostics = buildRuntimeStorageErrorDiagnostics(lastError);
     const suggestedRunId = options.suggestedRunId
         || lastValidation?.runId
         || '';
@@ -148,10 +226,10 @@ export function buildRuntimeStorageDiagnosticsViewModel(systemInfo = {}, options
             type: 'error',
             message: `加载运行时存储诊断信息失败：${formatRuntimeStorageErrorMessage(error.message, error.message)}`
         };
-    } else if (lastErrorRawMessage) {
+    } else if (lastErrorDiagnostics.contextMessage) {
         alert = {
             type: 'error',
-            message: `最近一次运行时存储错误：${lastErrorMessage}`
+            message: lastErrorDiagnostics.contextMessage
         };
     } else if (lastValidation && (lastValidation.overallStatus || lastValidation.status) && (lastValidation.overallStatus || lastValidation.status) !== 'pass') {
         alert = {
@@ -174,8 +252,10 @@ export function buildRuntimeStorageDiagnosticsViewModel(systemInfo = {}, options
         providerCount,
         diagnostics: {
             validation: formatRuntimeStorageDiagnostic(lastValidation),
-            lastErrorMessage,
-            lastErrorRawMessage
+            lastErrorLineCount: lastErrorDiagnostics.lineCount,
+            lastErrorMessage: lastErrorDiagnostics.summary,
+            lastErrorMetaMessage: lastErrorDiagnostics.metaMessage,
+            lastErrorRawMessage: lastErrorDiagnostics.rawMessage
         },
         suggestedRunId,
         actions: {
@@ -239,12 +319,15 @@ function ensureRuntimeStorageDiagnosticsPanel() {
                 <span class="info-label"><i class="fas fa-check-double"></i> <span>最近校验</span></span>
                 <div class="version-display-wrapper"><span class="info-value" id="runtimeStorageValidation">--</span></div>
             </div>
-            <div class="info-item">
+            <div class="info-item info-item-wide runtime-storage-error-item">
                 <span class="info-label"><i class="fas fa-triangle-exclamation"></i> <span>最近错误</span></span>
-                <div class="version-display-wrapper"><span class="info-value" id="runtimeStorageError">--</span></div>
+                <div class="version-display-wrapper runtime-storage-error-wrapper">
+                    <span class="info-value runtime-storage-error-value" id="runtimeStorageError">--</span>
+                    <span class="runtime-storage-error-meta" id="runtimeStorageErrorMeta" hidden></span>
+                </div>
             </div>
         </div>
-        <div id="runtimeStorageAlert" class="routing-description" hidden></div>
+        <div id="runtimeStorageAlert" class="routing-description runtime-storage-alert" hidden></div>
     `;
     systemPanel.appendChild(panel);
     return panel;
@@ -260,6 +343,7 @@ export function renderRuntimeStorageDiagnostics(viewModel, container = ensureRun
     const providerSummaryEl = container.querySelector('#runtimeStorageProviderSummary');
     const validationEl = container.querySelector('#runtimeStorageValidation');
     const errorEl = container.querySelector('#runtimeStorageError');
+    const errorMetaEl = container.querySelector('#runtimeStorageErrorMeta');
     const alertEl = container.querySelector('#runtimeStorageAlert');
     const reloadBtn = container.querySelector('#runtimeStorageReloadBtn');
     const exportBtn = container.querySelector('#runtimeStorageExportBtn');
@@ -272,6 +356,11 @@ export function renderRuntimeStorageDiagnostics(viewModel, container = ensureRun
     if (errorEl) {
         errorEl.textContent = viewModel.diagnostics.lastErrorMessage;
         errorEl.title = viewModel.diagnostics.lastErrorRawMessage || '';
+    }
+    if (errorMetaEl) {
+        const metaMessage = viewModel.diagnostics.lastErrorMetaMessage || '';
+        errorMetaEl.hidden = metaMessage === '';
+        errorMetaEl.textContent = metaMessage;
     }
 
     if (alertEl) {

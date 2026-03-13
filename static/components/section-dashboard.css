@@ -60,6 +60,10 @@
     gap: 0.5rem;
 }
 
+.info-item-wide {
+    grid-column: span 2;
+}
+
 .info-item .info-label {
     display: flex;
     align-items: center;
@@ -87,6 +91,61 @@
     padding-left: 1.5rem;
     flex-wrap: wrap;
     gap: 0.5rem;
+}
+
+.runtime-storage-error-item {
+    padding: 1rem 1.125rem;
+    border: 1px solid var(--danger-border);
+    border-radius: 0.875rem;
+    background: linear-gradient(135deg, var(--danger-bg-light) 0%, var(--danger-bg-alt) 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.runtime-storage-error-wrapper {
+    width: 100%;
+    padding-left: 0;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.35rem;
+}
+
+.runtime-storage-error-value {
+    display: block;
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--danger-text);
+    cursor: help;
+    text-decoration: underline dotted;
+    text-underline-offset: 0.22em;
+}
+
+.runtime-storage-error-meta {
+    font-size: 0.75rem;
+    line-height: 1.45;
+    color: var(--text-secondary);
+}
+
+.runtime-storage-alert {
+    margin-top: 1rem;
+    margin-bottom: 0;
+    padding: 0.875rem 1rem;
+    border-radius: 0.75rem;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+}
+
+.runtime-storage-alert[data-level="error"] {
+    background: linear-gradient(135deg, var(--danger-bg-light) 0%, var(--danger-bg-alt) 100%);
+    border-color: var(--danger-border);
+    color: var(--danger-text);
+}
+
+.runtime-storage-alert[data-level="warning"] {
+    background: linear-gradient(135deg, var(--warning-bg) 0%, var(--bg-secondary) 100%);
+    border-color: var(--warning-border);
+    color: var(--warning-text);
 }
 
 .status-healthy {
@@ -595,4 +654,8 @@
     background: var(--warning-bg);
     color: var(--warning-text);
     border-color: var(--warning-border);
+}
+
+[data-theme="dark"] .runtime-storage-error-item {
+    box-shadow: inset 0 1px 0 rgba(254, 202, 202, 0.08);
 }

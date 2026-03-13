@@ -109,6 +109,7 @@ function createDiagnosticsContainer() {
         '#runtimeStorageValidation',
         '#runtimeStorageFallback',
         '#runtimeStorageError',
+        '#runtimeStorageErrorMeta',
         '#runtimeStorageAlert',
         '#runtimeStorageReloadBtn',
         '#runtimeStorageExportBtn',
@@ -411,8 +412,9 @@ describe('Runtime storage dashboard diagnostics UI', () => {
         expect(container.elements['#runtimeStorageProviderSummary'].textContent).toBe('1 种类型 / 2 个提供商');
         expect(container.elements['#runtimeStorageValidation'].textContent).toContain('run-100');
         expect(container.elements['#runtimeStorageError'].textContent).toBe('database is locked');
+        expect(container.elements['#runtimeStorageErrorMeta'].hidden).toBe(true);
         expect(container.elements['#runtimeStorageReloadBtn'].disabled).toBe(true);
-        expect(container.elements['#runtimeStorageAlert'].hidden).toBe(false);
+        expect(container.elements['#runtimeStorageAlert'].hidden).toBe(true);
         expect(container.dataset.loading).toBe('true');
         expect(container.dataset.readOnly).toBe('true');
     });
@@ -448,9 +450,11 @@ describe('Runtime storage dashboard diagnostics UI', () => {
 
         renderRuntimeStorageDiagnostics(viewModel, container);
 
-        expect(container.elements['#runtimeStorageError'].textContent).toBe('FOREIGN KEY constraint failed (19) (+2 more)');
+        expect(container.elements['#runtimeStorageError'].textContent).toBe('FOREIGN KEY constraint failed (19)');
+        expect(container.elements['#runtimeStorageErrorMeta'].hidden).toBe(false);
+        expect(container.elements['#runtimeStorageErrorMeta'].textContent).toBe('已展示最新 1 条，共 3 条，悬停查看完整详情');
         expect(container.elements['#runtimeStorageError'].title).toBe(multilineMessage);
-        expect(container.elements['#runtimeStorageAlert'].textContent).toBe('最近一次运行时存储错误：FOREIGN KEY constraint failed (19) (+2 more)');
+        expect(container.elements['#runtimeStorageAlert'].textContent).toBe('错误上下文：共 3 条明细，悬停查看完整详情');
     });
 
     test('should execute reload/export/rollback actions and refresh dependent stores', async () => {
