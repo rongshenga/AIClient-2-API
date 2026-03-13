@@ -2,16 +2,18 @@
 <!-- Usage Section -->
 <section id="usage" class="section" aria-labelledby="usage-title">
     <h2 id="usage-title" data-i18n="usage.title">用量查询</h2>
-    <div class="usage-panel">
+    <div class="usage-panel" id="usagePanel" aria-busy="false">
+        <div class="usage-loading-overlay" id="usageLoading" aria-hidden="true">
+            <div class="usage-loading-card" role="status" aria-live="polite">
+                <i class="fas fa-spinner fa-spin" aria-hidden="true"></i>
+                <span data-i18n="usage.loading">正在加载用量数据...</span>
+            </div>
+        </div>
         <div class="usage-controls">
             <span class="usage-last-update" id="usageLastUpdate" data-i18n="usage.lastUpdate" data-i18n-params='{"time":"--"}'>上次更新: --</span>
             <span class="server-time-display" id="serverTimeDisplay">
              <span data-i18n="usage.serverTime">服务端时间</span>: <span id="serverTimeValue">--</span>
             </span>
-        </div>
-
-        <div class="usage-loading" id="usageLoading" style="display: none;">
-            <i class="fas fa-spinner fa-spin"></i> <span data-i18n="usage.loading">正在加载用量数据...</span>
         </div>
         
         <div class="usage-error" id="usageError" style="display: none;">

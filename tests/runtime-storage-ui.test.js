@@ -181,8 +181,15 @@ async function importModalModule() {
 
     jest.doMock('../static/app/utils.js', () => ({
         showToast: mockShowToast,
+        showConfirmDialog: jest.fn(),
         getFieldLabel: mockGetFieldLabel,
-        getProviderTypeFields: mockGetProviderTypeFields
+        getProviderTypeFields: mockGetProviderTypeFields,
+        escapeHtml: (value) => String(value || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;')
     }));
     jest.doMock('../static/app/event-handlers.js', () => ({
         handleProviderPasswordToggle: jest.fn()
@@ -645,6 +652,46 @@ describe('Provider modal runtime storage interactions', () => {
         expect(inlinePagination).toContain('data-i18n="pagination.showingCompact"');
         expect(inlinePagination).toContain('title="显示 1-5 / 共 6 条"');
         expect(inlinePagination).toContain('>1-5 / 6<');
+    });
+
+    test('should prefer custom name, identity, file name and uuid when rendering provider title', async () => {
+        const { renderProviderList } = await importModalModule();
+
+        const html = renderProviderList([
+            {
+                uuid: 'provider-custom',
+                customName: 'Custom Node',
+                email: 'custom@example.com',
+                accountId: 'acct-custom',
+                CODEX_OAUTH_CREDS_FILE_PATH: './configs/codex/custom.json',
+                isHealthy: true
+            },
+            {
+                uuid: 'provider-identity',
+                email: 'identity@example.com',
+                accountId: 'acct-identity',
+                CODEX_OAUTH_CREDS_FILE_PATH: './configs/codex/identity.json',
+                isHealthy: true
+            },
+            {
+                uuid: 'provider-file',
+                CODEX_OAUTH_CREDS_FILE_PATH: './configs/codex/file-only.json',
+                isHealthy: true
+            },
+            {
+                uuid: 'provider-uuid',
+                isHealthy: true
+            }
+        ]);
+
+        expect(html).toContain('>Custom Node<');
+        expect(html).toContain('>identity@example.com (acct-identity)<');
+        expect(html).toContain('>file-only.json<');
+        expect(html).toContain('>provider-uuid<');
+        expect(html).toContain('title="Custom: Custom Node');
+        expect(html).toContain('Identity: identity@example.com (acct-identity)');
+        expect(html).toContain('File: file-only.json');
+        expect(html).toContain('UUID: provider-uuid');
     });
 
     test('should render a single pagination block in provider manager modal', async () => {

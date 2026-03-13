@@ -492,6 +492,7 @@
 }
 
 .provider-modal-content {
+    position: relative;
     background: var(--bg-primary);
     border-radius: var(--radius-xl);
     width: 95%;
@@ -501,6 +502,46 @@
     box-shadow: var(--shadow-xl);
     animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
     border: 1px solid var(--border-color);
+}
+
+.provider-modal-loading-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(7, 15, 29, 0.52);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.18s ease, visibility 0.18s ease;
+    z-index: 12;
+}
+
+.provider-modal-loading-overlay.active {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+}
+
+.provider-modal-loading-card {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.95rem 1.3rem;
+    border-radius: 0.9rem;
+    background: linear-gradient(180deg, rgba(15, 23, 42, 0.98) 0%, rgba(17, 24, 39, 0.96) 100%);
+    border: 1px solid rgba(148, 163, 184, 0.32);
+    box-shadow: 0 18px 36px rgba(2, 6, 23, 0.4);
+    color: #e2e8f0;
+    font-size: 0.95rem;
+    font-weight: 600;
+}
+
+.provider-modal-loading-card i {
+    color: #38bdf8;
 }
 
 .provider-modal-header {
@@ -1400,6 +1441,14 @@
     transform: translateY(-1px);
     box-shadow: 0 4px 12px var(--danger-40);
     background: linear-gradient(135deg, var(--danger-color) 0%, var(--danger-alt) 100%);
+}
+
+.provider-summary-actions .btn.is-loading,
+.provider-summary-actions .btn:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
 }
 
 /* 刷新不健康UUID按钮样式 */

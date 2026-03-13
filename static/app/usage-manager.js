@@ -802,6 +802,19 @@ function setUsageLoadingText(loadingEl, text) {
     textEl.textContent = text || t('usage.loading');
 }
 
+function setUsagePanelLoading(isLoading) {
+    const loadingEl = document.getElementById('usageLoading');
+    const panelEl = document.getElementById('usagePanel');
+    if (!loadingEl || !panelEl) {
+        return false;
+    }
+
+    loadingEl.classList.toggle('active', isLoading);
+    loadingEl.setAttribute('aria-hidden', isLoading ? 'false' : 'true');
+    panelEl.setAttribute('aria-busy', isLoading ? 'true' : 'false');
+    return true;
+}
+
 /**
  * 构建任务进度文案
  * @param {Object} taskStatus - 任务状态
@@ -1173,7 +1186,8 @@ async function loadUsageInternal(options = {}) {
     });
 
     // 显示加载状态
-    if (loadingEl) loadingEl.style.display = 'block';
+    setUsagePanelLoading(true);
+    setUsageLoadingText(loadingEl, t('usage.loading'));
     if (errorEl) errorEl.style.display = 'none';
     if (emptyEl) emptyEl.style.display = 'none';
 
@@ -1220,7 +1234,7 @@ async function loadUsageInternal(options = {}) {
         const parsedAt = Date.now();
         
         // 隐藏加载状态
-        if (loadingEl) loadingEl.style.display = 'none';
+        setUsagePanelLoading(false);
         
         // 渲染用量数据
         renderUsageData(data, contentEl);
@@ -1265,7 +1279,7 @@ async function loadUsageInternal(options = {}) {
         }, 'error');
         console.error('获取用量数据失败:', error);
         
-        if (loadingEl) loadingEl.style.display = 'none';
+        setUsagePanelLoading(false);
         if (errorEl) {
             errorEl.style.display = 'block';
             const errorMsgEl = document.getElementById('usageErrorMessage');

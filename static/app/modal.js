@@ -1,6 +1,6 @@
 // 模态框管理模块
 
-import { showToast, getFieldLabel, getProviderTypeFields, showConfirmDialog } from './utils.js';
+import { showToast, getFieldLabel, getProviderTypeFields, showConfirmDialog, escapeHtml } from './utils.js';
 import { handleProviderPasswordToggle } from './event-handlers.js';
 import { t } from './i18n.js';
 
@@ -19,6 +19,7 @@ let currentSort = null;
 let cachedModels = []; // 缓存模型列表
 let currentHealthFilter = 'all';
 let currentErrorTypeFilter = 'all';
+const PROVIDER_MODAL_BUSY_CONTROL_SELECTOR = 'button, input, select, textarea';
 
 async function confirmProviderAction(message, options = {}) {
     return await showConfirmDialog({
@@ -45,6 +46,144 @@ function normalizeErrorTypeFilter(value, fallback = 'all') {
         return fallback;
     }
     return PROVIDER_ERROR_TYPE_FILTERS.includes(normalized) ? normalized : fallback;
+}
+
+function getActiveProviderModal(providerType = '') {
+    const modal = document.querySelector('.provider-modal');
+    if (!modal) {
+        return null;
+    }
+
+    if (!providerType) {
+        return modal;
+    }
+
+    return modal.getAttribute('data-provider-type') === providerType ? modal : null;
+}
+
+function ensureProviderModalLoadingOverlay(modal) {
+    if (!modal) {
+        return null;
+    }
+
+    const modalContent = modal.querySelector('.provider-modal-content');
+    if (!modalContent) {
+        return null;
+    }
+
+    let overlay = modalContent.querySelector('.provider-modal-loading-overlay');
+    if (overlay) {
+        return overlay;
+    }
+
+    overlay = document.createElement('div');
+    overlay.className = 'provider-modal-loading-overlay';
+    overlay.setAttribute('aria-hidden', 'true');
+
+    const loadingCard = document.createElement('div');
+    loadingCard.className = 'provider-modal-loading-card';
+    loadingCard.setAttribute('role', 'status');
+    loadingCard.setAttribute('aria-live', 'polite');
+
+    const icon = document.createElement('i');
+    icon.className = 'fas fa-spinner fa-spin';
+    icon.setAttribute('aria-hidden', 'true');
+
+    const text = document.createElement('span');
+    text.textContent = t('common.loading');
+
+    loadingCard.appendChild(icon);
+    loadingCard.appendChild(text);
+    overlay.appendChild(loadingCard);
+    modalContent.appendChild(overlay);
+
+    return overlay;
+}
+
+function toggleProviderModalControlsDisabled(modal, isDisabled) {
+    if (!modal) {
+        return;
+    }
+
+    const controls = modal.querySelectorAll(PROVIDER_MODAL_BUSY_CONTROL_SELECTOR);
+    controls.forEach((control) => {
+        if (!control || control.closest('.provider-modal-loading-overlay')) {
+            return;
+        }
+
+        if (isDisabled) {
+            if (control.dataset.modalBusyManaged === 'true') {
+                return;
+            }
+            control.dataset.modalBusyManaged = 'true';
+            control.dataset.modalBusyPrevDisabled = control.disabled ? 'true' : 'false';
+            control.disabled = true;
+            return;
+        }
+
+        if (control.dataset.modalBusyManaged !== 'true') {
+            return;
+        }
+        control.disabled = control.dataset.modalBusyPrevDisabled === 'true';
+        delete control.dataset.modalBusyManaged;
+        delete control.dataset.modalBusyPrevDisabled;
+    });
+}
+
+function setProviderModalActionButtonLoading(button, isLoading) {
+    if (!button) {
+        return;
+    }
+
+    const icon = button.querySelector('i');
+    if (isLoading) {
+        button.classList.add('is-loading');
+        button.setAttribute('aria-busy', 'true');
+        if (icon && !button.dataset.loadingOriginalIconClass) {
+            button.dataset.loadingOriginalIconClass = icon.className;
+            icon.className = 'fas fa-spinner fa-spin';
+        }
+        return;
+    }
+
+    button.classList.remove('is-loading');
+    button.setAttribute('aria-busy', 'false');
+    if (icon && button.dataset.loadingOriginalIconClass) {
+        icon.className = button.dataset.loadingOriginalIconClass;
+        delete button.dataset.loadingOriginalIconClass;
+    }
+}
+
+function setProviderModalBusy(providerType, isBusy, options = {}) {
+    const modal = getActiveProviderModal(providerType);
+    if (!modal) {
+        return false;
+    }
+
+    const modalContent = modal.querySelector('.provider-modal-content');
+    const overlay = ensureProviderModalLoadingOverlay(modal);
+    const loadingText = options.message || t('common.loading');
+    const actionButton = options.actionButtonSelector
+        ? modal.querySelector(options.actionButtonSelector)
+        : null;
+
+    modal.dataset.busy = isBusy ? 'true' : 'false';
+    if (modalContent) {
+        modalContent.setAttribute('aria-busy', isBusy ? 'true' : 'false');
+    }
+
+    if (overlay) {
+        const text = overlay.querySelector('span');
+        if (text) {
+            text.textContent = loadingText;
+        }
+        overlay.classList.toggle('active', isBusy);
+        overlay.setAttribute('aria-hidden', isBusy ? 'false' : 'true');
+    }
+
+    toggleProviderModalControlsDisabled(modal, isBusy);
+    setProviderModalActionButtonLoading(actionButton, isBusy);
+    return true;
 }
 
 function buildProviderPageUrl(providerType, page = 1) {
@@ -305,7 +444,7 @@ function applyProviderHealthFilter(healthFilter = 'all', resetPage = true, scrol
 
     updateProviderFilterButtonsState(modal);
     updateProviderErrorTypeFilterState(modal);
-    void goToProviderPage(resetPage ? 1 : currentPage, scrollToTop, true);
+    return goToProviderPage(resetPage ? 1 : currentPage, scrollToTop, true);
 }
 
 function applyProviderErrorTypeFilter(errorType = 'all', resetPage = true, scrollToTop = true) {
@@ -315,7 +454,7 @@ function applyProviderErrorTypeFilter(errorType = 'all', resetPage = true, scrol
     if (!modal) return;
 
     updateProviderErrorTypeFilterState(modal);
-    void goToProviderPage(resetPage ? 1 : currentPage, scrollToTop, true);
+    return goToProviderPage(resetPage ? 1 : currentPage, scrollToTop, true);
 }
 
 /**
@@ -353,7 +492,13 @@ function showProviderManagerModal(data) {
     modal.className = 'provider-modal';
     modal.setAttribute('data-provider-type', providerType);
     modal.innerHTML = `
-        <div class="provider-modal-content">
+        <div class="provider-modal-content" aria-busy="false">
+            <div class="provider-modal-loading-overlay" aria-hidden="true">
+                <div class="provider-modal-loading-card" role="status" aria-live="polite">
+                    <i class="fas fa-spinner fa-spin" aria-hidden="true"></i>
+                    <span>${t('common.loading')}</span>
+                </div>
+            </div>
             <div class="provider-modal-header">
                 <h3 data-i18n="modal.provider.manage" data-i18n-params='{"type":"${providerType}"}'><i class="fas fa-cogs"></i> 管理 ${providerType} 提供商配置</h3>
                 <button class="modal-close" onclick="window.closeProviderModal(this)">
@@ -388,7 +533,7 @@ function showProviderManagerModal(data) {
                         <button class="btn btn-secondary btn-refresh-unhealthy-uuids" onclick="window.refreshUnhealthyUuids('${providerType}')" data-i18n="modal.provider.refreshUnhealthyUuids" title="刷新不健康节点的UUID">
                             <i class="fas fa-sync-alt"></i> <span data-i18n="modal.provider.refreshUnhealthyUuidsBtn">刷新UUID</span>
                         </button>
-                        <button class="btn btn-danger" onclick="window.deleteUnhealthyProviders('${providerType}')" data-i18n="modal.provider.deleteUnhealthy" title="删除不健康节点">
+                        <button class="btn btn-danger btn-delete-unhealthy-providers" onclick="window.deleteUnhealthyProviders('${providerType}')" data-i18n="modal.provider.deleteUnhealthy" title="删除不健康节点">
                             <i class="fas fa-trash-alt"></i> <span data-i18n="modal.provider.deleteUnhealthyBtn">删除不健康</span>
                         </button>
                     </div>
@@ -607,6 +752,9 @@ function addModalEventListeners(modal) {
     // ESC键关闭模态框
     const handleEscKey = (event) => {
         if (event.key === 'Escape') {
+            if (modal.dataset.busy === 'true') {
+                return;
+            }
             modal.remove();
             document.removeEventListener('keydown', handleEscKey);
         }
@@ -615,6 +763,9 @@ function addModalEventListeners(modal) {
     // 点击背景关闭模态框
     const handleBackgroundClick = (event) => {
         if (event.target === modal) {
+            if (modal.dataset.busy === 'true') {
+                return;
+            }
             modal.remove();
             document.removeEventListener('keydown', handleEscKey);
         }
@@ -678,11 +829,82 @@ function addModalEventListeners(modal) {
 function closeProviderModal(button) {
     const modal = button.closest('.provider-modal');
     if (modal) {
+        if (modal.dataset.busy === 'true') {
+            return;
+        }
         if (modal.cleanup) {
             modal.cleanup();
         }
         modal.remove();
     }
+}
+
+function normalizeProviderDisplayText(value) {
+    if (typeof value !== 'string') {
+        return '';
+    }
+
+    return value.trim();
+}
+
+function getProviderCredentialPath(provider = {}) {
+    const credentialEntry = Object.entries(provider || {}).find(([key, value]) => {
+        if (typeof value !== 'string' || !value.trim()) {
+            return false;
+        }
+
+        return key.endsWith('_FILE_PATH')
+            || key.endsWith('_CREDS_FILE_PATH')
+            || key.endsWith('_TOKEN_FILE_PATH');
+    });
+
+    return credentialEntry?.[1] || '';
+}
+
+function getProviderCredentialFileName(provider = {}) {
+    const credentialPath = normalizeProviderDisplayText(getProviderCredentialPath(provider));
+    if (!credentialPath) {
+        return '';
+    }
+
+    const pathSegments = credentialPath.split(/[\\/]/).filter(Boolean);
+    return pathSegments[pathSegments.length - 1] || '';
+}
+
+function getProviderIdentityText(provider = {}) {
+    const email = normalizeProviderDisplayText(provider.email || provider.userEmail || '');
+    const accountId = normalizeProviderDisplayText(
+        provider.accountId
+        || provider.account_id
+        || provider.ACCOUNT_ID
+        || ''
+    );
+
+    if (email && accountId) {
+        return `${email} (${accountId})`;
+    }
+
+    return email || accountId;
+}
+
+function getProviderDisplayMeta(provider = {}) {
+    const customName = normalizeProviderDisplayText(provider.customName || '');
+    const identityText = getProviderIdentityText(provider);
+    const fileName = normalizeProviderDisplayText(getProviderCredentialFileName(provider));
+    const uuid = normalizeProviderDisplayText(provider.uuid || '');
+
+    const primaryName = customName || identityText || fileName || uuid || '-';
+    const tooltipLines = [
+        customName ? `Custom: ${customName}` : '',
+        identityText ? `Identity: ${identityText}` : '',
+        fileName ? `File: ${fileName}` : '',
+        uuid ? `UUID: ${uuid}` : ''
+    ].filter(Boolean);
+
+    return {
+        primaryName,
+        tooltip: tooltipLines.join('\n')
+    };
 }
 
 /**
@@ -715,6 +937,9 @@ function renderProviderList(providers) {
         const toggleButtonText = isDisabled ? t('modal.provider.enabled') : t('modal.provider.disabled');
         const toggleButtonIcon = isDisabled ? 'fas fa-play' : 'fas fa-ban';
         const toggleButtonClass = isDisabled ? 'btn-success' : 'btn-warning';
+        const displayMeta = getProviderDisplayMeta(provider);
+        const displayName = escapeHtml(displayMeta.primaryName);
+        const displayTitleAttr = displayMeta.tooltip ? ` title="${escapeHtml(displayMeta.tooltip)}"` : '';
         
         // 构建错误信息显示
         let errorInfoHtml = '';
@@ -733,7 +958,7 @@ function renderProviderList(providers) {
             <div class="provider-item-detail ${healthClass} ${disabledClass}" data-uuid="${provider.uuid}">
                 <div class="provider-item-header" onclick="window.toggleProviderDetails('${provider.uuid}')">
                     <div class="provider-info">
-                        <div class="provider-name">${provider.customName || provider.uuid}</div>
+                        <div class="provider-name"${displayTitleAttr}>${displayName}</div>
                         <div class="provider-meta">
                             <span class="health-status">
                                 <i class="${healthIcon}"></i>
@@ -2090,6 +2315,10 @@ async function deleteUnhealthyProviders(providerType) {
     }
     
     try {
+        setProviderModalBusy(providerType, true, {
+            message: t('modal.provider.deleteUnhealthy.deleting'),
+            actionButtonSelector: '.btn-delete-unhealthy-providers'
+        });
         showToast(t('common.info'), t('modal.provider.deleteUnhealthy.deleting'), 'info');
         
         const response = await window.apiClient.delete(
@@ -2134,7 +2363,7 @@ async function deleteUnhealthyProviders(providerType) {
 
             if (deletedCount > 0) {
                 // 删除后自动切到全部视图，避免筛选导致“空页但实际还有数据”
-                applyProviderHealthFilter('all', true, false);
+                await applyProviderHealthFilter('all', true, false);
             }
         } else {
             showToast(t('common.error'), t('modal.provider.deleteUnhealthy.failed'), 'error');
@@ -2142,6 +2371,10 @@ async function deleteUnhealthyProviders(providerType) {
     } catch (error) {
         console.error('删除不健康节点失败:', error);
         showToast(t('common.error'), t('modal.provider.deleteUnhealthy.failed') + ': ' + error.message, 'error');
+    } finally {
+        setProviderModalBusy(providerType, false, {
+            actionButtonSelector: '.btn-delete-unhealthy-providers'
+        });
     }
 }
 
@@ -2165,6 +2398,10 @@ async function refreshUnhealthyUuids(providerType) {
     }
     
     try {
+        setProviderModalBusy(providerType, true, {
+            message: t('modal.provider.refreshUnhealthyUuids.refreshing'),
+            actionButtonSelector: '.btn-refresh-unhealthy-uuids'
+        });
         showToast(t('common.info'), t('modal.provider.refreshUnhealthyUuids.refreshing'), 'info');
         
         const response = await window.apiClient.post(
@@ -2189,6 +2426,10 @@ async function refreshUnhealthyUuids(providerType) {
     } catch (error) {
         console.error('刷新不健康节点UUID失败:', error);
         showToast(t('common.error'), t('modal.provider.refreshUnhealthyUuids.failed') + ': ' + error.message, 'error');
+    } finally {
+        setProviderModalBusy(providerType, false, {
+            actionButtonSelector: '.btn-refresh-unhealthy-uuids'
+        });
     }
 }
 
