@@ -89,7 +89,14 @@ function injectUiRuntimeFlags(content, currentConfig = {}) {
  * @param {http.ServerResponse} res - The HTTP response object
  */
 export async function serveStaticFiles(pathParam, res, currentConfig = {}) {
-    const filePath = path.join(process.cwd(), 'static', pathParam === '/' || pathParam === '/index.html' ? 'index.html' : pathParam.replace('/static/', ''));
+    const normalizedPath = (() => {
+        try {
+            return new URL(pathParam, 'http://127.0.0.1').pathname;
+        } catch {
+            return String(pathParam || '/').split('?')[0];
+        }
+    })();
+    const filePath = path.join(process.cwd(), 'static', normalizedPath === '/' || normalizedPath === '/index.html' ? 'index.html' : normalizedPath.replace('/static/', ''));
 
     if (existsSync(filePath)) {
         const ext = path.extname(filePath);
@@ -99,6 +106,7 @@ export async function serveStaticFiles(pathParam, res, currentConfig = {}) {
             '.js': 'application/javascript',
             '.png': 'image/png',
             '.jpg': 'image/jpeg',
+            '.svg': 'image/svg+xml',
             '.ico': 'image/x-icon'
         }[ext] || 'text/plain';
 
