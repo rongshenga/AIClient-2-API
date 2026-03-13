@@ -4,6 +4,7 @@
  */
 
 import { t } from './i18n.js';
+import { attachToastLifecycle } from './utils.js';
 
 // 模型数据缓存
 let modelsCache = null;
@@ -112,14 +113,7 @@ function showCopyToast(modelName) {
     `;
     
     toastContainer.appendChild(toast);
-    
-    // 自动移除
-    setTimeout(() => {
-        toast.classList.add('toast-fade-out');
-        setTimeout(() => {
-            toast.remove();
-        }, 300);
-    }, 2000);
+    attachToastLifecycle(toast, 5000);
 }
 
 function showModelsToast(message, type = 'info') {
@@ -141,10 +135,7 @@ function showModelsToast(message, type = 'info') {
     `;
 
     toastContainer.appendChild(toast);
-    setTimeout(() => {
-        toast.classList.add('toast-fade-out');
-        setTimeout(() => toast.remove(), 300);
-    }, 2600);
+    attachToastLifecycle(toast, 5000);
 }
 
 /**

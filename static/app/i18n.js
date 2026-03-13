@@ -33,6 +33,8 @@ const translations = {
         'nav.logs': '实时日志',
         'nav.plugins': '插件管理',
         'nav.models': '可用模型',
+        'nav.collapseSidebar': '收起侧边栏',
+        'nav.expandSidebar': '展开侧边栏',
         
         // Dashboard
         'dashboard.title': '系统概览',

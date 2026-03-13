@@ -2,7 +2,18 @@
 <link rel="stylesheet" href="components/header.css">
 <header class="header">
     <div class="header-content">
-        <h1><span class="header-title" data-i18n="header.title">All2One API 管理控制台</span></h1>
+        <div class="header-brand">
+            <button
+                type="button"
+                class="sidebar-collapse-toggle header-sidebar-toggle"
+                id="sidebarCollapseToggle"
+                aria-label="收起侧边栏"
+                data-i18n-aria-label="nav.collapseSidebar"
+            >
+                <i class="fas fa-angles-left" aria-hidden="true"></i>
+            </button>
+            <h1><span class="header-title" data-i18n="header.title">All2One API 管理控制台</span></h1>
+        </div>
         <button class="mobile-menu-toggle" id="mobileMenuToggle" aria-label="Menu" title="菜单">
             <i class="fas fa-bars"></i>
         </button>
@@ -14,11 +25,13 @@
                 <i class="fas fa-moon"></i>
                 <i class="fas fa-sun"></i>
             </button>
-            <button id="logoutBtn" class="logout-btn" data-i18n="header.logout" title="Logout" data-i18n-title="header.logout">
-                <i class="fas fa-sign-out-alt"></i> <span data-i18n="header.logout">登出</span>
+            <button id="logoutBtn" class="logout-btn header-action-btn header-action-btn-danger" aria-label="登出" data-i18n-aria-label="header.logout" title="登出" data-i18n-title="header.logout" style="display: none;">
+                <i class="fas fa-sign-out-alt" aria-hidden="true"></i>
+                <span class="header-action-label" data-i18n="header.logout">登出</span>
             </button>
-            <button id="restartBtn" class="logout-btn" aria-label="Restart Service" data-i18n-aria-label="header.restart">
-                <i id="restartBtnIcon" class="fas fa-redo"></i> <span id="restartBtnText" class="btn-text" data-i18n="header.restart">重启</span>
+            <button id="restartBtn" class="logout-btn header-action-btn" aria-label="重启" data-i18n-aria-label="header.restart" title="重启" data-i18n-title="header.restart">
+                <i id="restartBtnIcon" class="fas fa-power-off" aria-hidden="true"></i>
+                <span id="restartBtnText" class="header-action-label btn-text" data-i18n="header.restart">重启</span>
             </button>
         </div>
     </div>

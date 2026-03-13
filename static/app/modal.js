@@ -1,6 +1,6 @@
 // 模态框管理模块
 
-import { showToast, getFieldLabel, getProviderTypeFields } from './utils.js';
+import { showToast, getFieldLabel, getProviderTypeFields, showConfirmDialog } from './utils.js';
 import { handleProviderPasswordToggle } from './event-handlers.js';
 import { t } from './i18n.js';
 
@@ -19,6 +19,17 @@ let currentSort = null;
 let cachedModels = []; // 缓存模型列表
 let currentHealthFilter = 'all';
 let currentErrorTypeFilter = 'all';
+
+async function confirmProviderAction(message, options = {}) {
+    return await showConfirmDialog({
+        title: options.title || t('common.warning'),
+        message,
+        confirmText: options.confirmText || t('common.confirm'),
+        cancelText: options.cancelText || t('common.cancel'),
+        variant: options.variant || 'warning',
+        icon: options.icon || 'fas fa-triangle-exclamation'
+    });
+}
 
 function normalizePage(value, fallback = 1) {
     const parsed = Number.parseInt(value, 10);
@@ -1282,7 +1293,11 @@ async function saveProvider(uuid, event) {
 async function deleteProvider(uuid, event) {
     event.stopPropagation();
     
-    if (!confirm(t('modal.provider.deleteConfirm'))) {
+    if (!await confirmProviderAction(t('modal.provider.deleteConfirm'), {
+        confirmText: t('modal.provider.delete'),
+        variant: 'danger',
+        icon: 'fas fa-trash-can'
+    })) {
         return;
     }
     
@@ -1834,7 +1849,10 @@ async function toggleProviderStatus(uuid, event) {
         t('modal.provider.enableConfirm') :
         t('modal.provider.disableConfirm');
     
-    if (!confirm(confirmMessage)) {
+    if (!await confirmProviderAction(confirmMessage, {
+        variant: isCurrentlyDisabled ? 'warning' : 'danger',
+        icon: isCurrentlyDisabled ? 'fas fa-circle-check' : 'fas fa-ban'
+    })) {
         return;
     }
     
@@ -1855,7 +1873,9 @@ async function toggleProviderStatus(uuid, event) {
  * @param {string} providerType - 提供商类型
  */
 async function resetAllProvidersHealth(providerType) {
-    if (!confirm(t('modal.provider.resetHealthConfirm', {type: providerType}))) {
+    if (!await confirmProviderAction(t('modal.provider.resetHealthConfirm', {type: providerType}), {
+        icon: 'fas fa-heart-pulse'
+    })) {
         return;
     }
     
@@ -1889,7 +1909,9 @@ async function resetAllProvidersHealth(providerType) {
  * @param {string} providerType - 提供商类型
  */
 async function performHealthCheck(providerType) {
-    if (!confirm(t('modal.provider.healthCheckConfirm', {type: providerType}))) {
+    if (!await confirmProviderAction(t('modal.provider.healthCheckConfirm', {type: providerType}), {
+        icon: 'fas fa-stethoscope'
+    })) {
         return;
     }
     
@@ -1936,7 +1958,9 @@ async function executeRefreshProviderUuidAction({
     uuid,
     providerType,
     apiClient = window.apiClient,
-    confirmFn = (message) => confirm(message),
+    confirmFn = (message) => confirmProviderAction(message, {
+        icon: 'fas fa-arrows-rotate'
+    }),
     notify = showToast,
     translate = t,
     reloadConfigFn = async () => await apiClient.post('/reload-config'),
@@ -1946,7 +1970,7 @@ async function executeRefreshProviderUuidAction({
         throw new Error('providerType and uuid are required');
     }
 
-    if (!confirmFn(translate('modal.provider.refreshUuidConfirm', { oldUuid: uuid }))) {
+    if (!await confirmFn(translate('modal.provider.refreshUuidConfirm', { oldUuid: uuid }))) {
         return { skipped: true };
     }
 
@@ -1999,7 +2023,9 @@ async function refreshProviderHealthStatus(uuid, event) {
     const providerDetail = event.target.closest('.provider-item-detail');
     const providerType = providerDetail.closest('.provider-modal').getAttribute('data-provider-type');
 
-    if (!confirm(t('modal.provider.refreshHealthConfirm', { uuid }))) {
+    if (!await confirmProviderAction(t('modal.provider.refreshHealthConfirm', { uuid }), {
+        icon: 'fas fa-heart-pulse'
+    })) {
         return;
     }
 
@@ -2055,7 +2081,11 @@ async function deleteUnhealthyProviders(providerType) {
     const confirmPayload = selectedErrorType !== 'all'
         ? { type: providerType, count: unhealthyCount, errorType: errorTypeLabel }
         : { type: providerType, count: unhealthyCount };
-    if (!confirm(t(confirmKey, confirmPayload))) {
+    if (!await confirmProviderAction(t(confirmKey, confirmPayload), {
+        confirmText: t('modal.provider.deleteUnhealthyBtn'),
+        variant: 'danger',
+        icon: 'fas fa-trash-can'
+    })) {
         return;
     }
     
@@ -2128,7 +2158,9 @@ async function refreshUnhealthyUuids(providerType) {
         return;
     }
     
-    if (!confirm(t('modal.provider.refreshUnhealthyUuidsConfirm', { type: providerType, count: unhealthyCount }))) {
+    if (!await confirmProviderAction(t('modal.provider.refreshUnhealthyUuidsConfirm', { type: providerType, count: unhealthyCount }), {
+        icon: 'fas fa-arrows-rotate'
+    })) {
         return;
     }
     

@@ -4,13 +4,49 @@
     <script>window.__AICLIENT_FORCE_UI_DEBUG__ = __AICLIENT_UI_DEBUG_FLAG__;</script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#f8fafc">
     <title data-i18n="login.title">登录 - All2One API</title>
     <link rel="icon" type="image/svg+xml" sizes="any" href="/static/favicon.svg?v=orbit-core-svg-primary">
+    <script>
+        (() => {
+            const THEME_KEY = 'theme';
+            const THEME_LIGHT = 'light';
+            const THEME_DARK = 'dark';
+
+            const savedTheme = (() => {
+                try {
+                    const theme = localStorage.getItem(THEME_KEY);
+                    return theme === THEME_LIGHT || theme === THEME_DARK ? theme : null;
+                } catch {
+                    return null;
+                }
+            })();
+
+            const systemTheme = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+                ? THEME_DARK
+                : THEME_LIGHT;
+            const resolvedTheme = savedTheme || systemTheme;
+            const root = document.documentElement;
+
+            if (resolvedTheme === THEME_DARK) {
+                root.setAttribute('data-theme', THEME_DARK);
+            } else {
+                root.removeAttribute('data-theme');
+            }
+
+            root.style.colorScheme = resolvedTheme;
+            window.__AICLIENT_LOGIN_THEME__ = resolvedTheme;
+        })();
+    </script>
     <style>
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
+        }
+
+        html {
+            color-scheme: light;
         }
 
         body {
@@ -20,16 +56,39 @@
             align-items: center;
             justify-content: center;
             padding: 20px;
+            color: var(--text-primary);
+            background:
+                radial-gradient(circle at top, rgba(16, 185, 129, 0.16), transparent 28%),
+                linear-gradient(160deg, var(--bg-secondary) 0%, var(--bg-primary) 100%);
+            transition: background 0.25s ease, color 0.25s ease;
+        }
+
+        [data-theme="dark"] {
+            color-scheme: dark;
+        }
+
+        [data-theme="dark"] body {
+            background:
+                radial-gradient(circle at top, rgba(52, 211, 153, 0.18), transparent 26%),
+                linear-gradient(160deg, #020617 0%, var(--bg-primary) 48%, #111827 100%);
         }
 
         .login-container {
-            background: white;
-            border-radius: 12px;
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+            background: var(--bg-glass-strong);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            box-shadow: 0 18px 48px rgba(15, 23, 42, 0.12);
             width: 100%;
-            max-width: 400px;
+            max-width: 420px;
             padding: 40px;
             animation: fadeIn 0.5s ease-in;
+            backdrop-filter: blur(18px);
+            -webkit-backdrop-filter: blur(18px);
+            transition: background 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+        }
+
+        [data-theme="dark"] .login-container {
+            box-shadow: 0 24px 64px rgba(2, 6, 23, 0.48);
         }
 
         @keyframes fadeIn {
@@ -51,19 +110,20 @@
         .logo img {
             width: 80px;
             height: 80px;
-            border-radius: 50%;
+            border-radius: 22px;
             margin-bottom: 15px;
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
         }
 
         .logo h1 {
             font-size: 24px;
-            color: #333;
+            color: var(--text-primary);
             margin-bottom: 5px;
         }
 
         .logo p {
             font-size: 14px;
-            color: #666;
+            color: var(--text-secondary);
         }
 
         .form-group {
@@ -73,7 +133,7 @@
         .form-group label {
             display: block;
             margin-bottom: 8px;
-            color: #333;
+            color: var(--text-primary);
             font-size: 14px;
             font-weight: 500;
         }
@@ -81,24 +141,31 @@
         .form-group input {
             width: 100%;
             padding: 12px 15px;
-            border: 2px solid #e1e8ed;
+            border: 2px solid var(--border-color);
             border-radius: 8px;
             font-size: 14px;
             transition: all 0.3s ease;
             outline: none;
+            background: var(--bg-primary);
+            color: var(--text-primary);
         }
 
         .form-group input:focus {
-            border-color: #059669;
+            border-color: var(--primary-color);
             box-shadow: 0 0 0 3px rgba(5, 150, 105, 0.1);
         }
 
         .form-group input::placeholder {
-            color: #aaa;
+            color: var(--text-tertiary);
+        }
+
+        .form-group input.error {
+            border-color: var(--danger-color);
+            box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.12);
         }
 
         .error-message {
-            color: #e74c3c;
+            color: var(--danger-color);
             font-size: 13px;
             margin-top: 8px;
             display: none;
@@ -139,7 +206,8 @@
         }
 
         .login-button:disabled {
-            background: #ccc;
+            background: var(--bg-tertiary);
+            color: var(--text-tertiary);
             cursor: not-allowed;
             transform: none;
         }
@@ -148,12 +216,12 @@
             text-align: center;
             margin-top: 30px;
             padding-top: 20px;
-            border-top: 1px solid #e1e8ed;
+            border-top: 1px solid var(--border-color);
         }
 
         .footer p {
             font-size: 13px;
-            color: #999;
+            color: var(--text-tertiary);
         }
 
         .loading {
@@ -224,6 +292,9 @@
         // 初始化多语言
         initI18n();
 
+        const THEME_KEY = 'theme';
+        const THEME_LIGHT = 'light';
+        const THEME_DARK = 'dark';
         const forceUiDebug = window.__AICLIENT_FORCE_UI_DEBUG__ === true;
         const UI_DEBUG_HEADER = 'X-UI-Debug';
         const loginDebug = (message, payload = null, level = 'log') => {
@@ -236,6 +307,7 @@
             consoleMethod.call(console, `[UI Debug] ${message}`);
         };
         const buildLoginDebugHeaders = () => forceUiDebug ? { [UI_DEBUG_HEADER]: '1' } : {};
+        const themeMediaQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
         loginDebug('login page script initialized', {
             path: window.location.pathname,
@@ -246,6 +318,59 @@
         const passwordInput = document.getElementById('password');
         const errorMessage = document.getElementById('errorMessage');
         const loginButton = document.getElementById('loginButton');
+
+        function getSavedTheme() {
+            try {
+                const savedTheme = localStorage.getItem(THEME_KEY);
+                return savedTheme === THEME_LIGHT || savedTheme === THEME_DARK ? savedTheme : null;
+            } catch {
+                return null;
+            }
+        }
+
+        function getSystemTheme() {
+            return themeMediaQuery && themeMediaQuery.matches ? THEME_DARK : THEME_LIGHT;
+        }
+
+        function updateThemeColor(theme) {
+            const metaThemeColor = document.querySelector('meta[name="theme-color"]');
+            if (metaThemeColor) {
+                metaThemeColor.setAttribute('content', theme === THEME_DARK ? '#0f172a' : '#f8fafc');
+            }
+        }
+
+        function applyTheme(theme) {
+            const root = document.documentElement;
+            if (theme === THEME_DARK) {
+                root.setAttribute('data-theme', THEME_DARK);
+            } else {
+                root.removeAttribute('data-theme');
+            }
+
+            root.style.colorScheme = theme;
+            updateThemeColor(theme);
+            loginDebug('login theme applied', { theme });
+        }
+
+        function syncThemePreference() {
+            applyTheme(getSavedTheme() || getSystemTheme());
+        }
+
+        syncThemePreference();
+
+        if (themeMediaQuery && typeof themeMediaQuery.addEventListener === 'function') {
+            themeMediaQuery.addEventListener('change', () => {
+                if (!getSavedTheme()) {
+                    syncThemePreference();
+                }
+            });
+        }
+
+        window.addEventListener('storage', (event) => {
+            if (event.key === THEME_KEY) {
+                syncThemePreference();
+            }
+        });
 
         // 检查是否已经登录
         loginDebug('checkLoginStatus start');

@@ -1,7 +1,7 @@
 // 事件监听器模块
 
 import { elements, autoScroll, setAutoScroll, clearLogs } from './constants.js';
-import { showToast } from './utils.js';
+import { showToast, showConfirmDialog } from './utils.js';
 import { fileUploadHandler } from './file-upload.js';
 import { t } from './i18n.js';
 
@@ -18,7 +18,14 @@ function initEventListeners() {
     if (elements.clearLogsBtn) {
         elements.clearLogsBtn.addEventListener('click', async () => {
             // 显示确认对话框，明确提示会清空本地日志文件
-            const confirmed = confirm(t('logs.clear.confirm.msg'));
+            const confirmed = await showConfirmDialog({
+                title: t('logs.clear.confirm.title'),
+                message: t('logs.clear.confirm.msg'),
+                confirmText: t('common.confirm'),
+                cancelText: t('common.cancel'),
+                variant: 'danger',
+                icon: 'fas fa-trash-can'
+            });
             
             if (!confirmed) {
                 return;
@@ -477,7 +484,15 @@ async function handleRestart() {
  */
 async function handleReloadConfig() {
     // 确认重载操作
-    if (!confirm(t('header.reload.confirm'))) {
+    const confirmed = await showConfirmDialog({
+        title: t('common.confirm'),
+        message: t('header.reload.confirm'),
+        confirmText: t('header.reload'),
+        cancelText: t('common.cancel'),
+        variant: 'warning',
+        icon: 'fas fa-rotate-right'
+    });
+    if (!confirmed) {
         return;
     }
     
@@ -499,7 +514,15 @@ async function handleReloadConfig() {
  */
 async function handleRestartService() {
     // 确认重启操作
-    if (!confirm(t('header.restart.confirm'))) {
+    const confirmed = await showConfirmDialog({
+        title: t('common.warning'),
+        message: t('header.restart.confirm'),
+        confirmText: t('header.restart'),
+        cancelText: t('common.cancel'),
+        variant: 'danger',
+        icon: 'fas fa-power-off'
+    });
+    if (!confirmed) {
         return;
     }
     

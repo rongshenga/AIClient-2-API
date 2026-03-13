@@ -45,6 +45,7 @@
         import { initI18n, t } from './app/i18n.js';
         import { initThemeSwitcher, setTheme, getCurrentTheme } from './app/theme-switcher.js';
         import { initAuth, logout } from './app/auth.js';
+        import { showConfirmDialog } from './app/utils.js';
         
         // 尽早应用保存的主题以避免闪烁（但不绑定按钮事件，因为按钮还不存在）
         setTheme(getCurrentTheme());
@@ -72,9 +73,17 @@
                 // 显示登出按钮（如果配置了密码保护）
                 const logoutBtn = document.getElementById('logoutBtn');
                 if (logoutBtn && localStorage.getItem('authToken')) {
-                    logoutBtn.style.display = 'inline-block';
+                    logoutBtn.style.display = 'inline-flex';
                     logoutBtn.addEventListener('click', async () => {
-                        if (confirm(t('common.confirm') + ' ' + t('header.logout') + '?')) {
+                        const confirmed = await showConfirmDialog({
+                            title: t('common.warning'),
+                            message: t('common.confirm') + ' ' + t('header.logout') + '?',
+                            confirmText: t('header.logout'),
+                            cancelText: t('common.cancel'),
+                            variant: 'danger',
+                            icon: 'fas fa-sign-out-alt'
+                        });
+                        if (confirmed) {
                             await logout();
                         }
                     });

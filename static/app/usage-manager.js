@@ -1,6 +1,6 @@
 // 用量管理模块
 
-import { showToast } from './utils.js';
+import { showToast, showConfirmDialog } from './utils.js';
 import { getAuthHeaders } from './auth.js';
 import { t, getCurrentLanguage } from './i18n.js';
 
@@ -797,7 +797,7 @@ function buildProviderRefreshStartUrl(providerType, options = {}) {
     return `/api/usage/${encodeURIComponent(providerType)}?${searchParams.toString()}`;
 }
 
-function resolveProviderRefreshScope(providerType, providerSummary = {}, options = {}) {
+async function resolveProviderRefreshScope(providerType, providerSummary = {}, options = {}) {
     const providerName = getProviderDisplayName(providerType);
     const currentPage = Math.max(1, Number(options.page || providerSummary.page || 1));
     const totalCount = Math.max(0, Number(providerSummary.totalCount || 0));
@@ -811,11 +811,18 @@ function resolveProviderRefreshScope(providerType, providerSummary = {}, options
     }
 
     const estimatedSeconds = estimateProviderRefreshDurationSeconds(totalCount);
-    const confirmed = window.confirm(t('usage.refreshEstimateConfirm', {
-        provider: providerName,
-        count: totalCount,
-        seconds: estimatedSeconds
-    }));
+    const confirmed = await showConfirmDialog({
+        title: t('common.warning'),
+        message: t('usage.refreshEstimateConfirm', {
+            provider: providerName,
+            count: totalCount,
+            seconds: estimatedSeconds
+        }),
+        confirmText: t('common.confirm'),
+        cancelText: t('common.cancel'),
+        variant: 'warning',
+        icon: 'fas fa-rotate-right'
+    });
     if (!confirmed) {
         return null;
     }
@@ -1285,7 +1292,7 @@ export async function refreshProviderUsage(providerType, options = {}) {
         const shouldRestoreExpandedDetails = Boolean(previousGroup && !previousGroup.classList.contains('collapsed'));
         const providerSummary = previousGroup?.__usageProviderData || getUsageProviderSummary(providerType, {});
         const providerTotalCount = Number(providerSummary.totalCount || 0);
-        const refreshScope = resolveProviderRefreshScope(providerType, providerSummary, options);
+        const refreshScope = await resolveProviderRefreshScope(providerType, providerSummary, options);
         if (!refreshScope) {
             refreshingProviders.delete(providerType);
             return;

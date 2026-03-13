@@ -83,7 +83,7 @@
    ======================================== */
 @media (max-width: 1024px) {
     .header-content {
-        padding: 0.75rem 1.5rem;
+        padding: 0.75rem 1.5rem 0.75rem 0.75rem;
     }
 
     .content {
@@ -120,6 +120,10 @@
         gap: 0.5rem;
         justify-content: space-between;
         align-items: center;
+    }
+
+    .header-sidebar-toggle {
+        display: none;
     }
 
     .header h1 {
@@ -211,60 +215,33 @@
         justify-content: center;
     }
 
-    /* 登出按钮 - 与语言切换按钮样式一致 */
-    .header .header-controls[style*="display: flex"] .logout-btn {
-        padding: 0.5rem 1rem;
+    /* 图标操作按钮 */
+    .header .header-controls[style*="display: flex"] .header-action-btn {
+        width: 40px;
+        height: 40px;
+        padding: 0;
         background: transparent;
         color: var(--text-secondary);
         border: 1px solid var(--border-color);
-        border-radius: 0.375rem;
+        border-radius: 0.75rem;
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        gap: 0.5rem;
-        font-size: 0.875rem;
-        font-weight: 500;
         cursor: pointer;
         transition: var(--transition);
     }
 
-    .header .header-controls[style*="display: flex"] .logout-btn:hover {
+    .header .header-controls[style*="display: flex"] .header-action-btn:hover {
         background: var(--bg-tertiary);
         color: var(--primary-color);
         border-color: var(--primary-color);
         transform: translateY(-1px);
     }
 
-    .header .header-controls[style*="display: flex"] .logout-btn span {
-        display: inline;
-    }
-
-    /* 重启按钮 - 与语言切换按钮样式一致 */
-    .header .header-controls[style*="display: flex"] #restartBtn {
-        padding: 0.5rem 1rem;
-        background: transparent;
-        color: var(--text-secondary);
-        border: 1px solid var(--border-color);
-        border-radius: 0.375rem;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        gap: 0.5rem;
-        font-size: 0.875rem;
-        font-weight: 500;
-        cursor: pointer;
-        transition: var(--transition);
-    }
-
-    .header .header-controls[style*="display: flex"] #restartBtn:hover {
-        background: var(--bg-tertiary);
-        color: var(--primary-color);
-        border-color: var(--primary-color);
-        transform: translateY(-1px);
-    }
-
-    .header .header-controls[style*="display: flex"] #restartBtn .btn-text {
-        display: inline;
+    .header .header-controls[style*="display: flex"] .header-action-btn-danger:hover {
+        background: color-mix(in srgb, var(--danger-color) 10%, var(--bg-tertiary));
+        color: var(--danger-color);
+        border-color: var(--danger-color);
     }
 
     /* 状态徽章 */

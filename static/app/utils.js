@@ -102,7 +102,35 @@ function escapeHtml(text) {
  * @param {string} type - 消息类型 (info, success, error)
  * @param {number} durationMs - 展示时长（毫秒）
  */
-function showToast(title, message, type = 'info', durationMs = 10000) {
+function dismissToast(toast) {
+    if (!toast || toast.dataset.state === 'closing') {
+        return;
+    }
+
+    toast.dataset.state = 'closing';
+    toast.classList.add('toast-closing');
+
+    window.setTimeout(() => {
+        toast.remove();
+    }, 220);
+}
+
+function attachToastLifecycle(toast, durationMs = 5000) {
+    if (!toast) {
+        return;
+    }
+
+    const safeDurationMs = Math.max(500, Number(durationMs) || 5000);
+    const dismiss = () => dismissToast(toast);
+    const timerId = window.setTimeout(dismiss, safeDurationMs);
+
+    toast.addEventListener('click', () => {
+        window.clearTimeout(timerId);
+        dismiss();
+    });
+}
+
+function showToast(title, message, type = 'info', durationMs = 5000) {
     // 兼容旧接口 (message, type)
     if (arguments.length === 2 && (message === 'success' || message === 'error' || message === 'info' || message === 'warning')) {
         type = message;
@@ -121,11 +149,198 @@ function showToast(title, message, type = 'info', durationMs = 10000) {
     const toastContainer = document.getElementById('toastContainer') || document.querySelector('.toast-container');
     if (toastContainer) {
         toastContainer.appendChild(toast);
-
-        setTimeout(() => {
-            toast.remove();
-        }, Math.max(500, Number(durationMs) || 10000));
+        attachToastLifecycle(toast, durationMs);
     }
+}
+
+let activeConfirmDialog = null;
+let confirmDialogCounter = 0;
+const CONFIRM_DIALOG_FOCUSABLE_SELECTOR = [
+    'button:not([disabled])',
+    '[href]',
+    'input:not([disabled])',
+    'select:not([disabled])',
+    'textarea:not([disabled])',
+    '[tabindex]:not([tabindex="-1"])'
+].join(', ');
+
+function isHtmlElement(node) {
+    return typeof HTMLElement !== 'undefined' && node instanceof HTMLElement;
+}
+
+function resolveConfirmDialogTitle(title, variant) {
+    if (title) {
+        return title;
+    }
+
+    return variant === 'danger' || variant === 'warning'
+        ? t('common.warning')
+        : t('common.confirm');
+}
+
+function resolveConfirmDialogIcon(icon, variant) {
+    if (icon) {
+        return icon;
+    }
+
+    if (variant === 'danger') {
+        return 'fas fa-power-off';
+    }
+
+    if (variant === 'warning') {
+        return 'fas fa-triangle-exclamation';
+    }
+
+    return 'fas fa-circle-question';
+}
+
+function getConfirmDialogFocusableElements(container) {
+    if (!container) {
+        return [];
+    }
+
+    return Array.from(container.querySelectorAll(CONFIRM_DIALOG_FOCUSABLE_SELECTOR))
+        .filter((element) => !element.hasAttribute('hidden') && element.getAttribute('aria-hidden') !== 'true');
+}
+
+function focusConfirmDialogElement(element) {
+    if (!isHtmlElement(element)) {
+        return;
+    }
+
+    try {
+        element.focus({ preventScroll: true });
+    } catch {
+        element.focus();
+    }
+}
+
+function showConfirmDialog(options = {}) {
+    const normalizedOptions = typeof options === 'string'
+        ? { message: options }
+        : options;
+    const message = String(normalizedOptions.message || '');
+    const variant = normalizedOptions.variant || 'default';
+    const title = resolveConfirmDialogTitle(normalizedOptions.title, variant);
+    const confirmText = normalizedOptions.confirmText || t('common.confirm');
+    const cancelText = normalizedOptions.cancelText || t('common.cancel');
+    const iconClass = resolveConfirmDialogIcon(normalizedOptions.icon, variant);
+
+    if (typeof document === 'undefined' || !document.body) {
+        if (typeof globalThis.confirm === 'function') {
+            return Promise.resolve(globalThis.confirm(message));
+        }
+        return Promise.resolve(false);
+    }
+
+    if (activeConfirmDialog && typeof activeConfirmDialog.close === 'function') {
+        activeConfirmDialog.close(false);
+    }
+
+    return new Promise((resolve) => {
+        const titleId = `app-confirm-title-${++confirmDialogCounter}`;
+        const messageId = `app-confirm-message-${confirmDialogCounter}`;
+        const previousActiveElement = isHtmlElement(document.activeElement) ? document.activeElement : null;
+        const backdrop = document.createElement('div');
+        backdrop.className = 'app-confirm-backdrop';
+        backdrop.innerHTML = `
+            <div class="app-confirm-dialog" data-variant="${escapeHtml(variant)}" role="dialog" aria-modal="true" aria-labelledby="${titleId}" aria-describedby="${messageId}">
+                <div class="app-confirm-header">
+                    <div class="app-confirm-icon" aria-hidden="true">
+                        <i class="${escapeHtml(iconClass)}"></i>
+                    </div>
+                    <div class="app-confirm-copy">
+                        <h3 id="${titleId}" class="app-confirm-title">${escapeHtml(title)}</h3>
+                        <p id="${messageId}" class="app-confirm-message">${escapeHtml(message).replace(/\n/g, '<br>')}</p>
+                    </div>
+                </div>
+                <div class="app-confirm-actions">
+                    <button type="button" class="app-confirm-btn app-confirm-btn-secondary" data-role="cancel">${escapeHtml(cancelText)}</button>
+                    <button type="button" class="app-confirm-btn ${variant === 'danger' ? 'app-confirm-btn-danger' : 'app-confirm-btn-primary'}" data-role="confirm">${escapeHtml(confirmText)}</button>
+                </div>
+            </div>
+        `;
+
+        const dialog = backdrop.querySelector('.app-confirm-dialog');
+        const cancelButton = backdrop.querySelector('[data-role="cancel"]');
+        const confirmButton = backdrop.querySelector('[data-role="confirm"]');
+        let settled = false;
+
+        const cleanup = () => {
+            document.removeEventListener('keydown', handleKeyDown, true);
+            backdrop.removeEventListener('click', handleBackdropClick);
+            backdrop.remove();
+            document.body.classList.remove('app-confirm-open');
+            activeConfirmDialog = null;
+        };
+
+        const close = (result) => {
+            if (settled) {
+                return;
+            }
+
+            settled = true;
+            cleanup();
+            focusConfirmDialogElement(previousActiveElement);
+            resolve(Boolean(result));
+        };
+
+        const handleBackdropClick = (event) => {
+            if (event.target === backdrop) {
+                close(false);
+            }
+        };
+
+        const handleKeyDown = (event) => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                close(false);
+                return;
+            }
+
+            if (event.key !== 'Tab') {
+                return;
+            }
+
+            const focusableElements = getConfirmDialogFocusableElements(dialog);
+            if (!focusableElements.length) {
+                event.preventDefault();
+                focusConfirmDialogElement(dialog);
+                return;
+            }
+
+            const firstElement = focusableElements[0];
+            const lastElement = focusableElements[focusableElements.length - 1];
+
+            if (!dialog.contains(document.activeElement)) {
+                event.preventDefault();
+                focusConfirmDialogElement(firstElement);
+                return;
+            }
+
+            if (event.shiftKey && document.activeElement === firstElement) {
+                event.preventDefault();
+                focusConfirmDialogElement(lastElement);
+                return;
+            }
+
+            if (!event.shiftKey && document.activeElement === lastElement) {
+                event.preventDefault();
+                focusConfirmDialogElement(firstElement);
+            }
+        };
+
+        cancelButton?.addEventListener('click', () => close(false));
+        confirmButton?.addEventListener('click', () => close(true));
+        backdrop.addEventListener('click', handleBackdropClick);
+        document.addEventListener('keydown', handleKeyDown, true);
+
+        document.body.appendChild(backdrop);
+        document.body.classList.add('app-confirm-open');
+        activeConfirmDialog = { close };
+
+        focusConfirmDialogElement(variant === 'danger' ? cancelButton : confirmButton);
+    });
 }
 
 /**
@@ -441,6 +656,9 @@ async function apiRequest(url, options = {}) {
 export {
     escapeHtml,
     showToast,
+    showConfirmDialog,
+    dismissToast,
+    attachToastLifecycle,
     getFieldLabel,
     getProviderTypeFields,
     getProviderConfigs,

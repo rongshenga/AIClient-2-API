@@ -353,7 +353,7 @@ body {
     max-width: 1600px;
     width: 100%;
     margin: 0 auto;
-    padding: 1.5rem;
+    padding: 1.5rem 1.5rem 1.5rem 0.75rem;
     gap: 1.5rem;
 }
 
@@ -493,7 +493,7 @@ body {
 
 .header, .sidebar, .content, .stat-card, .config-panel, .providers-container, 
 .routing-examples-panel, .system-info-panel, .usage-panel, 
-.logs-container, .toast, .modal-content, .provider-modal-content {
+.logs-container, .toast, .modal-content, .provider-modal-content, .app-confirm-dialog {
     transition: background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
 }
 
@@ -518,10 +518,163 @@ body {
     min-width: 300px;
     animation: slideIn 0.3s ease;
     pointer-events: auto;
+    cursor: pointer;
+    transition: background-color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease, opacity 0.22s ease, transform 0.22s ease;
 }
 
 .toast.success { border-left: 4px solid var(--success-color); }
 .toast.error { border-left: 4px solid var(--danger-color); }
+.toast.toast-closing {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+}
+
+body.app-confirm-open {
+    overflow: hidden;
+}
+
+.app-confirm-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1400;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1.5rem;
+    background: color-mix(in srgb, var(--overlay-bg) 82%, transparent);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    animation: fadeIn 0.18s ease;
+}
+
+.app-confirm-dialog {
+    width: min(100%, 430px);
+    background: var(--bg-glass-strong);
+    border: 1px solid var(--border-color);
+    border-radius: 1.5rem;
+    box-shadow: var(--shadow-xl);
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    animation: slideIn 0.2s ease;
+}
+
+.app-confirm-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.875rem;
+}
+
+.app-confirm-icon {
+    width: 2.75rem;
+    height: 2.75rem;
+    border-radius: 1rem;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid color-mix(in srgb, var(--primary-color) 18%, var(--border-color));
+    background: color-mix(in srgb, var(--primary-color) 10%, var(--bg-secondary));
+    color: var(--primary-color);
+    box-shadow: inset 0 1px 0 var(--white-20);
+}
+
+.app-confirm-dialog[data-variant="warning"] .app-confirm-icon {
+    border-color: color-mix(in srgb, var(--warning-color) 28%, var(--border-color));
+    background: color-mix(in srgb, var(--warning-color) 12%, var(--bg-secondary));
+    color: var(--warning-color);
+}
+
+.app-confirm-dialog[data-variant="danger"] .app-confirm-icon {
+    border-color: color-mix(in srgb, var(--danger-color) 30%, var(--border-color));
+    background: color-mix(in srgb, var(--danger-color) 12%, var(--bg-secondary));
+    color: var(--danger-color);
+}
+
+.app-confirm-copy {
+    min-width: 0;
+}
+
+.app-confirm-title {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -0.02em;
+}
+
+.app-confirm-message {
+    margin-top: 0.35rem;
+    font-size: 0.92rem;
+    line-height: 1.65;
+    color: var(--text-secondary);
+}
+
+.app-confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+}
+
+.app-confirm-btn {
+    min-width: 104px;
+    padding: 0.7rem 1rem;
+    border-radius: 0.95rem;
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: var(--transition);
+}
+
+.app-confirm-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+}
+
+.app-confirm-btn:active {
+    transform: scale(0.98);
+}
+
+.app-confirm-btn:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 4px var(--primary-10);
+}
+
+.app-confirm-btn-secondary:hover {
+    border-color: var(--border-hover);
+    background: var(--bg-secondary);
+}
+
+.app-confirm-btn-primary {
+    border-color: transparent;
+    background: var(--primary-color);
+    color: var(--white);
+}
+
+.app-confirm-btn-primary:hover {
+    background: var(--primary-hover);
+}
+
+.app-confirm-btn-primary:focus-visible {
+    box-shadow: 0 0 0 4px var(--primary-10);
+}
+
+.app-confirm-btn-danger {
+    border-color: transparent;
+    background: color-mix(in srgb, var(--danger-color) 92%, #111827);
+    color: var(--white);
+}
+
+.app-confirm-btn-danger:hover {
+    background: var(--danger-color);
+}
+
+.app-confirm-btn-danger:focus-visible {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger-color) 18%, transparent);
+}
 
 /* 复选框和单选框通用样式 */
 .checkbox-item, .radio-label {
@@ -610,5 +763,22 @@ body {
 
     .form-row {
         grid-template-columns: 1fr;
+    }
+
+    .app-confirm-backdrop {
+        padding: 1rem;
+    }
+
+    .app-confirm-dialog {
+        border-radius: 1.25rem;
+        padding: 1rem;
+    }
+
+    .app-confirm-actions {
+        flex-direction: column-reverse;
+    }
+
+    .app-confirm-btn {
+        width: 100%;
     }
 }

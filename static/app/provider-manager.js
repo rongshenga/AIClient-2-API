@@ -1,7 +1,7 @@
 // 提供商管理功能模块
 
 import { providerStats, updateProviderStats } from './constants.js';
-import { showToast, getProviderConfigs } from './utils.js';
+import { showToast, getProviderConfigs, showConfirmDialog } from './utils.js';
 import { fileUploadHandler } from './file-upload.js';
 import { t, getCurrentLanguage } from './i18n.js';
 import { renderRoutingExamples } from './routing-examples.js';
@@ -313,7 +313,14 @@ export async function executeRuntimeStorageRollbackAction({
     runId = '',
     setLoading = () => {},
     promptRunIdFn = (defaultRunId = '') => window.prompt('请输入要回滚的迁移 runId', defaultRunId),
-    confirmFn = (message) => window.confirm(message),
+    confirmFn = (message) => showConfirmDialog({
+        title: t('common.warning'),
+        message,
+        confirmText: t('common.confirm'),
+        cancelText: t('common.cancel'),
+        variant: 'danger',
+        icon: 'fas fa-clock-rotate-left'
+    }),
     notify = showToast,
     refreshProvidersFn = loadProviders,
     refreshSystemInfoFn = loadSystemInfo
@@ -326,7 +333,7 @@ export async function executeRuntimeStorageRollbackAction({
         return { skipped: true };
     }
 
-    if (!confirmFn(`确定使用运行记录 ${promptedRunId} 执行运行时存储回滚吗？`)) {
+    if (!await confirmFn(`确定使用运行记录 ${promptedRunId} 执行运行时存储回滚吗？`)) {
         return {
             skipped: true,
             runId: promptedRunId
@@ -599,8 +606,9 @@ function updateRestartButton(mode) {
     
     if (mode === 'standalone') {
         // 独立模式：显示"重载"按钮
+        restartBtn.classList.remove('header-action-btn-danger');
         if (restartBtnIcon) {
-            restartBtnIcon.className = 'fas fa-sync-alt';
+            restartBtnIcon.className = 'fas fa-rotate-right';
         }
         if (restartBtnText) {
             restartBtnText.textContent = t('header.reload');
@@ -608,11 +616,13 @@ function updateRestartButton(mode) {
         }
         restartBtn.setAttribute('aria-label', t('header.reload'));
         restartBtn.setAttribute('data-i18n-aria-label', 'header.reload');
+        restartBtn.setAttribute('data-i18n-title', 'header.reload');
         restartBtn.title = t('header.reload');
     } else {
         // 子进程模式：显示"重启"按钮
+        restartBtn.classList.add('header-action-btn-danger');
         if (restartBtnIcon) {
-            restartBtnIcon.className = 'fas fa-redo';
+            restartBtnIcon.className = 'fas fa-power-off';
         }
         if (restartBtnText) {
             restartBtnText.textContent = t('header.restart');
@@ -620,6 +630,7 @@ function updateRestartButton(mode) {
         }
         restartBtn.setAttribute('aria-label', t('header.restart'));
         restartBtn.setAttribute('data-i18n-aria-label', 'header.restart');
+        restartBtn.setAttribute('data-i18n-title', 'header.restart');
         restartBtn.title = t('header.restart');
     }
 }
