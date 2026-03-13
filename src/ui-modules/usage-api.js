@@ -532,6 +532,30 @@ function paginateProviderUsageResult(result = {}, pageQuery = null) {
     };
 }
 
+function normalizeCachedProviderUsageResult(providerType, providers = [], usageResults = {}, pageQuery = null) {
+    const providerList = Array.isArray(providers) ? providers : [];
+    const providerByUuid = new Map(
+        providerList
+            .filter((provider) => provider?.uuid)
+            .map((provider) => [provider.uuid, provider])
+    );
+    const instances = Array.isArray(usageResults?.instances) ? usageResults.instances : [];
+    const resolvedPage = Math.max(1, Number(usageResults?.page || pageQuery?.page || 1));
+    const resolvedLimit = Math.max(1, Number(usageResults?.limit || pageQuery?.limit || instances.length || 1));
+    const pageOffset = Math.max(0, (resolvedPage - 1) * resolvedLimit);
+
+    return {
+        ...usageResults,
+        instances: instances.map((instance, index) => {
+            const matchedProvider = instance?.uuid
+                ? providerByUuid.get(instance.uuid)
+                : null;
+            const fallbackProvider = providerList[pageOffset + index] || providerList[index] || null;
+            return normalizeCachedInstanceResult(providerType, matchedProvider || fallbackProvider, instance);
+        })
+    };
+}
+
 function shouldBootstrapProviderUsageAsync(providerType, currentConfig, providerPoolManager) {
     const providers = getProvidersForType(providerType, currentConfig, providerPoolManager);
     return providers.length > resolveUsageSyncQueryMaxProviderCount(currentConfig);
@@ -923,9 +947,20 @@ function normalizeCachedInstanceResult(providerType, provider, cachedInstance) {
         return null;
     }
 
+    const displaySource = {
+        ...(provider && typeof provider === 'object' ? provider : {}),
+        ...(cachedInstance && typeof cachedInstance === 'object' ? cachedInstance : {})
+    };
+    const displayContext = getProviderDisplayContext(displaySource);
+
     return {
         uuid: cachedInstance.uuid || provider?.uuid || 'unknown',
-        name: cachedInstance.name || getProviderDisplayName(provider, providerType),
+        name: getProviderDisplayName(displaySource),
+        customName: cachedInstance.customName || displayContext.customName || null,
+        email: cachedInstance.email || displayContext.email || null,
+        accountId: cachedInstance.accountId || displayContext.accountId || null,
+        fileName: cachedInstance.fileName || displayContext.fileName || null,
+        credentialFilePath: cachedInstance.credentialFilePath || displayContext.filePath || null,
         isHealthy: provider?.isHealthy !== false,
         isDisabled: provider?.isDisabled === true,
         success: cachedInstance.success === true,
@@ -1172,9 +1207,15 @@ async function getAllProvidersUsage(currentConfig, providerPoolManager, options 
  * @returns {Promise<Object>} 单实例查询结果
  */
 async function queryUsageForProviderInstance(providerType, provider, options = {}) {
+    const displayContext = getProviderDisplayContext(provider);
     const instanceResult = {
         uuid: provider?.uuid || 'unknown',
-        name: getProviderDisplayName(provider, providerType),
+        name: getProviderDisplayName(provider),
+        customName: displayContext.customName || null,
+        email: displayContext.email || null,
+        accountId: displayContext.accountId || null,
+        fileName: displayContext.fileName || null,
+        credentialFilePath: displayContext.filePath || null,
         isHealthy: provider?.isHealthy !== false,
         isDisabled: provider?.isDisabled === true,
         success: false,
@@ -1414,6 +1455,7 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
 
         await mapWithConcurrency(groupCandidates, queryConcurrency, async (candidate, candidateIndex) => {
             const instanceTimeoutMs = resolveProviderUsageInstanceTimeout(currentConfig);
+            const displayContext = getProviderDisplayContext(candidate.provider);
             const instanceResult = await withTimeout(
                 ({ signal, timeoutMs }) => queryUsageForProviderInstance(providerType, candidate.provider, {
                     signal,
@@ -1428,7 +1470,12 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
                 }
             ).catch((error) => ({
                 uuid: candidate.provider?.uuid || 'unknown',
-                name: getProviderDisplayName(candidate.provider, providerType),
+                name: getProviderDisplayName(candidate.provider),
+                customName: displayContext.customName || null,
+                email: displayContext.email || null,
+                accountId: displayContext.accountId || null,
+                fileName: displayContext.fileName || null,
+                credentialFilePath: displayContext.filePath || null,
                 isHealthy: candidate.provider?.isHealthy !== false,
                 isDisabled: candidate.provider?.isDisabled === true,
                 success: false,
@@ -1550,41 +1597,141 @@ async function getAdapterUsage(adapter, providerType, options = {}) {
 /**
  * 获取提供商显示名称
  * @param {Object} provider - 提供商配置
- * @param {string} providerType - 提供商类型
  * @returns {string} 显示名称
  */
-function getProviderDisplayName(provider, providerType) {
+function normalizeProviderDisplayText(value) {
+    if (value === null || value === undefined) {
+        return '';
+    }
+
+    return String(value).trim();
+}
+
+function pickProviderDisplayText(...values) {
+    for (const value of values) {
+        const normalized = normalizeProviderDisplayText(value);
+        if (normalized) {
+            return normalized;
+        }
+    }
+
+    return '';
+}
+
+function getProviderCredentialPath(provider = {}) {
+    if (!provider || typeof provider !== 'object') {
+        return '';
+    }
+
+    const explicitPath = pickProviderDisplayText(
+        provider.credentialFilePath,
+        provider.credentialPath,
+        provider.filePath,
+        provider.sourcePath,
+        provider.path
+    );
+    if (explicitPath) {
+        return explicitPath;
+    }
+
+    const credentialEntry = Object.entries(provider).find(([key, value]) => {
+        if (typeof value !== 'string' || !value.trim()) {
+            return false;
+        }
+
+        return key.endsWith('_FILE_PATH')
+            || key.endsWith('_CREDS_FILE_PATH')
+            || key.endsWith('_TOKEN_FILE_PATH');
+    });
+
+    return credentialEntry?.[1] || '';
+}
+
+function getProviderCredentialFileName(provider = {}) {
+    const explicitFileName = pickProviderDisplayText(
+        provider.fileName,
+        provider.credentialFileName
+    );
+    if (explicitFileName) {
+        return explicitFileName;
+    }
+
+    const credentialPath = getProviderCredentialPath(provider);
+    if (!credentialPath) {
+        return '';
+    }
+
+    return path.basename(credentialPath);
+}
+
+function getProviderIdentityText(provider = {}) {
+    const source = provider && typeof provider === 'object' ? provider : {};
+    const email = pickProviderDisplayText(
+        source.email,
+        source.userEmail,
+        source.providerEmail,
+        source.CODEX_EMAIL
+    );
+    const accountId = pickProviderDisplayText(
+        source.accountId,
+        source.account_id,
+        source.ACCOUNT_ID,
+        source.providerAccountId,
+        source.chatgptAccountId,
+        source.chatgpt_account_id
+    );
+
+    if (email && accountId) {
+        return `${email} (${accountId})`;
+    }
+
+    return email || accountId;
+}
+
+function getProviderDisplayContext(provider) {
+    const source = provider && typeof provider === 'object' ? provider : {};
+    const identityText = getProviderIdentityText(source);
+    const customName = pickProviderDisplayText(source.customName, source.providerCustomName);
+    const fileName = getProviderCredentialFileName(source);
+    const filePath = getProviderCredentialPath(source);
+    const email = pickProviderDisplayText(
+        source.email,
+        source.userEmail,
+        source.providerEmail,
+        source.CODEX_EMAIL
+    );
+    const accountId = pickProviderDisplayText(
+        source.accountId,
+        source.account_id,
+        source.ACCOUNT_ID,
+        source.providerAccountId,
+        source.chatgptAccountId,
+        source.chatgpt_account_id
+    );
+    const uuid = pickProviderDisplayText(source.uuid, source.providerUuid);
+
+    return {
+        identityText,
+        customName,
+        fileName,
+        filePath,
+        email: email || null,
+        accountId: accountId || null,
+        uuid: uuid || null
+    };
+}
+
+function getProviderDisplayName(provider) {
     if (!provider || typeof provider !== 'object') {
         return 'Unnamed';
     }
 
-    // 优先使用自定义名称
-    if (provider.customName) {
-        return provider.customName;
-    }
-
-    if (provider.uuid) {
-        return provider.uuid;
-    }
-
-    // 尝试从凭据文件路径提取名称
-    const credPathKey = {
-        'claude-kiro-oauth': 'KIRO_OAUTH_CREDS_FILE_PATH',
-        'gemini-cli-oauth': 'GEMINI_OAUTH_CREDS_FILE_PATH',
-        'gemini-antigravity': 'ANTIGRAVITY_OAUTH_CREDS_FILE_PATH',
-        'openai-codex-oauth': 'CODEX_OAUTH_CREDS_FILE_PATH',
-        'openai-qwen-oauth': 'QWEN_OAUTH_CREDS_FILE_PATH',
-        'openai-iflow': 'IFLOW_TOKEN_FILE_PATH'
-    }[providerType];
-
-    if (credPathKey && provider[credPathKey]) {
-        const filePath = provider[credPathKey];
-        const fileName = path.basename(filePath);
-        const dirName = path.basename(path.dirname(filePath));
-        return `${dirName}/${fileName}`;
-    }
-
-    return 'Unnamed';
+    const displayContext = getProviderDisplayContext(provider);
+    return displayContext.identityText
+        || displayContext.customName
+        || displayContext.fileName
+        || displayContext.uuid
+        || 'Unnamed';
 }
 
 /**
@@ -2117,7 +2264,15 @@ export async function handleGetProviderUsage(req, res, currentConfig, providerPo
                 logger.debug(`[Usage API] Returning cached usage data for ${providerType}`);
                 cachePaginationApplied = cachedData.__pageApplied === true;
                 const { __pageApplied, ...normalizedCachedData } = cachedData;
-                usageResults = { ...normalizedCachedData, fromCache: true };
+                usageResults = {
+                    ...normalizeCachedProviderUsageResult(
+                        providerType,
+                        getProvidersForType(providerType, currentConfig, providerPoolManager),
+                        normalizedCachedData,
+                        pageQuery
+                    ),
+                    fromCache: true
+                };
             } else if (shouldBootstrapProviderUsageAsync(providerType, currentConfig, providerPoolManager)) {
                 // TODO: 重新设计用量批量刷新逻辑后，再恢复调用方入口。
                 logUsageRequestDebug(debugEnabled, `GET /api/usage/${providerType} cache miss async bootstrap entry disabled`, {

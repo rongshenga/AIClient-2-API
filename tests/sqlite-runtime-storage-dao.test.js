@@ -134,6 +134,8 @@ describe('SqliteRuntimeStorage DAO SQL', () => {
         const sql = mockClient.exec.mock.calls[0][0];
         expect(sql).toContain('BEGIN IMMEDIATE;');
         expect(sql).toContain('INSERT INTO provider_runtime_state');
+        expect(sql).toContain('WHERE EXISTS');
+        expect(sql).toContain('FROM provider_registrations');
         expect(sql).toContain("can''t refresh");
         expect(sql).not.toContain('987654');
         expect(sql.trim().endsWith('COMMIT;')).toBe(true);
@@ -155,6 +157,24 @@ describe('SqliteRuntimeStorage DAO SQL', () => {
 
         const sql = mockClient.exec.mock.calls[0][0];
         expect(sql).toContain('987654');
+    });
+
+    test('should skip stale runtime flush rows when provider registration no longer exists', async () => {
+        const record = {
+            providerId: 'prov_deleted_1',
+            providerType: 'grok-custom',
+            runtimeState: {
+                usageCount: 1
+            }
+        };
+
+        await expect(storage.flushProviderRuntimeState([record], {
+            persistSelectionState: false
+        })).resolves.toEqual({ flushedCount: 1 });
+
+        const sql = mockClient.exec.mock.calls[0][0];
+        expect(sql).toContain("WHERE provider_id = 'prov_deleted_1'");
+        expect(sql).toContain('WHERE EXISTS');
     });
 
     test('should batch provider routing uuid updates into one transactional exec call', async () => {

@@ -88,6 +88,7 @@ export class ProviderPoolManager {
         this.flushInFlight = null;
         this.lastFlushSummary = null;
         this.runtimeMutationEpoch = 0; // 快照替换后作废旧 flush/retry，避免回灌过期 provider_id
+        this.invalidatedRuntimeProviderIds = new Set(); // 记录已删除 provider，避免重试或后续 flush 回灌
         
         // Fallback 链配置
         this.fallbackChain = options.globalConfig?.providerFallbackChain || {};
@@ -269,6 +270,40 @@ export class ProviderPoolManager {
         return this.pendingSaves.size + this.pendingRoutingUuidUpdates.size;
     }
 
+    _normalizeRuntimeMutationProviderIds(entries = []) {
+        const providerIds = new Set();
+        const normalizedEntries = Array.isArray(entries) ? entries : [entries];
+
+        for (const entry of normalizedEntries) {
+            if (!entry || typeof entry !== 'object') {
+                continue;
+            }
+
+            const providerId = typeof entry.providerId === 'string' ? entry.providerId.trim() : '';
+            if (providerId) {
+                providerIds.add(providerId);
+                continue;
+            }
+
+            const providerType = typeof entry.providerType === 'string' ? entry.providerType.trim() : '';
+            const routingUuid = typeof entry.routingUuid === 'string'
+                ? entry.routingUuid.trim()
+                : (typeof entry.uuid === 'string' ? entry.uuid.trim() : '');
+            if (!providerType || !routingUuid) {
+                continue;
+            }
+
+            const provider = this._findProvider(providerType, routingUuid);
+            if (!provider?.config) {
+                continue;
+            }
+
+            providerIds.add(provider.providerId || this._resolveProviderId(providerType, provider.config));
+        }
+
+        return providerIds;
+    }
+
     getHotStatePolicy() {
         const durableRuntimeFields = [
             'isHealthy',
@@ -300,6 +335,7 @@ export class ProviderPoolManager {
             'globalRefreshWaiters',
             'pendingSaves',
             'pendingRoutingUuidUpdates',
+            'invalidatedRuntimeProviderIds',
             'saveTimer',
             'providerIndexByType',
             'providerIndexGlobal',
@@ -406,6 +442,56 @@ export class ProviderPoolManager {
             droppedSaveCount,
             droppedRoutingCount,
             epoch: this.runtimeMutationEpoch
+        };
+    }
+
+    discardPendingRuntimeMutationsForProviders(entries = [], reason = 'manual') {
+        const providerIds = this._normalizeRuntimeMutationProviderIds(entries);
+        if (providerIds.size === 0) {
+            return {
+                droppedSaveCount: 0,
+                droppedRoutingCount: 0,
+                providerCount: 0
+            };
+        }
+
+        let droppedSaveCount = 0;
+        let droppedRoutingCount = 0;
+
+        for (const providerId of providerIds) {
+            this.invalidatedRuntimeProviderIds.add(providerId);
+        }
+
+        for (const [saveKey, entry] of this.pendingSaves.entries()) {
+            if (!providerIds.has(entry.providerId)) {
+                continue;
+            }
+            this.pendingSaves.delete(saveKey);
+            droppedSaveCount += 1;
+        }
+
+        for (const providerId of providerIds) {
+            if (this.pendingRoutingUuidUpdates.delete(providerId)) {
+                droppedRoutingCount += 1;
+            }
+        }
+
+        if (this.pendingSaves.size === 0 && this.pendingRoutingUuidUpdates.size === 0 && this.saveTimer) {
+            clearTimeout(this.saveTimer);
+            this.saveTimer = null;
+        }
+
+        if (droppedSaveCount > 0 || droppedRoutingCount > 0) {
+            this._log(
+                'debug',
+                `Discarded pending runtime mutations for deleted providers: providers=${providerIds.size}, saves=${droppedSaveCount}, routing=${droppedRoutingCount}, reason=${reason}`
+            );
+        }
+
+        return {
+            droppedSaveCount,
+            droppedRoutingCount,
+            providerCount: providerIds.size
         };
     }
 
@@ -1415,6 +1501,7 @@ export class ProviderPoolManager {
         const providerId = provider.providerId || this._resolveProviderId(providerType, provider.config);
         const saveKey = `${providerType}::${providerId}`;
 
+        this.invalidatedRuntimeProviderIds.delete(providerId);
         this.pendingSaves.set(saveKey, {
             providerType,
             uuid: provider.config.uuid,
@@ -1432,6 +1519,7 @@ export class ProviderPoolManager {
         }
 
         const providerId = provider.providerId || this._resolveProviderId(providerType, provider.config);
+        this.invalidatedRuntimeProviderIds.delete(providerId);
         this.pendingRoutingUuidUpdates.set(providerId, {
             providerId,
             providerType,
@@ -1645,6 +1733,7 @@ export class ProviderPoolManager {
 
             this.providerPools[providerType].forEach((providerConfig) => {
                 const providerId = this._resolveProviderId(providerType, providerConfig);
+                this.invalidatedRuntimeProviderIds.delete(providerId);
                 // 尝试从旧状态中恢复活跃请求计数和队列，避免重载配置时重置并发限制
                 const existing = oldStatusByProviderId.get(providerId) || oldStatusMap.get(providerConfig.uuid);
 
@@ -3020,12 +3109,24 @@ export class ProviderPoolManager {
                     throw new Error('RuntimeStorage flush interface is unavailable');
                 }
 
-                for (const routingUpdate of pendingRoutingUpdates) {
+                const activeRoutingUpdates = pendingRoutingUpdates.filter((routingUpdate) => {
+                    if (!this.invalidatedRuntimeProviderIds.has(routingUpdate.providerId)) {
+                        return true;
+                    }
+                    this._log('debug', `Skip routing uuid flush for invalidated provider: ${routingUpdate.providerType}/${routingUpdate.providerId}`);
+                    return false;
+                });
+
+                for (const routingUpdate of activeRoutingUpdates) {
                     await this.runtimeStorage.updateProviderRoutingUuid(routingUpdate);
                 }
 
                 const runtimeRecords = pendingSaveEntries
                     .map((entry) => {
+                        if (this.invalidatedRuntimeProviderIds.has(entry.providerId)) {
+                            this._log('debug', `Skip runtime flush for invalidated provider: ${entry.providerType}/${entry.providerId}`);
+                            return null;
+                        }
                         const providers = this.providerStatus[entry.providerType] || [];
                         const provider = this._findProvider(entry.providerType, entry.uuid)
                             || providers.find((item) => item.providerId === entry.providerId);
@@ -3068,7 +3169,7 @@ export class ProviderPoolManager {
                     occurredAt: new Date().toISOString(),
                     flushReason,
                     providerCount: runtimeRecords.length,
-                    routingUpdateCount: pendingRoutingUpdates.length,
+                    routingUpdateCount: activeRoutingUpdates.length,
                     batchCount: totalBatches,
                     pendingMutationCount: pendingSaveEntries.length + pendingRoutingUpdates.length,
                     thresholdReached: options.thresholdReached === true
@@ -3077,7 +3178,7 @@ export class ProviderPoolManager {
 
                 return {
                     flushedCount: runtimeRecords.length,
-                    routingUpdateCount: pendingRoutingUpdates.length,
+                    routingUpdateCount: activeRoutingUpdates.length,
                     batchCount: totalBatches,
                     flushReason
                 };
@@ -3085,9 +3186,15 @@ export class ProviderPoolManager {
                 if (this.runtimeMutationEpoch === flushEpoch) {
                     nextRetryDelayMs = this.runtimeFlushRetryDelayMs;
                     for (const entry of pendingSaveEntries) {
+                        if (this.invalidatedRuntimeProviderIds.has(entry.providerId)) {
+                            continue;
+                        }
                         this.pendingSaves.set(`${entry.providerType}::${entry.providerId}`, entry);
                     }
                     for (const routingUpdate of pendingRoutingUpdates) {
+                        if (this.invalidatedRuntimeProviderIds.has(routingUpdate.providerId)) {
+                            continue;
+                        }
                         this.pendingRoutingUuidUpdates.set(routingUpdate.providerId, routingUpdate);
                     }
                 } else {

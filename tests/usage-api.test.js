@@ -675,6 +675,71 @@ describe('Usage API Refresh Cache Strategy', () => {
         ]);
     });
 
+    test('should normalize cached provider instances with current identity display metadata', async () => {
+        const providerType = 'openai-codex-oauth';
+        const providers = [{
+            uuid: 'codex-cache-1',
+            customName: 'Cached Custom Node',
+            email: 'cache@example.com',
+            accountId: 'acct-cache',
+            CODEX_OAUTH_CREDS_FILE_PATH: 'configs/codex/cache.json'
+        }];
+
+        mockReadProviderUsageCache.mockResolvedValue({
+            providerType,
+            totalCount: 1,
+            successCount: 1,
+            errorCount: 0,
+            processedCount: 1,
+            timestamp: '2026-03-06T10:00:00.000Z',
+            page: 1,
+            limit: 30,
+            availableCount: 1,
+            __pageApplied: true,
+            instances: [
+                {
+                    uuid: 'codex-cache-1',
+                    name: 'stale-cached-name',
+                    success: true,
+                    usage: { usageBreakdown: [] }
+                }
+            ]
+        });
+
+        const req = {
+            url: `/api/usage/${encodeURIComponent(providerType)}?page=1&limit=30`,
+            headers: {
+                host: 'localhost:3000'
+            }
+        };
+        const res = createMockRes();
+        const currentConfig = {
+            providerPools: {
+                [providerType]: providers
+            }
+        };
+        const providerPoolManager = {
+            providerPools: {
+                [providerType]: providers
+            }
+        };
+
+        const handled = await handleGetProviderUsage(req, res, currentConfig, providerPoolManager, providerType);
+        expect(handled).toBe(true);
+        expect(res.statusCode).toBe(200);
+
+        const payload = JSON.parse(res.body);
+        expect(payload.fromCache).toBe(true);
+        expect(payload.instances[0]).toMatchObject({
+            uuid: 'codex-cache-1',
+            name: 'cache@example.com (acct-cache)',
+            customName: 'Cached Custom Node',
+            email: 'cache@example.com',
+            accountId: 'acct-cache',
+            fileName: 'cache.json'
+        });
+    });
+
     test('should reject large uncached provider detail async bootstrap', async () => {
         const providerType = 'openai-codex-oauth';
         const providers = buildProviderPool('codex', 600);
@@ -763,5 +828,56 @@ describe('Usage API Refresh Cache Strategy', () => {
         expect(payload.totalCount).toBe(5);
         expect(payload.successCount).toBe(5);
         expect(maxConcurrentRequests).toBeLessThanOrEqual(2);
+    });
+
+    test('should prefer identity over custom name and file name in provider usage instance display', async () => {
+        const providerType = 'openai-codex-oauth';
+        const providers = [{
+            uuid: 'codex-identity-1',
+            customName: 'Custom Codex Node',
+            email: 'identity@example.com',
+            accountId: 'acct-identity',
+            CODEX_OAUTH_CREDS_FILE_PATH: 'configs/codex/fallback.json'
+        }];
+
+        mockReadUsageCache.mockResolvedValue(null);
+        mockReadProviderUsageCache.mockResolvedValue(null);
+        mockUpdateProviderUsageCache.mockResolvedValue(undefined);
+        providerUsageHandlers.set(providerType, async () => ({
+            usageBreakdown: []
+        }));
+
+        const req = {
+            url: `/api/usage/${encodeURIComponent(providerType)}?refresh=true`,
+            headers: {
+                host: 'localhost:3000'
+            }
+        };
+        const res = createMockRes();
+        const currentConfig = {
+            providerPools: {
+                [providerType]: providers
+            }
+        };
+        const providerPoolManager = {
+            providerPools: {
+                [providerType]: providers
+            }
+        };
+
+        const handled = await handleGetProviderUsage(req, res, currentConfig, providerPoolManager, providerType);
+        expect(handled).toBe(true);
+        expect(res.statusCode).toBe(200);
+
+        const payload = JSON.parse(res.body);
+        expect(payload.instances).toHaveLength(1);
+        expect(payload.instances[0]).toMatchObject({
+            uuid: 'codex-identity-1',
+            name: 'identity@example.com (acct-identity)',
+            customName: 'Custom Codex Node',
+            email: 'identity@example.com',
+            accountId: 'acct-identity',
+            fileName: 'fallback.json'
+        });
     });
 });

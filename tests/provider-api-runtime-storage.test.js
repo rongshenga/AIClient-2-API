@@ -234,6 +234,89 @@ describe('Provider API runtime storage compatibility', () => {
         expect(replaceSpy).not.toHaveBeenCalled();
     });
 
+    test('should discard deleted provider runtime mutations before a later manager flush', async () => {
+        const { currentConfig } = await createDbConfig({
+            'grok-custom': [
+                {
+                    uuid: 'grok-delete-me',
+                    customName: 'Delete Me',
+                    GROK_COOKIE_TOKEN: 'delete-token',
+                    isHealthy: false,
+                    errorCount: 2
+                }
+            ]
+        });
+        const runtimeStorage = getRuntimeStorage();
+        const managedState = runtimeStorage.__getManagedState();
+        const flushSpy = jest.spyOn(managedState.activeStorage, 'flushProviderRuntimeState');
+        const providerPoolManager = new ProviderPoolManager(currentConfig.providerPools, {
+            globalConfig: currentConfig,
+            runtimeStorage,
+            saveDebounceTime: 60000
+        });
+
+        providerPoolManager._queueProviderRuntimeSave('grok-custom', 'grok-delete-me');
+        expect(providerPoolManager.pendingSaves.size).toBe(1);
+
+        const deleteRes = createMockRes();
+        await handleDeleteProvider({}, deleteRes, currentConfig, providerPoolManager, 'grok-custom', 'grok-delete-me');
+
+        expect(deleteRes.statusCode).toBe(200);
+        expect(providerPoolManager.pendingSaves.size).toBe(0);
+
+        await expect(providerPoolManager.flushRuntimeState({
+            reason: 'post_delete_cleanup'
+        })).resolves.toMatchObject({
+            flushedCount: 0,
+            routingUpdateCount: 0,
+            batchCount: 0,
+            flushReason: 'post_delete_cleanup'
+        });
+
+        expect(flushSpy).not.toHaveBeenCalled();
+        const snapshot = await readRuntimeSnapshot();
+        expect(snapshot['grok-custom']).toBeUndefined();
+    });
+
+    test('should treat stale runtime flush records for deleted providers as a no-op', async () => {
+        const { currentConfig } = await createDbConfig({
+            'grok-custom': [
+                {
+                    uuid: 'grok-stale',
+                    customName: 'Stale Grok',
+                    GROK_COOKIE_TOKEN: 'stale-token',
+                    isHealthy: true
+                }
+            ]
+        });
+        const runtimeStorage = getRuntimeStorage();
+        const providerId = currentConfig.providerPools['grok-custom'][0].__providerId;
+
+        await runtimeStorage.deleteProviderPoolEntries([
+            {
+                providerId
+            }
+        ]);
+
+        await expect(runtimeStorage.flushProviderRuntimeState([
+            {
+                providerId,
+                providerType: 'grok-custom',
+                runtimeState: {
+                    usageCount: 7,
+                    errorCount: 1
+                }
+            }
+        ], {
+            persistSelectionState: false
+        })).resolves.toEqual({
+            flushedCount: 1
+        });
+
+        const snapshot = await readRuntimeSnapshot();
+        expect(snapshot['grok-custom']).toBeUndefined();
+    });
+
     test('should persist unhealthy mutations and reset health through runtime storage in db mode', async () => {
         const { currentConfig } = await createDbConfig({
             'grok-custom': [

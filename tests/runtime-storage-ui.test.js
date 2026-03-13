@@ -10,6 +10,41 @@ const mockGetProviderTypeFields = jest.fn(() => []);
 const mockGetFieldLabel = jest.fn((key) => key);
 const providerStats = { providerTypeStats: {} };
 
+function normalizeDisplayText(value) {
+    if (value === null || value === undefined) {
+        return '';
+    }
+    return String(value).trim();
+}
+
+function mockGetProviderDisplayMeta(provider = {}) {
+    const identityText = [provider.email, provider.userEmail, provider.CODEX_EMAIL]
+        .map(normalizeDisplayText)
+        .find(Boolean);
+    const accountId = [provider.accountId, provider.account_id, provider.ACCOUNT_ID]
+        .map(normalizeDisplayText)
+        .find(Boolean);
+    const resolvedIdentity = identityText && accountId
+        ? `${identityText} (${accountId})`
+        : (identityText || accountId || '');
+    const customName = normalizeDisplayText(provider.customName || provider.providerCustomName);
+    const fileName = normalizeDisplayText(provider.fileName || provider.credentialFileName || provider.CODEX_OAUTH_CREDS_FILE_PATH?.split(/[\\/]/).filter(Boolean).pop());
+    const precomputedName = normalizeDisplayText(provider.displayName || provider.name);
+    const uuid = normalizeDisplayText(provider.uuid || provider.providerUuid);
+    const primaryName = resolvedIdentity || customName || fileName || precomputedName || uuid || '-';
+    const tooltipLines = [
+        resolvedIdentity ? `Identity: ${resolvedIdentity}` : '',
+        customName ? `Custom: ${customName}` : '',
+        fileName ? `File: ${fileName}` : '',
+        uuid ? `UUID: ${uuid}` : ''
+    ].filter(Boolean);
+
+    return {
+        primaryName,
+        tooltip: tooltipLines.join('\n')
+    };
+}
+
 function translate(key, params = {}) {
     const map = {
         'modal.provider.neverUsed': 'Never used',
@@ -185,6 +220,7 @@ async function importModalModule() {
         showConfirmDialog: jest.fn(),
         getFieldLabel: mockGetFieldLabel,
         getProviderTypeFields: mockGetProviderTypeFields,
+        getProviderDisplayMeta: mockGetProviderDisplayMeta,
         escapeHtml: (value) => String(value || '')
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
@@ -658,7 +694,7 @@ describe('Provider modal runtime storage interactions', () => {
         expect(inlinePagination).toContain('>1-5 / 6<');
     });
 
-    test('should prefer custom name, identity, file name and uuid when rendering provider title', async () => {
+    test('should prefer identity, custom name, file name and uuid when rendering provider title', async () => {
         const { renderProviderList } = await importModalModule();
 
         const html = renderProviderList([
@@ -688,11 +724,12 @@ describe('Provider modal runtime storage interactions', () => {
             }
         ]);
 
-        expect(html).toContain('>Custom Node<');
+        expect(html).toContain('>custom@example.com (acct-custom)<');
         expect(html).toContain('>identity@example.com (acct-identity)<');
         expect(html).toContain('>file-only.json<');
         expect(html).toContain('>provider-uuid<');
-        expect(html).toContain('title="Custom: Custom Node');
+        expect(html).toContain('title="Identity: custom@example.com (acct-custom)');
+        expect(html).toContain('Custom: Custom Node');
         expect(html).toContain('Identity: identity@example.com (acct-identity)');
         expect(html).toContain('File: file-only.json');
         expect(html).toContain('UUID: provider-uuid');

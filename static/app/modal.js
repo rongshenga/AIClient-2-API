@@ -1,6 +1,6 @@
 // 模态框管理模块
 
-import { showToast, getFieldLabel, getProviderTypeFields, showConfirmDialog, escapeHtml } from './utils.js';
+import { showToast, getFieldLabel, getProviderTypeFields, showConfirmDialog, escapeHtml, getProviderDisplayMeta } from './utils.js';
 import { handleProviderPasswordToggle } from './event-handlers.js';
 import { t } from './i18n.js';
 
@@ -837,74 +837,6 @@ function closeProviderModal(button) {
         }
         modal.remove();
     }
-}
-
-function normalizeProviderDisplayText(value) {
-    if (typeof value !== 'string') {
-        return '';
-    }
-
-    return value.trim();
-}
-
-function getProviderCredentialPath(provider = {}) {
-    const credentialEntry = Object.entries(provider || {}).find(([key, value]) => {
-        if (typeof value !== 'string' || !value.trim()) {
-            return false;
-        }
-
-        return key.endsWith('_FILE_PATH')
-            || key.endsWith('_CREDS_FILE_PATH')
-            || key.endsWith('_TOKEN_FILE_PATH');
-    });
-
-    return credentialEntry?.[1] || '';
-}
-
-function getProviderCredentialFileName(provider = {}) {
-    const credentialPath = normalizeProviderDisplayText(getProviderCredentialPath(provider));
-    if (!credentialPath) {
-        return '';
-    }
-
-    const pathSegments = credentialPath.split(/[\\/]/).filter(Boolean);
-    return pathSegments[pathSegments.length - 1] || '';
-}
-
-function getProviderIdentityText(provider = {}) {
-    const email = normalizeProviderDisplayText(provider.email || provider.userEmail || '');
-    const accountId = normalizeProviderDisplayText(
-        provider.accountId
-        || provider.account_id
-        || provider.ACCOUNT_ID
-        || ''
-    );
-
-    if (email && accountId) {
-        return `${email} (${accountId})`;
-    }
-
-    return email || accountId;
-}
-
-function getProviderDisplayMeta(provider = {}) {
-    const customName = normalizeProviderDisplayText(provider.customName || '');
-    const identityText = getProviderIdentityText(provider);
-    const fileName = normalizeProviderDisplayText(getProviderCredentialFileName(provider));
-    const uuid = normalizeProviderDisplayText(provider.uuid || '');
-
-    const primaryName = customName || identityText || fileName || uuid || '-';
-    const tooltipLines = [
-        customName ? `Custom: ${customName}` : '',
-        identityText ? `Identity: ${identityText}` : '',
-        fileName ? `File: ${fileName}` : '',
-        uuid ? `UUID: ${uuid}` : ''
-    ].filter(Boolean);
-
-    return {
-        primaryName,
-        tooltip: tooltipLines.join('\n')
-    };
 }
 
 /**

@@ -3014,7 +3014,7 @@ INSERT INTO provider_runtime_state (
     refresh_count,
     last_selection_seq,
     updated_at
-) VALUES (
+) SELECT
     ${sqlValue(record.providerId)},
     ${sqlValue(runtimeState.isHealthy ?? true)},
     ${sqlValue(runtimeState.isDisabled ?? false)},
@@ -3029,6 +3029,10 @@ INSERT INTO provider_runtime_state (
     ${sqlValue(runtimeState.refreshCount ?? 0)},
     ${sqlValue(persistSelectionState ? (runtimeState.lastSelectionSeq ?? null) : null)},
     ${sqlValue(timestamp)}
+WHERE EXISTS (
+    SELECT 1
+    FROM provider_registrations
+    WHERE provider_id = ${sqlValue(record.providerId)}
 )
 ON CONFLICT(provider_id) DO UPDATE SET
     is_healthy = excluded.is_healthy,

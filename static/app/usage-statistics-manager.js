@@ -1,4 +1,4 @@
-import { showToast } from './utils.js';
+import { showToast, getProviderDisplayMeta } from './utils.js';
 import { getAuthHeaders } from './auth.js';
 
 const DEFAULT_EVENTS_PAGE_SIZE = 20;
@@ -987,9 +987,13 @@ function renderCredentials(credentials = {}) {
     tbody.innerHTML = items.map((item) => {
         const requestCount = Number(item.requestCount || 0);
         const errorRate = requestCount > 0 ? (Number(item.errorCount || 0) / requestCount) : 0;
-        const credentialLabel = item.providerCustomName
-            ? `${item.providerCustomName} (${item.providerUuid || '无'})`
-            : (item.providerUuid || '无');
+        const credentialMeta = getProviderDisplayMeta({
+            customName: item.providerCustomName,
+            uuid: item.providerUuid
+        });
+        const credentialLabel = credentialMeta.primaryName === '-'
+            ? '无'
+            : credentialMeta.primaryName;
 
         return `
             <tr>
@@ -1020,9 +1024,12 @@ function renderEvents(events = {}) {
     } else {
         tbody.innerHTML = items.map((item) => {
             const statusClass = item.requestStatus || 'unknown';
-            const provider = item.providerCustomName
-                ? `${item.toProvider || '-'} (${item.providerCustomName})`
-                : `${item.toProvider || '-'} (${item.providerUuid || '-'})`;
+            const providerMeta = getProviderDisplayMeta({
+                customName: item.providerCustomName,
+                uuid: item.providerUuid
+            });
+            const providerDisplayName = providerMeta.primaryName === '-' ? '-' : providerMeta.primaryName;
+            const provider = `${item.toProvider || '-'} (${providerDisplayName})`;
             return `
                 <tr>
                     <td>${escapeHtml(formatDateTime(item.occurredAt))}</td>

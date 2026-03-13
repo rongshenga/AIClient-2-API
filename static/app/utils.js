@@ -96,6 +96,153 @@ function escapeHtml(text) {
 }
 
 /**
+ * 规范化提供商展示文本
+ * @param {any} value - 原始值
+ * @returns {string} 规范化后的文本
+ */
+function normalizeProviderDisplayText(value) {
+    if (typeof value !== 'string') {
+        if (value === null || value === undefined) {
+            return '';
+        }
+        return String(value).trim();
+    }
+
+    return value.trim();
+}
+
+function pickProviderDisplayText(...values) {
+    for (const value of values) {
+        const normalized = normalizeProviderDisplayText(value);
+        if (normalized) {
+            return normalized;
+        }
+    }
+
+    return '';
+}
+
+/**
+ * 获取提供商凭据路径
+ * @param {Object} provider - 提供商对象
+ * @returns {string} 凭据路径
+ */
+function getProviderCredentialPath(provider = {}) {
+    if (!provider || typeof provider !== 'object') {
+        return '';
+    }
+
+    const explicitPath = pickProviderDisplayText(
+        provider.credentialFilePath,
+        provider.credentialPath,
+        provider.filePath,
+        provider.sourcePath,
+        provider.path
+    );
+    if (explicitPath) {
+        return explicitPath;
+    }
+
+    const credentialEntry = Object.entries(provider).find(([key, value]) => {
+        if (typeof value !== 'string' || !value.trim()) {
+            return false;
+        }
+
+        return key.endsWith('_FILE_PATH')
+            || key.endsWith('_CREDS_FILE_PATH')
+            || key.endsWith('_TOKEN_FILE_PATH');
+    });
+
+    return credentialEntry?.[1] || '';
+}
+
+/**
+ * 获取提供商凭据文件名
+ * @param {Object} provider - 提供商对象
+ * @returns {string} 凭据文件名
+ */
+function getProviderCredentialFileName(provider = {}) {
+    const explicitFileName = pickProviderDisplayText(
+        provider.fileName,
+        provider.credentialFileName
+    );
+    if (explicitFileName) {
+        return explicitFileName;
+    }
+
+    const credentialPath = normalizeProviderDisplayText(getProviderCredentialPath(provider));
+    if (!credentialPath) {
+        return '';
+    }
+
+    const pathSegments = credentialPath.split(/[\\/]/).filter(Boolean);
+    return pathSegments[pathSegments.length - 1] || '';
+}
+
+/**
+ * 获取提供商身份文本
+ * @param {Object} provider - 提供商对象
+ * @returns {string} 身份文本
+ */
+function getProviderIdentityText(provider = {}) {
+    const source = provider && typeof provider === 'object' ? provider : {};
+    const email = pickProviderDisplayText(
+        source.email,
+        source.userEmail,
+        source.providerEmail,
+        source.CODEX_EMAIL
+    );
+    const accountId = pickProviderDisplayText(
+        source.accountId,
+        source.account_id,
+        source.ACCOUNT_ID,
+        source.providerAccountId,
+        source.chatgptAccountId,
+        source.chatgpt_account_id
+    );
+
+    if (email && accountId) {
+        return `${email} (${accountId})`;
+    }
+
+    return email || accountId;
+}
+
+/**
+ * 获取提供商展示元数据
+ * @param {Object} provider - 提供商对象
+ * @returns {{ primaryName: string, tooltip: string, identityText: string, customName: string, fileName: string, uuid: string }}
+ */
+function getProviderDisplayMeta(provider = {}) {
+    const source = provider && typeof provider === 'object' ? provider : {};
+    const identityText = getProviderIdentityText(source);
+    const customName = pickProviderDisplayText(source.customName, source.providerCustomName);
+    const fileName = normalizeProviderDisplayText(getProviderCredentialFileName(source));
+    const precomputedName = pickProviderDisplayText(source.displayName, source.name);
+    const uuid = pickProviderDisplayText(source.uuid, source.providerUuid);
+
+    const primaryName = identityText || customName || fileName || precomputedName || uuid || '-';
+    const tooltipLines = [
+        identityText ? `Identity: ${identityText}` : '',
+        customName ? `Custom: ${customName}` : '',
+        fileName ? `File: ${fileName}` : '',
+        precomputedName && ![identityText, customName, fileName, uuid].includes(precomputedName)
+            ? `Name: ${precomputedName}`
+            : '',
+        uuid ? `UUID: ${uuid}` : ''
+    ].filter(Boolean);
+
+    return {
+        primaryName,
+        tooltip: tooltipLines.join('\n'),
+        identityText,
+        customName,
+        fileName,
+        uuid
+    };
+}
+
+/**
  * 显示提示消息
  * @param {string} title - 提示标题 (可选，旧接口为 message)
  * @param {string} message - 提示消息
@@ -659,6 +806,11 @@ export {
     showConfirmDialog,
     dismissToast,
     attachToastLifecycle,
+    normalizeProviderDisplayText,
+    getProviderCredentialPath,
+    getProviderCredentialFileName,
+    getProviderIdentityText,
+    getProviderDisplayMeta,
     getFieldLabel,
     getProviderTypeFields,
     getProviderConfigs,

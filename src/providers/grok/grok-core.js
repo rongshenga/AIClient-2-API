@@ -243,17 +243,23 @@ export class GrokApiService {
     }
 
     buildPayload(modelId, requestBody) {
-        const mapping = MODEL_MAPPING[modelId] || MODEL_MAPPING['grok-3'];
-        let message = requestBody.message || "";
-        let toolOverrides = requestBody.toolOverrides || {};
-        let fileAttachments = requestBody.fileAttachments || [];
-        let modelConfigOverride = requestBody.responseMetadata?.modelConfigOverride || {};
+        const cleanedBody = { ...requestBody };
+        if (Object.prototype.hasOwnProperty.call(cleanedBody, 'tools')) {
+            delete cleanedBody.tools;
+        }
 
-        if (requestBody.messages && Array.isArray(requestBody.messages)) {
-            let processedMessages = requestBody.messages;
-            if (requestBody.tools?.length > 0) processedMessages = this.converter.formatToolHistory(requestBody.messages);
-            const toolPrompt = this.converter.buildToolPrompt(requestBody.tools, requestBody.tool_choice);
-            if (requestBody.tools && Object.keys(toolOverrides).length === 0) toolOverrides = this.converter.buildToolOverrides(requestBody.tools);
+        const normalizedModelId = typeof modelId === 'string' ? modelId : 'grok-3';
+        const mapping = MODEL_MAPPING[normalizedModelId] || MODEL_MAPPING['grok-3'];
+        let message = cleanedBody.message || "";
+        let toolOverrides = cleanedBody.toolOverrides || {};
+        let fileAttachments = cleanedBody.fileAttachments || [];
+        let modelConfigOverride = cleanedBody.responseMetadata?.modelConfigOverride || {};
+
+        if (cleanedBody.messages && Array.isArray(cleanedBody.messages)) {
+            let processedMessages = cleanedBody.messages;
+            if (cleanedBody.tools?.length > 0) processedMessages = this.converter.formatToolHistory(cleanedBody.messages);
+            const toolPrompt = this.converter.buildToolPrompt(cleanedBody.tools, cleanedBody.tool_choice);
+            if (cleanedBody.tools && Object.keys(toolOverrides).length === 0) toolOverrides = this.converter.buildToolOverrides(cleanedBody.tools);
 
             const extracted = [];
             const imageAttachments = [];

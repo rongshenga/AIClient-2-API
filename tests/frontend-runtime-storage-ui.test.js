@@ -167,6 +167,72 @@ function createTreeElement(initial = {}) {
     return element;
 }
 
+function normalizeDisplayText(value) {
+    if (value === null || value === undefined) {
+        return '';
+    }
+    return String(value).trim();
+}
+
+function mockGetProviderDisplayMeta(provider = {}) {
+    const email = [provider.email, provider.userEmail, provider.CODEX_EMAIL]
+        .map(normalizeDisplayText)
+        .find(Boolean);
+    const accountId = [provider.accountId, provider.account_id, provider.ACCOUNT_ID]
+        .map(normalizeDisplayText)
+        .find(Boolean);
+    const identityText = email && accountId ? `${email} (${accountId})` : (email || accountId || '');
+    const customName = normalizeDisplayText(provider.customName || provider.providerCustomName);
+    const fileName = normalizeDisplayText(
+        provider.fileName
+        || provider.credentialFileName
+        || provider.credentialFilePath?.split(/[\\/]/).filter(Boolean).pop()
+    );
+    const precomputedName = normalizeDisplayText(provider.displayName || provider.name);
+    const uuid = normalizeDisplayText(provider.uuid || provider.providerUuid);
+
+    return {
+        primaryName: identityText || customName || fileName || precomputedName || uuid || '-',
+        tooltip: [
+            identityText ? `Identity: ${identityText}` : '',
+            customName ? `Custom: ${customName}` : '',
+            fileName ? `File: ${fileName}` : '',
+            uuid ? `UUID: ${uuid}` : ''
+        ].filter(Boolean).join('\n')
+    };
+}
+
+describe('frontend provider display utils', () => {
+    test('should prefer identity before custom name, file name, cached name and uuid', async () => {
+        jest.resetModules();
+        jest.doMock('../static/app/i18n.js', () => ({
+            t: (key) => key
+        }));
+        jest.doMock('../static/app/auth.js', () => ({
+            apiClient: {
+                request: jest.fn()
+            }
+        }));
+
+        const utilsModule = await import('../static/app/utils.js');
+        const displayMeta = utilsModule.getProviderDisplayMeta({
+            uuid: 'provider-uuid',
+            name: 'Cached Name',
+            customName: 'Custom Name',
+            email: 'identity@example.com',
+            accountId: 'acct-identity',
+            credentialFilePath: './configs/codex/file-only.json'
+        });
+
+        expect(displayMeta.primaryName).toBe('identity@example.com (acct-identity)');
+        expect(displayMeta.tooltip).toContain('Identity: identity@example.com (acct-identity)');
+        expect(displayMeta.tooltip).toContain('Custom: Custom Name');
+        expect(displayMeta.tooltip).toContain('File: file-only.json');
+        expect(displayMeta.tooltip).toContain('Name: Cached Name');
+        expect(displayMeta.tooltip).toContain('UUID: provider-uuid');
+    });
+});
+
 describe('frontend event stream and usage manager', () => {
     let showToast;
     let loadProviders;
@@ -280,6 +346,7 @@ describe('frontend event stream and usage manager', () => {
             escapeHtml: (value) => String(value),
             showToast,
             showConfirmDialog: jest.fn(async () => true),
+            getProviderDisplayMeta: mockGetProviderDisplayMeta,
             getProviderConfigs: () => ([
                 { id: 'grok-custom', name: 'Grok Reverse' },
                 { id: 'openai-codex-oauth', name: 'Codex OAuth' }
@@ -1108,6 +1175,7 @@ describe('frontend runtime storage diagnostics panel', () => {
         }));
         jest.doMock('../static/app/utils.js', () => ({
             showToast,
+            getProviderDisplayMeta: mockGetProviderDisplayMeta,
             getProviderConfigs: jest.fn(() => [])
         }));
         jest.doMock('../static/app/file-upload.js', () => ({

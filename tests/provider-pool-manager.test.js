@@ -543,6 +543,74 @@ describe('ProviderPoolManager refresh recovery', () => {
         );
     });
 
+    test('discardPendingRuntimeMutationsForProviders should drop only matching provider mutations', () => {
+        const runtimeStorage = {
+            flushProviderRuntimeState: jest.fn(async () => ({ flushedCount: 0 })),
+            updateProviderRoutingUuid: jest.fn(async () => ({ updated: false }))
+        };
+
+        const manager = new ProviderPoolManager({
+            'grok-custom': [
+                {
+                    uuid: 'grok-1',
+                    customName: 'Grok One',
+                    GROK_BASE_URL: 'https://grok.com',
+                    isHealthy: true
+                },
+                {
+                    uuid: 'grok-2',
+                    customName: 'Grok Two',
+                    GROK_BASE_URL: 'https://grok.com',
+                    isHealthy: true
+                }
+            ]
+        }, {
+            globalConfig: {
+                LOG_LEVEL: 'error',
+                PERSIST_SELECTION_STATE: false
+            },
+            runtimeStorage,
+            saveDebounceTime: 60000
+        });
+
+        manager._log = jest.fn();
+
+        const providerOne = manager._findProvider('grok-custom', 'grok-1');
+        const providerTwo = manager._findProvider('grok-custom', 'grok-2');
+
+        manager._queueProviderRuntimeSave('grok-custom', 'grok-1');
+        manager._queueProviderRuntimeSave('grok-custom', 'grok-2');
+        manager._queueRoutingUuidUpdate('grok-custom', providerOne, 'grok-1', 'grok-1-new');
+
+        const result = manager.discardPendingRuntimeMutationsForProviders([
+            {
+                providerId: providerOne.providerId,
+                providerType: 'grok-custom',
+                routingUuid: 'grok-1'
+            }
+        ], 'provider_delete');
+
+        expect(result).toEqual({
+            droppedSaveCount: 1,
+            droppedRoutingCount: 1,
+            providerCount: 1
+        });
+        expect(Array.from(manager.pendingSaves.values())).toEqual([
+            expect.objectContaining({
+                providerId: providerTwo.providerId,
+                providerType: 'grok-custom',
+                uuid: 'grok-2'
+            })
+        ]);
+        expect(manager.pendingRoutingUuidUpdates.size).toBe(0);
+        expect(manager.invalidatedRuntimeProviderIds.has(providerOne.providerId)).toBe(true);
+        expect(manager.invalidatedRuntimeProviderIds.has(providerTwo.providerId)).toBe(false);
+        expect(manager._log).toHaveBeenCalledWith(
+            'debug',
+            expect.stringContaining('Discarded pending runtime mutations for deleted providers')
+        );
+    });
+
     test('should return idle summary when flush queue is empty', async () => {
         const runtimeStorage = {
             flushProviderRuntimeState: jest.fn(async () => ({ flushedCount: 0 })),

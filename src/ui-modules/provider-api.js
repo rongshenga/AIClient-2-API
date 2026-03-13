@@ -222,6 +222,9 @@ async function persistProviderDeletionMutations(currentConfig, providerPoolManag
     const result = await runtimeStorage.deleteProviderPoolEntries(entries, {
         sourceKind: options.sourceKind || 'ui_api_partial'
     });
+    if (providerPoolManager && typeof providerPoolManager.discardPendingRuntimeMutationsForProviders === 'function') {
+        providerPoolManager.discardPendingRuntimeMutationsForProviders(entries, 'provider_pool_entry_delete');
+    }
     syncProviderPoolsState(currentConfig, providerPoolManager, providerPools, options);
     return result;
 }

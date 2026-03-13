@@ -1,6 +1,6 @@
 // 用量管理模块
 
-import { showToast, showConfirmDialog } from './utils.js';
+import { showToast, showConfirmDialog, getProviderDisplayMeta } from './utils.js';
 import { getAuthHeaders } from './auth.js';
 import { t, getCurrentLanguage } from './i18n.js';
 
@@ -799,19 +799,27 @@ function setUsageLoadingText(loadingEl, text) {
     if (!loadingEl) return;
     const textEl = loadingEl.querySelector('span');
     if (!textEl) return;
-    textEl.textContent = text || t('usage.loading');
+    textEl.textContent = text === null || text === undefined
+        ? t('usage.loading')
+        : String(text);
 }
 
 function setUsagePanelLoading(isLoading) {
     const loadingEl = document.getElementById('usageLoading');
     const panelEl = document.getElementById('usagePanel');
-    if (!loadingEl || !panelEl) {
+    if (!loadingEl) {
         return false;
     }
 
     loadingEl.classList.toggle('active', isLoading);
+    loadingEl.style.display = isLoading ? 'block' : 'none';
     loadingEl.setAttribute('aria-hidden', isLoading ? 'false' : 'true');
-    panelEl.setAttribute('aria-busy', isLoading ? 'true' : 'false');
+    if (panelEl) {
+        panelEl.setAttribute('aria-busy', isLoading ? 'true' : 'false');
+    }
+    if (!isLoading) {
+        setUsageLoadingText(loadingEl, '');
+    }
     return true;
 }
 
@@ -1676,8 +1684,9 @@ function createInstanceUsageCard(instance, providerType) {
         ? '<i class="fas fa-check-circle status-success"></i>'
         : '<i class="fas fa-times-circle status-error"></i>';
     
-    // 显示名称：优先自定义名称，其次 uuid
-    const displayName = instance.name || instance.uuid;
+    const displayMeta = getProviderDisplayMeta(instance);
+    const displayName = displayMeta.primaryName;
+    const displayTitle = displayMeta.tooltip || displayName;
 
     const displayUsageText = totalUsage.isCodex 
         ? `${totalUsage.percent.toFixed(1)}%`
@@ -1686,7 +1695,7 @@ function createInstanceUsageCard(instance, providerType) {
     collapsedSummary.innerHTML = `
         <div class="collapsed-summary-row collapsed-summary-name-row">
             <i class="fas fa-chevron-right usage-toggle-icon"></i>
-            <span class="collapsed-name" title="${displayName}">${displayName}</span>
+            <span class="collapsed-name" title="${displayTitle}">${displayName}</span>
             ${statusIcon}
         </div>
         ${showUsage ? `
@@ -1748,7 +1757,7 @@ function createInstanceUsageCard(instance, providerType) {
             </div>
         </div>
         <div class="instance-name">
-            <span class="instance-name-text" title="${instance.name || instance.uuid}">${instance.name || instance.uuid}</span>
+            <span class="instance-name-text" title="${displayTitle}">${displayName}</span>
         </div>
         ${userInfoHTML}
     `;
