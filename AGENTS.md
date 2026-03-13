@@ -31,14 +31,14 @@ Keep this managed block so 'openspec update' can refresh the instructions.
 - `static/` contains the Web UI assets (HTML/CSS/JS), `configs/` stores runtime config files, `tests/` contains Jest tests, and `docker/` contains Compose files.
 
 ## Build, Test, and Development Commands
-- `npm install`: install project dependencies.
-- `npm run start`: run master mode (`src/core/master.js`).
-- `npm run start:standalone`: run API server directly (`src/services/api-server.js`).
-- `npm run start:dev`: run master with `--dev` flag.
-- `npm test`: run Jest test suite.
-- `npm run test:coverage`: generate coverage reports in `coverage/`.
+- `pnpm install`: install project dependencies.
+- `pnpm run start`: run master mode (`src/core/master.js`).
+- `pnpm run start:standalone`: run API server directly (`src/services/api-server.js`).
+- `pnpm run start:dev`: run master with `--dev` flag.
+- `pnpm test`: run Jest test suite.
+- `pnpm run test:coverage`: generate coverage reports in `coverage/`.
 - `docker compose -f docker/docker-compose.build.yml up -d --build`: build and run from source image.
-- 前端改动后**不需要**执行构建产物生成（不要求执行 `npm run build`，默认不生成 `dist/`）。
+- 前端改动后**不需要**执行构建产物生成（不要求执行 `pnpm run build`，默认不生成 `dist/`）。
 - Note: `test:unit`, `test:integration`, and `test:summary` currently reference missing files; do not rely on them until restored.
 
 ## Coding Style & Naming Conventions
@@ -52,7 +52,7 @@ Keep this managed block so 'openspec update' can refresh the instructions.
 - Framework: Jest + Babel (`jest.config.js`, `.babelrc`).
 - Place tests in `tests/` and use `*.test.js` naming.
 - Use `supertest` for HTTP endpoint checks when applicable.
-- Before opening a PR, run `npm test` and `npm run test:coverage`.
+- Before opening a PR, run `pnpm test` and `pnpm run test:coverage`.
 
 ## Change Verification Requirement
 - After any code change, verify the behavior with `chrome-devtools` and confirm the result matches expectations before finalizing.

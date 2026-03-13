@@ -56,22 +56,31 @@ if not exist "package.json" (
 
 echo [成功] 找到package.json文件
 
-:: 检查 pnpm 是否安装
+:: 检查 pnpm 是否可用
+echo [检查] 正在检查pnpm是否可用...
 where pnpm >nul 2>&1
 if %errorlevel% equ 0 (
-    set PKG_MANAGER=pnpm
+    set INSTALL_CMD=pnpm install --frozen-lockfile
 ) else (
-    set PKG_MANAGER=npm
+    where corepack >nul 2>&1
+    if %errorlevel% equ 0 (
+        echo [提示] 未检测到pnpm，正在通过corepack调用项目声明版本...
+        set INSTALL_CMD=corepack pnpm install --frozen-lockfile
+    ) else (
+        echo [错误] 未检测到pnpm或corepack，请先安装Node.js自带的corepack或手动安装pnpm
+        pause
+        exit /b 1
+    )
 )
 
-echo [安装] 正在使用 !PKG_MANAGER! 安装/更新依赖...
+echo [安装] 正在使用pnpm安装/更新依赖...
 echo 这可能需要几分钟时间，请耐心等待...
-echo 正在执行: !PKG_MANAGER! install...
+echo 正在执行: !INSTALL_CMD!
 
-call !PKG_MANAGER! install
+call !INSTALL_CMD!
 if %errorlevel% neq 0 (
     echo [错误] 依赖安装失败
-    echo 请检查网络连接或手动运行 '!PKG_MANAGER! install'
+    echo 请检查网络连接或手动运行 'pnpm install --frozen-lockfile'
     pause
     exit /b 1
 )

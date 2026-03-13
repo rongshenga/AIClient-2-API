@@ -1,5 +1,6 @@
 {
   "type": "module",
+  "packageManager": "pnpm@10.13.1",
   "dependencies": {
     "@anthropic-ai/tokenizer": "^0.0.4",
     "adm-zip": "^0.5.16",
@@ -39,7 +40,7 @@
     "test:silent": "jest --silent",
     "test:unit": "jest --testPathIgnorePatterns=/tests/integration/",
     "test:integration": "jest tests/integration --runInBand --testPathIgnorePatterns=/node_modules/",
-    "test:summary": "npm run test:unit -- --json --outputFile coverage/test-summary.json",
+    "test:summary": "pnpm run test:unit -- --json --outputFile coverage/test-summary.json",
     "test:concurrent": "node tests/scripts/concurrent-test.js"
   }
 }

@@ -186,7 +186,7 @@ docker compose up -d
 
 如果你正在执行数据库化迁移，别再靠脑补流程瞎冲了，直接看现成运维文档：`docs/runtime-storage-migration.md`。
 
-- 统一 CLI：`npm run runtime-storage:admin -- <command>`
+- 统一 CLI：`pnpm run runtime-storage:admin -- <command>`
 - 核心命令：`migrate`、`verify`、`verify-auth`、`export-legacy`、`rollback`、`rollback-auth`、`list-runs`、`show-run`
 - 默认数据库：`configs/runtime/runtime-storage.sqlite`
 - 默认 auth 权威模式：`AUTH_STORAGE_MODE=db_only`

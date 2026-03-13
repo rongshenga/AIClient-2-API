@@ -1,0 +1,1087 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Codex 批量额度查询器</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+</head>
+<body class="min-h-screen bg-slate-100 text-slate-900">
+    <div class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+        <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+            <div class="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                    <h1 class="text-2xl font-semibold tracking-tight">Codex 批量额度查询器</h1>
+                    <p class="mt-2 text-sm text-slate-600">
+                        支持选择多个 <code class="rounded bg-slate-100 px-1 py-0.5">.zip</code> 或文件夹文件，
+                        先提取账号，再按并发与重试参数开始额度查询。
+                    </p>
+                </div>
+                <a href="/index.html" class="inline-flex items-center rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">返回控制台</a>
+            </div>
+
+            <div class="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                默认直连 <code>chatgpt.com</code> 会先触发浏览器跨域预检；如果目标不允许 <code>Authorization</code> 和 <code>chatgpt-account-id</code>，查询通常会全部超时或被拦截。要真实查询，请改成你自己的同源代理接口地址。
+            </div>
+
+            <div class="mt-6 grid gap-4 lg:grid-cols-3">
+                <div class="rounded-xl border border-slate-200 p-4 lg:col-span-2">
+                    <h2 class="text-base font-semibold">步骤 1：选择文件</h2>
+                    <div class="mt-3 flex flex-wrap gap-2">
+                        <button id="pickFilesBtn" class="rounded-lg bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800">选择 ZIP/JSON 文件</button>
+                        <button id="pickFolderBtn" class="rounded-lg bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800">选择文件夹</button>
+                        <button id="clearFilesBtn" class="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">清空文件</button>
+                    </div>
+
+                    <input id="fileInput" type="file" class="hidden" multiple accept=".zip,.json,application/json,application/zip" />
+                    <input id="folderInput" type="file" class="hidden" webkitdirectory directory multiple />
+
+                    <div class="mt-3 flex flex-wrap items-center gap-4 text-sm text-slate-600">
+                        <span id="selectedFileCount">已选择文件：0</span>
+                        <span id="selectedZipCount">ZIP：0</span>
+                        <span id="selectedJsonCount">JSON：0</span>
+                    </div>
+
+                    <div class="mt-3 max-h-48 overflow-auto rounded-lg border border-slate-200">
+                        <table class="min-w-full divide-y divide-slate-200 text-xs">
+                            <thead class="bg-slate-50 text-slate-700">
+                                <tr>
+                                    <th class="px-3 py-2 text-left font-medium">#</th>
+                                    <th class="px-3 py-2 text-left font-medium">文件</th>
+                                    <th class="px-3 py-2 text-left font-medium">类型</th>
+                                    <th class="px-3 py-2 text-right font-medium">大小</th>
+                                </tr>
+                            </thead>
+                            <tbody id="fileTableBody" class="divide-y divide-slate-100 bg-white"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="rounded-xl border border-slate-200 p-4">
+                    <h2 class="text-base font-semibold">步骤 2：提取账号</h2>
+                    <p class="mt-2 text-sm text-slate-600">查询前先提取账号对象。</p>
+                    <button id="extractBtn" class="mt-3 w-full rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700">提取账号</button>
+
+                    <div class="mt-4 rounded-lg bg-slate-50 p-3 text-sm">
+                        <div class="flex items-center justify-between">
+                            <span class="text-slate-600">已提取账号数</span>
+                            <span id="extractedCount" class="font-semibold text-slate-900">0</span>
+                        </div>
+                        <div class="mt-2 flex items-center justify-between">
+                            <span class="text-slate-600">警告数</span>
+                            <span id="warningCount" class="font-semibold text-amber-700">0</span>
+                        </div>
+                    </div>
+
+                    <div id="extractProgressWrap" class="mt-3 hidden">
+                        <div class="mb-1 flex items-center justify-between text-xs text-slate-600">
+                            <span id="extractProgressLabel">提取中...</span>
+                            <span id="extractProgressText">0%</span>
+                        </div>
+                        <div class="h-2 w-full overflow-hidden rounded-full bg-slate-200">
+                            <div id="extractProgressBar" class="h-full w-0 bg-emerald-500 transition-all"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mt-4 rounded-xl border border-slate-200 p-4">
+                <h2 class="text-base font-semibold">步骤 3：查询设置</h2>
+                <div class="mt-3 grid gap-3 md:grid-cols-4">
+                    <label class="text-sm">
+                        <span class="mb-1 block text-slate-600">并发数</span>
+                        <input id="concurrencyInput" type="number" min="1" max="128" value="5" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                    </label>
+                    <label class="text-sm">
+                        <span class="mb-1 block text-slate-600">重试次数</span>
+                        <input id="retryInput" type="number" min="0" max="10" value="1" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                    </label>
+                    <label class="text-sm">
+                        <span class="mb-1 block text-slate-600">超时 (毫秒)</span>
+                        <input id="timeoutInput" type="number" min="1000" max="120000" value="30000" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                    </label>
+                    <label class="text-sm md:col-span-1">
+                        <span class="mb-1 block text-slate-600">额度查询接口 URL</span>
+                        <input id="endpointInput" type="text" value="https://chatgpt.com/backend-api/wham/usage" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                    </label>
+                </div>
+                <div class="mt-3 flex flex-wrap gap-2">
+                    <button id="startBtn" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700" disabled>开始查询</button>
+                    <button id="stopBtn" class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50" disabled>停止</button>
+                    <button id="resetResultBtn" class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">重置结果状态</button>
+                </div>
+            </div>
+
+            <div class="mt-4 rounded-xl border border-slate-200 p-4">
+                <h2 class="text-base font-semibold">步骤 4：进度与分类</h2>
+                <div class="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                    <div class="rounded-lg bg-slate-50 p-3">
+                        <div class="text-xs text-slate-600">总数</div>
+                        <div id="countTotal" class="mt-1 text-lg font-semibold">0</div>
+                    </div>
+                    <div class="rounded-lg bg-slate-50 p-3">
+                        <div class="text-xs text-slate-600">未查询</div>
+                        <div id="countUnqueried" class="mt-1 text-lg font-semibold">0</div>
+                    </div>
+                    <div class="rounded-lg bg-slate-50 p-3">
+                        <div class="text-xs text-slate-600">查询中</div>
+                        <div id="countQuerying" class="mt-1 text-lg font-semibold">0</div>
+                    </div>
+                    <div class="rounded-lg bg-emerald-50 p-3">
+                        <div class="text-xs text-emerald-700">账号正常</div>
+                        <div id="countValid" class="mt-1 text-lg font-semibold text-emerald-700">0</div>
+                    </div>
+                    <div class="rounded-lg bg-rose-50 p-3">
+                        <div class="text-xs text-rose-700">账号异常</div>
+                        <div id="countInvalid" class="mt-1 text-lg font-semibold text-rose-700">0</div>
+                    </div>
+                </div>
+
+                <div class="mt-4">
+                    <div class="mb-1 flex items-center justify-between text-xs text-slate-600">
+                        <span id="queryProgressLabel">进度</span>
+                        <span id="queryProgressText">0%</span>
+                    </div>
+                    <div class="h-2 w-full overflow-hidden rounded-full bg-slate-200">
+                        <div id="queryProgressBar" class="h-full w-0 bg-indigo-500 transition-all"></div>
+                    </div>
+                </div>
+
+                <div class="mt-4 grid gap-3 md:grid-cols-2">
+                    <div>
+                        <label class="text-sm">
+                            <span class="mb-1 block text-slate-600">按状态筛选</span>
+                            <select id="statusFilter" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
+                                <option value="all">全部</option>
+                                <option value="unqueried">未查询</option>
+                                <option value="querying">查询中</option>
+                                <option value="valid">账号正常</option>
+                                <option value="invalid">账号异常（全部原因）</option>
+                            </select>
+                        </label>
+                    </div>
+                    <div>
+                        <label class="text-sm">
+                            <span class="mb-1 block text-slate-600">搜索（来源/邮箱/账号）</span>
+                            <input id="searchInput" type="text" placeholder="输入关键字筛选" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+                        </label>
+                    </div>
+                </div>
+
+                <div class="mt-4 rounded-lg border border-slate-200 p-3">
+                    <h3 class="text-sm font-semibold">账号异常原因分布</h3>
+                    <div id="reasonChips" class="mt-2 flex flex-wrap gap-2"></div>
+                </div>
+
+                <div class="mt-4 overflow-auto rounded-lg border border-slate-200">
+                    <table class="min-w-full divide-y divide-slate-200 text-xs">
+                        <thead class="bg-slate-50 text-slate-700">
+                            <tr>
+                                <th class="px-3 py-2 text-left font-medium">#</th>
+                                <th class="px-3 py-2 text-left font-medium">来源</th>
+                                <th class="px-3 py-2 text-left font-medium">邮箱</th>
+                                <th class="px-3 py-2 text-left font-medium">账号</th>
+                                <th class="px-3 py-2 text-left font-medium">状态</th>
+                                <th class="px-3 py-2 text-left font-medium">原因</th>
+                                <th class="px-3 py-2 text-left font-medium">套餐</th>
+                                <th class="px-3 py-2 text-left font-medium">已用 %</th>
+                                <th class="px-3 py-2 text-left font-medium">尝试次数</th>
+                                <th class="px-3 py-2 text-left font-medium">信息</th>
+                            </tr>
+                        </thead>
+                        <tbody id="resultTableBody" class="divide-y divide-slate-100 bg-white"></tbody>
+                    </table>
+                </div>
+
+                <div class="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
+                    <div id="tableMeta">显示 0 / 0</div>
+                    <div class="flex items-center gap-2">
+                        <button id="prevPageBtn" class="rounded border border-slate-300 px-2 py-1 hover:bg-slate-50">上一页</button>
+                        <span id="pageInfo">第 1 页</span>
+                        <button id="nextPageBtn" class="rounded border border-slate-300 px-2 py-1 hover:bg-slate-50">下一页</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mt-4 rounded-xl border border-slate-200 p-4">
+                <h2 class="text-base font-semibold">运行日志</h2>
+                <pre id="logBox" class="mt-2 max-h-60 overflow-auto rounded-lg bg-slate-900 p-3 text-xs text-slate-100"></pre>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const PAGE_SIZE = 200;
+        const state = {
+            fileMap: new Map(),
+            files: [],
+            accounts: [],
+            warnings: [],
+            running: false,
+            stopRequested: false,
+            page: 1,
+            statusFilter: 'all',
+            searchText: '',
+            counts: {
+                total: 0,
+                unqueried: 0,
+                querying: 0,
+                valid: 0,
+                invalid: 0
+            },
+            reasonCounts: new Map()
+        };
+
+        const ui = {
+            pickFilesBtn: document.getElementById('pickFilesBtn'),
+            pickFolderBtn: document.getElementById('pickFolderBtn'),
+            clearFilesBtn: document.getElementById('clearFilesBtn'),
+            fileInput: document.getElementById('fileInput'),
+            folderInput: document.getElementById('folderInput'),
+            selectedFileCount: document.getElementById('selectedFileCount'),
+            selectedZipCount: document.getElementById('selectedZipCount'),
+            selectedJsonCount: document.getElementById('selectedJsonCount'),
+            fileTableBody: document.getElementById('fileTableBody'),
+            extractBtn: document.getElementById('extractBtn'),
+            extractedCount: document.getElementById('extractedCount'),
+            warningCount: document.getElementById('warningCount'),
+            extractProgressWrap: document.getElementById('extractProgressWrap'),
+            extractProgressBar: document.getElementById('extractProgressBar'),
+            extractProgressLabel: document.getElementById('extractProgressLabel'),
+            extractProgressText: document.getElementById('extractProgressText'),
+            concurrencyInput: document.getElementById('concurrencyInput'),
+            retryInput: document.getElementById('retryInput'),
+            timeoutInput: document.getElementById('timeoutInput'),
+            endpointInput: document.getElementById('endpointInput'),
+            startBtn: document.getElementById('startBtn'),
+            stopBtn: document.getElementById('stopBtn'),
+            resetResultBtn: document.getElementById('resetResultBtn'),
+            countTotal: document.getElementById('countTotal'),
+            countUnqueried: document.getElementById('countUnqueried'),
+            countQuerying: document.getElementById('countQuerying'),
+            countValid: document.getElementById('countValid'),
+            countInvalid: document.getElementById('countInvalid'),
+            queryProgressLabel: document.getElementById('queryProgressLabel'),
+            queryProgressText: document.getElementById('queryProgressText'),
+            queryProgressBar: document.getElementById('queryProgressBar'),
+            statusFilter: document.getElementById('statusFilter'),
+            searchInput: document.getElementById('searchInput'),
+            reasonChips: document.getElementById('reasonChips'),
+            resultTableBody: document.getElementById('resultTableBody'),
+            tableMeta: document.getElementById('tableMeta'),
+            prevPageBtn: document.getElementById('prevPageBtn'),
+            nextPageBtn: document.getElementById('nextPageBtn'),
+            pageInfo: document.getElementById('pageInfo'),
+            logBox: document.getElementById('logBox')
+        };
+
+        function log(message) {
+            const timestamp = new Date().toISOString();
+            ui.logBox.textContent += `[${timestamp}] ${message}\n`;
+            ui.logBox.scrollTop = ui.logBox.scrollHeight;
+        }
+
+        function escapeHtml(value) {
+            return String(value || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function parseJwtPayloadSafe(token) {
+            try {
+                if (!token || typeof token !== 'string') return null;
+                const parts = token.split('.');
+                if (parts.length !== 3) return null;
+                const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+                const padded = payload.padEnd(payload.length + ((4 - payload.length % 4) % 4), '=');
+                const json = atob(padded);
+                return JSON.parse(json);
+            } catch {
+                return null;
+            }
+        }
+
+        function hasCodexCredentialShape(value) {
+            if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+            return [
+                'access_token', 'refresh_token', 'id_token', 'account_id', 'email', 'expired', 'exp'
+            ].some((key) => Object.prototype.hasOwnProperty.call(value, key));
+        }
+
+        function extractCodexCredentialPayload(rawToken) {
+            if (hasCodexCredentialShape(rawToken)) return rawToken;
+            const keys = ['token', 'credentials', 'auth', 'data', 'oauth', 'codex'];
+            for (const key of keys) {
+                const nested = rawToken?.[key];
+                if (hasCodexCredentialShape(nested)) return nested;
+            }
+            return rawToken;
+        }
+
+        function normalizeTokenForQuery(rawToken) {
+            if (!rawToken || typeof rawToken !== 'object' || Array.isArray(rawToken)) {
+                return { accessToken: '', accountId: '', email: '', reason: 'token_not_object' };
+            }
+
+            const payload = extractCodexCredentialPayload(rawToken);
+            const idToken = payload.id_token || rawToken.id_token || '';
+            const accessToken = payload.access_token || rawToken.access_token || '';
+
+            const idClaims = parseJwtPayloadSafe(idToken);
+            const accessClaims = parseJwtPayloadSafe(accessToken);
+            const authClaims = payload['https://api.openai.com/auth']
+                || rawToken['https://api.openai.com/auth']
+                || idClaims?.['https://api.openai.com/auth']
+                || accessClaims?.['https://api.openai.com/auth']
+                || {};
+            const profileClaims = payload['https://api.openai.com/profile']
+                || rawToken['https://api.openai.com/profile']
+                || accessClaims?.['https://api.openai.com/profile']
+                || {};
+
+            const accountId = payload.account_id
+                || rawToken.account_id
+                || authClaims?.chatgpt_account_id
+                || idClaims?.sub
+                || accessClaims?.sub
+                || '';
+            const email = payload.email
+                || rawToken.email
+                || idClaims?.email
+                || profileClaims?.email
+                || '';
+
+            if (!accessToken) {
+                return { accessToken: '', accountId: String(accountId || ''), email: String(email || ''), reason: 'missing_access_token' };
+            }
+            if (!accountId) {
+                return { accessToken: String(accessToken), accountId: '', email: String(email || ''), reason: 'missing_account_id' };
+            }
+
+            return {
+                accessToken: String(accessToken),
+                accountId: String(accountId),
+                email: String(email || ''),
+                reason: ''
+            };
+        }
+
+        function parsePayloadObjects(data) {
+            if (Array.isArray(data)) {
+                return data.filter((item) => item && typeof item === 'object' && !Array.isArray(item));
+            }
+            if (data && typeof data === 'object' && !Array.isArray(data)) {
+                return [data];
+            }
+            return [];
+        }
+
+        function humanFileSize(bytes) {
+            const n = Number(bytes) || 0;
+            if (n < 1024) return `${n} B`;
+            if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+            if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+            return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+        }
+
+        function fileKey(file) {
+            return [
+                file.webkitRelativePath || '',
+                file.name || '',
+                String(file.size || 0),
+                String(file.lastModified || 0)
+            ].join('|');
+        }
+
+        function fileTypeOf(file) {
+            const name = String(file.name || '').toLowerCase();
+            if (name.endsWith('.zip')) return 'zip';
+            if (name.endsWith('.json')) return 'json';
+            return 'other';
+        }
+
+        function addFiles(fileList) {
+            let added = 0;
+            for (const file of Array.from(fileList || [])) {
+                const type = fileTypeOf(file);
+                if (type !== 'zip' && type !== 'json') continue;
+                const key = fileKey(file);
+                if (state.fileMap.has(key)) continue;
+                state.fileMap.set(key, file);
+                state.files.push(file);
+                added += 1;
+            }
+            if (added > 0) {
+                log(`已添加 ${added} 个文件。`);
+            }
+            renderSelectedFiles();
+        }
+
+        function clearFiles() {
+            state.fileMap.clear();
+            state.files = [];
+            renderSelectedFiles();
+        }
+
+        function renderSelectedFiles() {
+            const files = state.files;
+            const zipCount = files.filter((f) => fileTypeOf(f) === 'zip').length;
+            const jsonCount = files.filter((f) => fileTypeOf(f) === 'json').length;
+
+            ui.selectedFileCount.textContent = `已选择文件：${files.length}`;
+            ui.selectedZipCount.textContent = `ZIP：${zipCount}`;
+            ui.selectedJsonCount.textContent = `JSON：${jsonCount}`;
+
+            if (files.length === 0) {
+                ui.fileTableBody.innerHTML = '<tr><td colspan="4" class="px-3 py-4 text-center text-slate-500">尚未选择文件</td></tr>';
+                return;
+            }
+
+            const rows = files.slice(0, 500).map((file, idx) => {
+                const displayName = file.webkitRelativePath || file.name;
+                return `<tr>
+                    <td class="px-3 py-2">${idx + 1}</td>
+                    <td class="px-3 py-2 break-all">${escapeHtml(displayName)}</td>
+                    <td class="px-3 py-2 uppercase">${fileTypeOf(file)}</td>
+                    <td class="px-3 py-2 text-right">${humanFileSize(file.size)}</td>
+                </tr>`;
+            });
+
+            if (files.length > 500) {
+                rows.push(`<tr><td colspan="4" class="px-3 py-2 text-center text-slate-500">文件列表仅展示前 500 项。</td></tr>`);
+            }
+
+            ui.fileTableBody.innerHTML = rows.join('');
+        }
+
+        function setExtractProgress(current, total, label = '提取中...') {
+            if (total <= 0) {
+                ui.extractProgressWrap.classList.add('hidden');
+                ui.extractProgressBar.style.width = '0%';
+                ui.extractProgressText.textContent = '0%';
+                ui.extractProgressLabel.textContent = label;
+                return;
+            }
+
+            const percent = Math.max(0, Math.min(100, (current / total) * 100));
+            ui.extractProgressWrap.classList.remove('hidden');
+            ui.extractProgressLabel.textContent = `${label} (${current}/${total})`;
+            ui.extractProgressText.textContent = `${percent.toFixed(1)}%`;
+            ui.extractProgressBar.style.width = `${percent}%`;
+        }
+
+        function resetStatusSummary() {
+            state.counts = {
+                total: state.accounts.length,
+                unqueried: state.accounts.length,
+                querying: 0,
+                valid: 0,
+                invalid: 0
+            };
+            state.reasonCounts = new Map();
+            renderCounts();
+            renderReasonChips();
+        }
+
+        function applyStatusChange(record, nextStatus, nextReason = '') {
+            const prevStatus = record.status;
+            const prevReason = record.reason;
+
+            if (prevStatus === 'unqueried') state.counts.unqueried = Math.max(0, state.counts.unqueried - 1);
+            if (prevStatus === 'querying') state.counts.querying = Math.max(0, state.counts.querying - 1);
+            if (prevStatus === 'valid') state.counts.valid = Math.max(0, state.counts.valid - 1);
+            if (prevStatus === 'invalid') {
+                state.counts.invalid = Math.max(0, state.counts.invalid - 1);
+                if (prevReason) {
+                    const old = Number(state.reasonCounts.get(prevReason) || 0);
+                    if (old <= 1) state.reasonCounts.delete(prevReason);
+                    else state.reasonCounts.set(prevReason, old - 1);
+                }
+            }
+
+            record.status = nextStatus;
+            record.reason = nextReason || '';
+
+            if (nextStatus === 'unqueried') state.counts.unqueried += 1;
+            if (nextStatus === 'querying') state.counts.querying += 1;
+            if (nextStatus === 'valid') state.counts.valid += 1;
+            if (nextStatus === 'invalid') {
+                state.counts.invalid += 1;
+                if (nextReason) {
+                    state.reasonCounts.set(nextReason, Number(state.reasonCounts.get(nextReason) || 0) + 1);
+                }
+            }
+        }
+
+        function renderCounts() {
+            ui.countTotal.textContent = String(state.counts.total);
+            ui.countUnqueried.textContent = String(state.counts.unqueried);
+            ui.countQuerying.textContent = String(state.counts.querying);
+            ui.countValid.textContent = String(state.counts.valid);
+            ui.countInvalid.textContent = String(state.counts.invalid);
+
+            const processed = state.counts.valid + state.counts.invalid;
+            const total = Math.max(1, state.counts.total);
+            const percent = (processed / total) * 100;
+            ui.queryProgressLabel.textContent = `进度: ${processed}/${state.counts.total}`;
+            ui.queryProgressText.textContent = `${percent.toFixed(1)}%`;
+            ui.queryProgressBar.style.width = `${percent}%`;
+        }
+
+        function reasonLabel(reason) {
+            const map = {
+                missing_access_token: '缺少 access_token',
+                missing_account_id: '缺少 account_id',
+                token_not_object: 'Token 不是对象',
+                timeout: '超时',
+                network_or_cors: '网络或 CORS 被拦截',
+                response_parse_error: '响应解析失败',
+                http_401: 'HTTP 401',
+                http_403: 'HTTP 403',
+                http_429: 'HTTP 429',
+                http_4xx: 'HTTP 4xx',
+                http_5xx: 'HTTP 5xx',
+                unknown_error: '未知错误'
+            };
+            return map[reason] || reason || '-';
+        }
+
+        function statusBadge(status, reason) {
+            if (status === 'unqueried') {
+                return '<span class="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-700">未查询</span>';
+            }
+            if (status === 'querying') {
+                return '<span class="rounded-full bg-blue-100 px-2 py-1 text-[11px] font-medium text-blue-700">查询中</span>';
+            }
+            if (status === 'valid') {
+                return '<span class="rounded-full bg-emerald-100 px-2 py-1 text-[11px] font-medium text-emerald-700">账号正常</span>';
+            }
+            if (status === 'invalid') {
+                return `<span class="rounded-full bg-rose-100 px-2 py-1 text-[11px] font-medium text-rose-700">账号异常 (${escapeHtml(reasonLabel(reason))})</span>`;
+            }
+            return `<span class="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-700">${escapeHtml(status)}</span>`;
+        }
+
+        function renderReasonChips() {
+            if (state.reasonCounts.size === 0) {
+                ui.reasonChips.innerHTML = '<span class="text-xs text-slate-500">暂无异常原因。</span>';
+                refreshStatusFilterOptions();
+                return;
+            }
+
+            const sorted = Array.from(state.reasonCounts.entries()).sort((a, b) => b[1] - a[1]);
+            ui.reasonChips.innerHTML = sorted.map(([reason, count]) => {
+                return `<button data-reason="${escapeHtml(reason)}" class="reason-chip rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs text-rose-700 hover:bg-rose-100">${escapeHtml(reasonLabel(reason))}: ${count}</button>`;
+            }).join('');
+
+            Array.from(document.querySelectorAll('.reason-chip')).forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    const reason = btn.getAttribute('data-reason') || '';
+                    ui.statusFilter.value = `invalid:${reason}`;
+                    state.statusFilter = `invalid:${reason}`;
+                    state.page = 1;
+                    renderTable();
+                });
+            });
+
+            refreshStatusFilterOptions();
+        }
+
+        function refreshStatusFilterOptions() {
+            const fixed = [
+                { value: 'all', label: '全部' },
+                { value: 'unqueried', label: '未查询' },
+                { value: 'querying', label: '查询中' },
+                { value: 'valid', label: '账号正常' },
+                { value: 'invalid', label: '账号异常（全部原因）' }
+            ];
+
+            const reasonOptions = Array.from(state.reasonCounts.entries())
+                .sort((a, b) => b[1] - a[1])
+                .map(([reason, count]) => ({
+                    value: `invalid:${reason}`,
+                    label: `账号异常 - ${reasonLabel(reason)} (${count})`
+                }));
+
+            const current = ui.statusFilter.value;
+            ui.statusFilter.innerHTML = [...fixed, ...reasonOptions]
+                .map((opt) => `<option value="${escapeHtml(opt.value)}">${escapeHtml(opt.label)}</option>`)
+                .join('');
+
+            const exists = [...fixed, ...reasonOptions].some((x) => x.value === current);
+            ui.statusFilter.value = exists ? current : 'all';
+            state.statusFilter = ui.statusFilter.value;
+        }
+
+        function matchFilter(record) {
+            const filter = state.statusFilter;
+            if (filter === 'all') return true;
+            if (filter === 'invalid') return record.status === 'invalid';
+            if (filter.startsWith('invalid:')) {
+                const reason = filter.slice('invalid:'.length);
+                return record.status === 'invalid' && record.reason === reason;
+            }
+            return record.status === filter;
+        }
+
+        function matchSearch(record) {
+            const q = state.searchText.trim().toLowerCase();
+            if (!q) return true;
+            return [record.source, record.email, record.accountId, record.reason, record.message]
+                .filter(Boolean)
+                .some((x) => String(x).toLowerCase().includes(q));
+        }
+
+        function getFilteredRecords() {
+            return state.accounts.filter((record) => matchFilter(record) && matchSearch(record));
+        }
+
+        function renderTable() {
+            const filtered = getFilteredRecords();
+            const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+            if (state.page > totalPages) state.page = totalPages;
+            if (state.page < 1) state.page = 1;
+
+            const start = (state.page - 1) * PAGE_SIZE;
+            const slice = filtered.slice(start, start + PAGE_SIZE);
+
+            if (slice.length === 0) {
+                ui.resultTableBody.innerHTML = '<tr><td colspan="10" class="px-3 py-4 text-center text-slate-500">当前筛选条件下没有记录。</td></tr>';
+            } else {
+                ui.resultTableBody.innerHTML = slice.map((record) => `
+                    <tr>
+                        <td class="px-3 py-2">${record.index}</td>
+                        <td class="px-3 py-2 break-all">${escapeHtml(record.source)}</td>
+                        <td class="px-3 py-2 break-all">${escapeHtml(record.email || '-')}</td>
+                        <td class="px-3 py-2 break-all">${escapeHtml(record.accountId || '-')}</td>
+                        <td class="px-3 py-2">${statusBadge(record.status, record.reason)}</td>
+                        <td class="px-3 py-2">${escapeHtml(reasonLabel(record.reason || ''))}</td>
+                        <td class="px-3 py-2">${escapeHtml(record.planType || '-')}</td>
+                        <td class="px-3 py-2">${record.usedPercent === null || record.usedPercent === undefined ? '-' : `${Number(record.usedPercent).toFixed(2)}%`}</td>
+                        <td class="px-3 py-2">${record.attempts || '-'}</td>
+                        <td class="px-3 py-2 break-all">${escapeHtml(record.message || '-')}</td>
+                    </tr>
+                `).join('');
+            }
+
+            ui.tableMeta.textContent = `当前显示 ${slice.length} / ${filtered.length} 条（总记录 ${state.accounts.length}）`;
+            ui.pageInfo.textContent = `第 ${state.page} / ${totalPages} 页`;
+            ui.prevPageBtn.disabled = state.page <= 1;
+            ui.nextPageBtn.disabled = state.page >= totalPages;
+        }
+
+        function rebuildFromExtractedRecords(records, warnings) {
+            state.accounts = records.map((record, idx) => ({
+                index: idx + 1,
+                source: record.source || `记录-${idx + 1}`,
+                email: record.email || '',
+                accountId: record.accountId || '',
+                accessToken: record.accessToken || '',
+                status: 'unqueried',
+                reason: '',
+                message: '',
+                attempts: 0,
+                usedPercent: null,
+                planType: ''
+            }));
+            state.warnings = warnings.slice(0, 1000);
+            state.page = 1;
+
+            ui.extractedCount.textContent = String(state.accounts.length);
+            ui.warningCount.textContent = String(warnings.length);
+            resetStatusSummary();
+            renderTable();
+            renderReasonChips();
+            ui.startBtn.disabled = state.accounts.length === 0;
+            log(`提取完成。账号数=${state.accounts.length}，警告数=${warnings.length}`);
+        }
+
+        async function extractAccounts() {
+            if (state.running) {
+                alert('查询正在进行，请先停止。');
+                return;
+            }
+            if (!window.JSZip) {
+                alert('JSZip 未加载成功，请检查网络或资源地址。');
+                return;
+            }
+            if (state.files.length === 0) {
+                alert('请至少选择一个 ZIP/JSON 文件。');
+                return;
+            }
+
+            ui.extractBtn.disabled = true;
+            const records = [];
+            const warnings = [];
+            let done = 0;
+            const total = state.files.length;
+
+            setExtractProgress(0, total, '提取中');
+            log(`开始提取，文件数：${total} 个。`);
+
+            for (const file of state.files) {
+                const displayName = file.webkitRelativePath || file.name;
+                const lower = String(file.name || '').toLowerCase();
+
+                try {
+                    if (lower.endsWith('.json')) {
+                        const text = await file.text();
+                        let parsed;
+                        try {
+                            parsed = JSON.parse(text);
+                        } catch (error) {
+                            warnings.push({ source: displayName, reason: 'json_parse_error', message: error.message });
+                            done += 1;
+                            setExtractProgress(done, total, '提取中');
+                            continue;
+                        }
+
+                        const objects = parsePayloadObjects(parsed);
+                        if (objects.length === 0) {
+                            warnings.push({ source: displayName, reason: 'no_object_payload', message: '未找到有效 JSON 对象。' });
+                        } else {
+                            for (const obj of objects) {
+                                const n = normalizeTokenForQuery(obj);
+                                records.push({
+                                    source: displayName,
+                                    email: n.email || '',
+                                    accountId: n.accountId || '',
+                                    accessToken: n.accessToken || ''
+                                });
+                            }
+                        }
+                    } else if (lower.endsWith('.zip')) {
+                        const arr = await file.arrayBuffer();
+                        const zip = await window.JSZip.loadAsync(arr);
+                        const jsonEntries = Object.values(zip.files)
+                            .filter((entry) => !entry.dir && String(entry.name || '').toLowerCase().endsWith('.json'));
+
+                        if (jsonEntries.length === 0) {
+                            warnings.push({ source: displayName, reason: 'zip_no_json', message: 'ZIP 中没有 JSON 文件。' });
+                        }
+
+                        for (const entry of jsonEntries) {
+                            const source = `${displayName}::${entry.name}`;
+                            try {
+                                const text = await entry.async('string');
+                                const parsed = JSON.parse(text);
+                                const objects = parsePayloadObjects(parsed);
+                                if (objects.length === 0) {
+                                    warnings.push({ source, reason: 'no_object_payload', message: '未找到有效 JSON 对象。' });
+                                    continue;
+                                }
+                                for (const obj of objects) {
+                                    const n = normalizeTokenForQuery(obj);
+                                    records.push({
+                                        source,
+                                        email: n.email || '',
+                                        accountId: n.accountId || '',
+                                        accessToken: n.accessToken || ''
+                                    });
+                                }
+                            } catch (error) {
+                                warnings.push({ source, reason: 'zip_entry_parse_error', message: error.message });
+                            }
+                        }
+                    }
+                } catch (error) {
+                    warnings.push({ source: displayName, reason: 'extract_error', message: error.message });
+                }
+
+                done += 1;
+                setExtractProgress(done, total, '提取中');
+            }
+
+            setExtractProgress(total, total, '完成');
+            ui.extractBtn.disabled = false;
+            rebuildFromExtractedRecords(records, warnings);
+        }
+
+        function mapHttpReason(status) {
+            if (status === 401) return 'http_401';
+            if (status === 403) return 'http_403';
+            if (status === 429) return 'http_429';
+            if (status >= 500) return 'http_5xx';
+            if (status >= 400) return 'http_4xx';
+            return `http_${status}`;
+        }
+
+        function shouldRetry(reason, status) {
+            if (reason === 'timeout' || reason === 'network_or_cors') return true;
+            if (status === 408 || status === 429 || (status >= 500 && status <= 599)) return true;
+            return false;
+        }
+
+        async function requestUsageOnce(record, endpoint, timeoutMs) {
+            if (!record.accessToken) {
+                return { success: false, reason: 'missing_access_token', message: '缺少 access_token', status: 0 };
+            }
+            if (!record.accountId) {
+                return { success: false, reason: 'missing_account_id', message: '缺少 account_id', status: 0 };
+            }
+
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+            try {
+                const response = await fetch(endpoint, {
+                    method: 'GET',
+                    signal: controller.signal,
+                    headers: {
+                        'authorization': `Bearer ${record.accessToken}`,
+                        'chatgpt-account-id': record.accountId,
+                        'accept': '*/*'
+                    }
+                });
+
+                const rawText = await response.text();
+                let payload = null;
+                if (rawText) {
+                    try {
+                        payload = JSON.parse(rawText);
+                    } catch {
+                        payload = null;
+                    }
+                }
+
+                if (!response.ok) {
+                    return {
+                        success: false,
+                        reason: mapHttpReason(response.status),
+                        status: response.status,
+                        message: String(payload?.error?.message || payload?.message || rawText || `HTTP ${response.status}`).slice(0, 300)
+                    };
+                }
+
+                if (!payload || typeof payload !== 'object') {
+                    return {
+                        success: false,
+                        reason: 'response_parse_error',
+                        status: response.status,
+                        message: '响应不是有效 JSON'
+                    };
+                }
+
+                const usedPercentRaw = Number(payload?.rate_limit?.primary_window?.used_percent);
+                const usedPercent = Number.isFinite(usedPercentRaw)
+                    ? Math.max(0, Math.min(100, usedPercentRaw))
+                    : null;
+
+                return {
+                    success: true,
+                    reason: '',
+                    status: response.status,
+                    message: '',
+                    usedPercent,
+                    planType: payload?.plan_type || '未知'
+                };
+            } catch (error) {
+                if (error?.name === 'AbortError') {
+                    return {
+                        success: false,
+                        reason: 'timeout',
+                        status: 0,
+                        message: `请求超时，超过 ${timeoutMs} 毫秒`
+                    };
+                }
+                return {
+                    success: false,
+                    reason: 'network_or_cors',
+                    status: 0,
+                    message: error?.message || '网络或 CORS 被拦截'
+                };
+            } finally {
+                clearTimeout(timer);
+            }
+        }
+
+        async function queryRecordWithRetry(record, endpoint, retries, timeoutMs) {
+            let last = null;
+            for (let attempt = 0; attempt <= retries; attempt++) {
+                last = await requestUsageOnce(record, endpoint, timeoutMs);
+                if (last.success) {
+                    return { ...last, attempts: attempt + 1 };
+                }
+                const retryable = attempt < retries && shouldRetry(last.reason, last.status);
+                if (!retryable) {
+                    return { ...last, attempts: attempt + 1 };
+                }
+                const backoff = Math.min(1000 * Math.pow(2, attempt), 4000);
+                await new Promise((resolve) => setTimeout(resolve, backoff));
+            }
+            return { ...(last || { success: false, reason: 'unknown_error', message: '未知错误', status: 0 }), attempts: retries + 1 };
+        }
+
+        async function startQuery() {
+            if (state.running) return;
+            if (state.accounts.length === 0) {
+                alert('尚未提取任何账号。');
+                return;
+            }
+
+            const endpoint = String(ui.endpointInput.value || '').trim();
+            if (!endpoint) {
+                alert('请填写额度查询接口 URL。');
+                return;
+            }
+
+            const concurrency = Math.max(1, Math.min(128, Number.parseInt(ui.concurrencyInput.value, 10) || 5));
+            const retries = Math.max(0, Math.min(10, Number.parseInt(ui.retryInput.value, 10) || 1));
+            const timeoutMs = Math.max(1000, Math.min(120000, Number.parseInt(ui.timeoutInput.value, 10) || 30000));
+
+            state.stopRequested = false;
+            state.running = true;
+            ui.startBtn.disabled = true;
+            ui.extractBtn.disabled = true;
+            ui.stopBtn.disabled = false;
+
+            for (const record of state.accounts) {
+                record.status = 'unqueried';
+                record.reason = '';
+                record.message = '';
+                record.attempts = 0;
+                record.usedPercent = null;
+                record.planType = '';
+            }
+            resetStatusSummary();
+            renderTable();
+            log(`开始查询。总数=${state.accounts.length}，并发=${concurrency}，重试=${retries}，超时=${timeoutMs}毫秒`);
+            try {
+                const endpointUrl = new URL(endpoint, window.location.href);
+                if (endpointUrl.origin !== window.location.origin) {
+                    log(`提示：当前接口与页面不同源（${endpointUrl.origin}）。浏览器会先发跨域预检，若目标不允许授权请求头，则会出现超时或被拦截。`);
+                }
+            } catch {
+                log('提示：额度查询接口 URL 不是标准地址，可能导致请求失败。');
+            }
+
+            let cursor = 0;
+            const total = state.accounts.length;
+
+            const worker = async (workerId) => {
+                while (true) {
+                    if (state.stopRequested) return;
+                    const idx = cursor;
+                    cursor += 1;
+                    if (idx >= total) return;
+
+                    const record = state.accounts[idx];
+                    applyStatusChange(record, 'querying', '');
+                    if (idx % 20 === 0) {
+                        renderCounts();
+                        renderTable();
+                    }
+
+                    const result = await queryRecordWithRetry(record, endpoint, retries, timeoutMs);
+                    record.attempts = result.attempts || 1;
+
+                    if (result.success) {
+                        record.planType = result.planType || '未知';
+                        record.usedPercent = result.usedPercent;
+                        record.message = '';
+                        applyStatusChange(record, 'valid', '');
+                    } else {
+                        record.planType = '';
+                        record.usedPercent = null;
+                        record.message = result.message || '';
+                        applyStatusChange(record, 'invalid', result.reason || 'unknown_error');
+                    }
+
+                    renderCounts();
+                    renderReasonChips();
+                    renderTable();
+                }
+            };
+
+            const workers = Array.from({ length: Math.min(concurrency, total) }, (_, i) => worker(i + 1));
+            await Promise.all(workers);
+
+            state.running = false;
+            ui.startBtn.disabled = false;
+            ui.extractBtn.disabled = false;
+            ui.stopBtn.disabled = true;
+
+            if (state.stopRequested) {
+                log('用户已停止查询。');
+            } else {
+                log(`查询完成。账号正常=${state.counts.valid}，账号异常=${state.counts.invalid}`);
+            }
+
+            renderCounts();
+            renderReasonChips();
+            renderTable();
+        }
+
+        function resetResultStatus() {
+            if (state.running) {
+                alert('请先停止查询再重置。');
+                return;
+            }
+            for (const record of state.accounts) {
+                record.status = 'unqueried';
+                record.reason = '';
+                record.message = '';
+                record.attempts = 0;
+                record.usedPercent = null;
+                record.planType = '';
+            }
+            resetStatusSummary();
+            renderTable();
+            log('结果状态已重置为未查询。');
+        }
+
+        ui.pickFilesBtn.addEventListener('click', () => ui.fileInput.click());
+        ui.pickFolderBtn.addEventListener('click', () => ui.folderInput.click());
+        ui.clearFilesBtn.addEventListener('click', clearFiles);
+
+        ui.fileInput.addEventListener('change', (event) => {
+            addFiles(event.target.files);
+            event.target.value = '';
+        });
+        ui.folderInput.addEventListener('change', (event) => {
+            addFiles(event.target.files);
+            event.target.value = '';
+        });
+
+        ui.extractBtn.addEventListener('click', extractAccounts);
+        ui.startBtn.addEventListener('click', startQuery);
+        ui.stopBtn.addEventListener('click', () => {
+            if (!state.running) return;
+            state.stopRequested = true;
+            ui.stopBtn.disabled = true;
+            log('已请求停止，等待当前请求处理完成...');
+        });
+        ui.resetResultBtn.addEventListener('click', resetResultStatus);
+
+        ui.statusFilter.addEventListener('change', () => {
+            state.statusFilter = ui.statusFilter.value;
+            state.page = 1;
+            renderTable();
+        });
+        ui.searchInput.addEventListener('input', () => {
+            state.searchText = ui.searchInput.value || '';
+            state.page = 1;
+            renderTable();
+        });
+
+        ui.prevPageBtn.addEventListener('click', () => {
+            state.page = Math.max(1, state.page - 1);
+            renderTable();
+        });
+        ui.nextPageBtn.addEventListener('click', () => {
+            state.page += 1;
+            renderTable();
+        });
+
+        renderSelectedFiles();
+        resetStatusSummary();
+        renderTable();
+        renderReasonChips();
+        log('准备就绪，请先选择 ZIP/JSON 文件或文件夹。');
+    </script>
+</body>
+</html>

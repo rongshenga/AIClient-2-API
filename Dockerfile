@@ -33,6 +33,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # 选择20-alpine版本以满足undici包的要求（需要Node.js >=20.18.1）
 FROM node:20-alpine
 
+ENV PNPM_HOME="/pnpm"
+ENV PATH="${PNPM_HOME}:${PATH}"
+
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
@@ -47,14 +50,17 @@ RUN apk add --no-cache tar git sqlite
 # 设置工作目录
 WORKDIR /app
 
-# 复制package.json和package-lock.json（如果存在）
-COPY package*.json ./
+# 启用 corepack，并使用仓库声明的 pnpm 版本
+RUN corepack enable
+
+# 复制 package.json 和 pnpm 锁文件
+COPY package.json pnpm-lock.yaml ./
 
 # 安装依赖
-# 使用--production标志只安装生产依赖，减小镜像大小
-# 使用--omit=dev来排除开发依赖
-RUN --mount=type=cache,target=/root/.npm \
-    npm install --omit=dev --no-audit --no-fund
+# 使用 --prod 只安装生产依赖，减小镜像大小
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+    pnpm config set store-dir /pnpm/store && \
+    pnpm install --prod --frozen-lockfile
 
 # 复制源代码
 COPY . .

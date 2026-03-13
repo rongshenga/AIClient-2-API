@@ -319,10 +319,16 @@ async function requestJson(url, options = {}) {
 function setUsageStatsLoading(loading) {
     usageStatsState.loading = loading;
     const loadingElement = byId('usageStatsLoading');
+    const shell = byId('usageStatsShell');
     const refreshBtn = byId('usageStatsRefreshBtn');
 
     if (loadingElement) {
-        loadingElement.style.display = loading ? 'flex' : 'none';
+        loadingElement.classList.toggle('active', loading);
+        loadingElement.setAttribute('aria-hidden', loading ? 'false' : 'true');
+    }
+
+    if (shell) {
+        shell.setAttribute('aria-busy', loading ? 'true' : 'false');
     }
 
     if (refreshBtn) {
@@ -527,32 +533,32 @@ function collectTrendTimeTicks(minMs, maxMs, bucket = usageStatsState.trendBucke
     }));
 }
 
-function formatTrendTickLabel(timeMs, bucket, previousMs = null) {
+function formatTrendTickLines(timeMs, bucket, index = 0) {
     const parsed = new Date(timeMs);
     if (Number.isNaN(parsed.getTime())) {
-        return '--';
+        return ['--'];
     }
 
+    const month = String(parsed.getMonth() + 1).padStart(2, '0');
+    const day = String(parsed.getDate()).padStart(2, '0');
+
     if (bucket === 'day') {
-        return formatDateShort(parsed);
+        return [`${month}-${day}`];
     }
 
     const hourText = `${String(parsed.getHours()).padStart(2, '0')}:00`;
-
-    if (!Number.isFinite(previousMs)) {
-        return `${formatDateShort(parsed)} ${hourText}`;
+    if (index > 0 && parsed.getHours() === 0) {
+        return [`${month}-${day}`, hourText];
     }
 
-    const previous = new Date(previousMs);
-    const isDifferentDay = previous.getFullYear() !== parsed.getFullYear()
-        || previous.getMonth() !== parsed.getMonth()
-        || previous.getDate() !== parsed.getDate();
-
-    return isDifferentDay ? `${formatDateShort(parsed)} ${hourText}` : hourText;
+    return [hourText];
 }
 
 function buildTrendChartSvg(points = [], config = {}) {
-    const chartWidth = 760;
+    const resolvedChartWidth = Number.parseFloat(config.chartWidth);
+    const chartWidth = Number.isFinite(resolvedChartWidth)
+        ? Math.max(420, Math.round(resolvedChartWidth))
+        : 760;
     const chartHeight = 220;
     const padding = {
         top: 16,
@@ -633,13 +639,22 @@ function buildTrendChartSvg(points = [], config = {}) {
     }).join('');
 
     const xTicks = collectTrendTimeTicks(minTimeMs, maxTimeMs, usageStatsState.trendBucket);
+    const xAxisDots = xTicks.map((tick) => {
+        const x = padding.left + (tick.ratio * plotWidth);
+        return `<circle class="usage-stats-line-axis-dot" cx="${x.toFixed(2)}" cy="${(padding.top + plotHeight).toFixed(2)}" r="2.6"></circle>`;
+    }).join('');
+
+    const xLabelBaseY = padding.top + plotHeight + 18;
     const xLabels = xTicks.map((tick, index) => {
         const x = padding.left + (tick.ratio * plotWidth);
-        const previousTick = index > 0 ? xTicks[index - 1].timeMs : null;
-        const label = formatTrendTickLabel(tick.timeMs, usageStatsState.trendBucket, previousTick);
+        const lines = formatTrendTickLines(tick.timeMs, usageStatsState.trendBucket, index);
         const anchor = index === 0 ? 'start' : index === xTicks.length - 1 ? 'end' : 'middle';
+        const tspans = lines.map((line, lineIndex) => {
+            const dy = lineIndex === 0 ? 0 : 10;
+            return `<tspan x="${x.toFixed(2)}" dy="${dy}">${escapeHtml(line)}</tspan>`;
+        }).join('');
 
-        return `<text class="usage-stats-axis-label" x="${x.toFixed(2)}" y="${(padding.top + plotHeight + 18).toFixed(2)}" text-anchor="${anchor}">${escapeHtml(label)}</text>`;
+        return `<text class="usage-stats-axis-label" x="${x.toFixed(2)}" y="${xLabelBaseY.toFixed(2)}" text-anchor="${anchor}">${tspans}</text>`;
     }).join('');
 
     const circles = coordinates.map((coordinate) => {
@@ -653,6 +668,7 @@ function buildTrendChartSvg(points = [], config = {}) {
         <svg class="usage-stats-line-svg" viewBox="0 0 ${chartWidth} ${chartHeight}" preserveAspectRatio="none" role="img" aria-label="${escapeAttribute(config.metricLabel)}趋势图">
             ${gridRows}
             <line class="usage-stats-line-axis" x1="${padding.left}" y1="${(padding.top + plotHeight).toFixed(2)}" x2="${(padding.left + plotWidth).toFixed(2)}" y2="${(padding.top + plotHeight).toFixed(2)}"></line>
+            ${xAxisDots}
             <path class="${config.areaClass}" d="${areaPath}"></path>
             <path class="${config.lineClass}" d="${linePath}"></path>
             ${circles}
@@ -681,7 +697,19 @@ function renderTrendCard(containerId, trends = {}, config = {}) {
         return;
     }
 
-    container.innerHTML = buildTrendChartSvg(displayPoints, config);
+    const containerRect = container.getBoundingClientRect();
+    const containerStyles = window.getComputedStyle(container);
+    const horizontalPadding = Number.parseFloat(containerStyles.paddingLeft || '0')
+        + Number.parseFloat(containerStyles.paddingRight || '0');
+    const computedChartWidth = containerRect.width - horizontalPadding;
+    const chartWidth = Number.isFinite(computedChartWidth)
+        ? Math.max(420, computedChartWidth)
+        : 760;
+
+    container.innerHTML = buildTrendChartSvg(displayPoints, {
+        ...config,
+        chartWidth
+    });
 }
 
 function renderTrendCharts(trends = {}) {

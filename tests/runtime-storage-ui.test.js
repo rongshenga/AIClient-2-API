@@ -33,6 +33,8 @@ function translate(key, params = {}) {
         'modal.provider.lastCheck': 'Last Check',
         'modal.provider.checkModel': 'Check Model',
         'modal.provider.statusLabel': 'Status',
+        'pagination.showing': `显示 ${params.start || ''}-${params.end || ''} / 共 ${params.total || ''} 条`,
+        'pagination.showingCompact': `${params.start || ''}-${params.end || ''} / ${params.total || ''}`,
         'common.success': '成功',
         'common.error': '错误'
     };
@@ -587,6 +589,7 @@ describe('Provider modal runtime storage interactions', () => {
         const rawListHtml = renderProviderList([providers[1]]);
         const firstPagePagination = renderPagination(1, 2, 6, 'top');
         const lastPagePagination = renderPagination(2, 2, 6, 'bottom');
+        const inlinePagination = renderPagination(1, 2, 6, 'inline');
 
         expect(firstPageHtml).toContain('provider-1');
         expect(firstPageHtml).not.toContain('provider-6');
@@ -597,7 +600,53 @@ describe('Provider modal runtime storage interactions', () => {
         expect(rawListHtml).not.toContain('undefined');
         expect(firstPagePagination).toContain('disabled');
         expect(lastPagePagination).toContain('disabled');
+        expect((firstPagePagination.match(/nav-btn/g) || [])).toHaveLength(2);
+        expect(firstPagePagination).toContain('page-current');
+        expect(firstPagePagination).not.toContain('page-ellipsis');
         expect(firstPagePagination).toContain('显示 1-5 / 共 6 条');
         expect(lastPagePagination).toContain('显示 6-6 / 共 6 条');
+        expect(inlinePagination).toContain('data-i18n="pagination.showingCompact"');
+        expect(inlinePagination).toContain('title="显示 1-5 / 共 6 条"');
+        expect(inlinePagination).toContain('>1-5 / 6<');
+    });
+
+    test('should render a single pagination block in provider manager modal', async () => {
+        const { showProviderManagerModal } = await importModalModule();
+        const modal = createFakeElement();
+        const modalContent = createFakeElement();
+
+        modal.querySelector = jest.fn((selector) => {
+            if (selector === '.provider-modal-content') {
+                return modalContent;
+            }
+            return null;
+        });
+        modal.querySelectorAll = jest.fn(() => []);
+        modal.addEventListener = jest.fn();
+        modal.removeEventListener = jest.fn();
+
+        global.document = {
+            querySelector: jest.fn(() => null),
+            createElement: jest.fn(() => modal),
+            body: {
+                appendChild: jest.fn()
+            },
+            addEventListener: jest.fn(),
+            removeEventListener: jest.fn()
+        };
+
+        showProviderManagerModal({
+            providerType: 'grok-custom',
+            page: 1,
+            totalPages: 3,
+            filteredCount: 15,
+            totalCount: 15,
+            healthyCount: 12,
+            providers: []
+        });
+
+        expect((modal.innerHTML.match(/pagination-container/g) || [])).toHaveLength(1);
+        expect(modal.innerHTML).toContain('pagination-container inline');
+        expect(modal.innerHTML).not.toContain('pagination-container bottom');
     });
 });

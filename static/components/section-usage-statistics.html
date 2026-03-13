@@ -2,7 +2,13 @@
 <section id="usage-statistics" class="section" aria-labelledby="usage-statistics-title">
     <h2 id="usage-statistics-title">使用统计</h2>
 
-    <div class="usage-stats-shell">
+    <div class="usage-stats-shell" id="usageStatsShell">
+        <div id="usageStatsLoading" class="usage-stats-loading-overlay" aria-hidden="true">
+            <div class="usage-stats-loading-card" role="status" aria-live="polite">
+                <i class="fas fa-spinner fa-spin" aria-hidden="true"></i>
+                <span>正在加载使用统计...</span>
+            </div>
+        </div>
         <div class="usage-stats-toolbar">
             <div class="usage-stats-toolbar-group">
                 <label for="usageStatsRange">时间范围</label>
@@ -35,18 +41,15 @@
 
             <div class="usage-stats-toolbar-actions">
                 <button type="button" id="usageStatsRefreshBtn" class="btn-usage-stats btn-icon" title="刷新数据" aria-label="刷新数据">
-                    <i class="fas fa-rotate-right" aria-hidden="true"></i>
+                    <svg class="usage-stats-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                        <path d="M16.667 10a6.667 6.667 0 1 1-1.953-4.714" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                        <path d="M16.667 3.333v3.334h-3.334" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path>
+                    </svg>
                 </button>
                 <button type="button" id="usageStatsExportCsvBtn" class="btn-usage-stats">导出 CSV</button>
                 <button type="button" id="usageStatsExportJsonBtn" class="btn-usage-stats">导出 JSON</button>
             </div>
         </div>
-
-        <div id="usageStatsLoading" class="usage-stats-loading" style="display:none;">
-            <i class="fas fa-spinner fa-spin"></i>
-            <span>正在加载使用统计...</span>
-        </div>
-
         <div id="usageStatsError" class="usage-stats-error" style="display:none;"></div>
 
         <div class="usage-stats-meta">
@@ -66,19 +69,6 @@
                 </div>
             </header>
             <div id="usageStatsHealthHeatmap" class="usage-stats-health-heatmap"></div>
-            <div class="usage-stats-heatmap-footer">
-                <div class="usage-stats-health-legend" aria-hidden="true">
-                    <span class="usage-stats-health-legend-label">最早</span>
-                    <div class="usage-stats-health-legend-scale">
-                        <span class="level-0"></span>
-                        <span class="level-1"></span>
-                        <span class="level-2"></span>
-                        <span class="level-3"></span>
-                        <span class="level-4"></span>
-                    </div>
-                    <span class="usage-stats-health-legend-label">最新</span>
-                </div>
-            </div>
         </article>
 
         <div class="usage-stats-grid usage-stats-grid--trends">

@@ -208,6 +208,28 @@ function updateProviderErrorTypeFilterState(modal) {
 }
 
 /**
+ * 同步分页控件，确保模态框内只保留一个分页区域
+ * @param {HTMLElement} modal - 模态框元素
+ * @param {number} totalPages - 总页数
+ */
+function syncProviderPagination(modal, totalPages) {
+    if (!modal) return;
+
+    const paginationSlot = modal.querySelector('.provider-filter-pagination-slot');
+    if (!paginationSlot) {
+        return;
+    }
+
+    paginationSlot.innerHTML = renderPagination(
+        currentPage,
+        totalPages,
+        currentFilteredCount,
+        'inline',
+        { showControls: totalPages > 1 }
+    );
+}
+
+/**
  * 渲染当前筛选结果对应的列表和分页
  * @param {HTMLElement} modal - 模态框元素
  * @param {Object} options - 渲染选项
@@ -233,24 +255,7 @@ function renderProviderListWithPagination(modal, { scrollToTop = false } = {}) {
         providerList.innerHTML = renderProviderList(currentProviders);
     }
 
-    const shouldShowPagination = totalPages > 1;
-    const paginationContainers = modal.querySelectorAll('.pagination-container');
-    if (shouldShowPagination) {
-        paginationContainers.forEach(container => {
-            const position = container.getAttribute('data-position');
-            container.outerHTML = renderPagination(currentPage, totalPages, currentFilteredCount, position);
-        });
-
-        if (paginationContainers.length === 0) {
-            const providerListEl = modal.querySelector('.provider-list');
-            if (providerListEl) {
-                providerListEl.insertAdjacentHTML('beforebegin', renderPagination(currentPage, totalPages, currentFilteredCount, 'top'));
-                providerListEl.insertAdjacentHTML('afterend', renderPagination(currentPage, totalPages, currentFilteredCount, 'bottom'));
-            }
-        }
-    } else {
-        paginationContainers.forEach(container => container.remove());
-    }
+    syncProviderPagination(modal, totalPages);
 
     if (scrollToTop) {
         const modalBody = modal.querySelector('.provider-modal-body');
@@ -379,7 +384,11 @@ function showProviderManagerModal(data) {
                 </div>
 
                 <div class="provider-filter-bar">
-                    <span class="provider-filter-label" data-i18n="modal.provider.filter.label">${t('modal.provider.filter.label')}</span>
+                    <div class="provider-filter-pagination">
+                        <div class="provider-filter-pagination-slot">
+                            ${renderPagination(currentPage, totalPages, currentFilteredCount, 'inline', { showControls: totalPages > 1 })}
+                        </div>
+                    </div>
                     <div class="provider-filter-actions">
                         <label class="provider-filter-select">
                             <span data-i18n="modal.provider.filter.errorType">${t('modal.provider.filter.errorType')}</span>
@@ -404,14 +413,9 @@ function showProviderManagerModal(data) {
                         </button>
                     </div>
                 </div>
-                
-                ${totalPages > 1 ? renderPagination(currentPage, totalPages, currentFilteredCount) : ''}
-                
                 <div class="provider-list" id="providerList">
                     ${renderProviderList(currentProviders)}
                 </div>
-                
-                ${totalPages > 1 ? renderPagination(currentPage, totalPages, currentFilteredCount, 'bottom') : ''}
             </div>
         </div>
     `;
@@ -439,59 +443,56 @@ function showProviderManagerModal(data) {
  * @param {string} position - 位置标识 (top/bottom)
  * @returns {string} HTML字符串
  */
-function renderPagination(page, totalPages, totalItems, position = 'top') {
-    const startItem = (page - 1) * PROVIDERS_PER_PAGE + 1;
-    const endItem = Math.min(page * PROVIDERS_PER_PAGE, totalItems);
-    
-    // 生成页码按钮
-    let pageButtons = '';
-    const maxVisiblePages = 5;
-    let startPage = Math.max(1, page - Math.floor(maxVisiblePages / 2));
-    let endPage = Math.min(totalPages, startPage + maxVisiblePages - 1);
-    
-    if (endPage - startPage < maxVisiblePages - 1) {
-        startPage = Math.max(1, endPage - maxVisiblePages + 1);
-    }
-    
-    if (startPage > 1) {
-        pageButtons += `<button class="page-btn" onclick="window.goToProviderPage(1)">1</button>`;
-        if (startPage > 2) {
-            pageButtons += `<span class="page-ellipsis">...</span>`;
-        }
-    }
-    
-    for (let i = startPage; i <= endPage; i++) {
-        pageButtons += `<button class="page-btn ${i === page ? 'active' : ''}" onclick="window.goToProviderPage(${i})">${i}</button>`;
-    }
-    
-    if (endPage < totalPages) {
-        if (endPage < totalPages - 1) {
-            pageButtons += `<span class="page-ellipsis">...</span>`;
-        }
-        pageButtons += `<button class="page-btn" onclick="window.goToProviderPage(${totalPages})">${totalPages}</button>`;
-    }
+function renderPagination(page, totalPages, totalItems, position = 'top', options = {}) {
+    const resolvedTotalPages = Math.max(1, Number(totalPages) || 1);
+    const resolvedPage = Math.min(Math.max(1, normalizePage(page, 1)), resolvedTotalPages);
+    const resolvedTotalItems = Math.max(0, Number(totalItems) || 0);
+    const showControls = options.showControls ?? true;
+    const startItem = resolvedTotalItems === 0 ? 0 : (resolvedPage - 1) * PROVIDERS_PER_PAGE + 1;
+    const endItem = resolvedTotalItems === 0 ? 0 : Math.min(resolvedPage * PROVIDERS_PER_PAGE, resolvedTotalItems);
+    const isInline = position === 'inline';
+    const infoParams = {
+        start: String(startItem),
+        end: String(endItem),
+        total: String(resolvedTotalItems)
+    };
+    const infoParamsJson = JSON.stringify(infoParams);
+    const infoKey = isInline ? 'pagination.showingCompact' : 'pagination.showing';
+    const infoText = t(infoKey, infoParams);
+    const infoTitle = isInline ? t('pagination.showing', infoParams) : '';
+    const infoTitleAttrs = isInline
+        ? ` data-i18n-title="pagination.showing" data-i18n-title-params='${infoParamsJson}' title="${infoTitle}"`
+        : '';
     
     return `
         <div class="pagination-container ${position}" data-position="${position}">
             <div class="pagination-info">
-                <span data-i18n="pagination.showing" data-i18n-params='{"start":"${startItem}","end":"${endItem}","total":"${totalItems}"}'>显示 ${startItem}-${endItem} / 共 ${totalItems} 条</span>
+                <span data-i18n="${infoKey}" data-i18n-params='${infoParamsJson}'${infoTitleAttrs}>${infoText}</span>
             </div>
+            ${showControls ? `
             <div class="pagination-controls">
-                <button class="page-btn nav-btn" onclick="window.goToProviderPage(${page - 1})" ${page <= 1 ? 'disabled' : ''}>
+                <button type="button" class="page-btn nav-btn" aria-label="Previous page" onclick="window.goToProviderPage(${resolvedPage - 1})" ${resolvedPage <= 1 ? 'disabled' : ''}>
                     <i class="fas fa-chevron-left"></i>
                 </button>
-                ${pageButtons}
-                <button class="page-btn nav-btn" onclick="window.goToProviderPage(${page + 1})" ${page >= totalPages ? 'disabled' : ''}>
+                <span class="page-current" aria-live="polite">
+                    <span class="page-current-value">${resolvedPage}</span>
+                    <span class="page-current-separator">/</span>
+                    <span class="page-current-total">${resolvedTotalPages}</span>
+                </span>
+                <button type="button" class="page-btn nav-btn" aria-label="Next page" onclick="window.goToProviderPage(${resolvedPage + 1})" ${resolvedPage >= resolvedTotalPages ? 'disabled' : ''}>
                     <i class="fas fa-chevron-right"></i>
                 </button>
-            </div>
+            </div>` : ''}
+            ${showControls ? `
             <div class="pagination-jump">
                 <span data-i18n="pagination.jumpTo">跳转到</span>
-                <input type="number" min="1" max="${totalPages}" value="${page}"
+                <input type="number" min="1" max="${resolvedTotalPages}" value="${resolvedPage}"
+                       inputmode="numeric"
+                       aria-label="Jump to page"
                        onkeypress="if(event.key==='Enter')window.goToProviderPage(parseInt(this.value))"
                        class="page-jump-input">
                 <span data-i18n="pagination.page">页</span>
-            </div>
+            </div>` : ''}
         </div>
     `;
 }

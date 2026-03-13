@@ -26,7 +26,7 @@
 统一入口：
 
 ```bash
-npm run runtime-storage:admin -- <command>
+pnpm run runtime-storage:admin -- <command>
 ```
 
 常用命令：
@@ -43,8 +43,8 @@ npm run runtime-storage:admin -- <command>
 推荐流程：
 
 ```bash
-npm run runtime-storage:admin -- migrate
-npm run runtime-storage:admin -- migrate --execute
-npm run runtime-storage:admin -- verify --fail-on-diff
-npm run runtime-storage:admin -- verify-auth
+pnpm run runtime-storage:admin -- migrate
+pnpm run runtime-storage:admin -- migrate --execute
+pnpm run runtime-storage:admin -- verify --fail-on-diff
+pnpm run runtime-storage:admin -- verify-auth
 ```

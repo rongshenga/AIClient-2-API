@@ -541,6 +541,7 @@ const translations = {
         
         // Pagination
         'pagination.showing': '显示 {start}-{end} / 共 {total} 条',
+        'pagination.showingCompact': '{start}-{end} / {total}',
         'pagination.jumpTo': '跳转到',
         'pagination.page': '页',
         
