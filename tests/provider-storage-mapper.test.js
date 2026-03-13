@@ -1,5 +1,6 @@
 import {
     buildCredentialAssetRecord,
+    buildStableProviderId,
     buildProviderPoolsSnapshot,
     extractCredentialPathEntries,
     isCredentialPathField,
@@ -170,7 +171,9 @@ describe('provider-storage-mapper', () => {
             credentialBindings: [
                 {
                     filePath: 'configs/codex/oauth.json',
-                    credentialAssetId: 'cred_1'
+                    credentialAssetId: 'cred_1',
+                    email: 'identity@example.com',
+                    accountId: 'acct-1'
                 }
             ]
         });
@@ -182,6 +185,8 @@ describe('provider-storage-mapper', () => {
             PROJECT_ID: 'project-1',
             OPENAI_API_KEY: '{not-json',
             CODEX_OAUTH_CREDS_FILE_PATH: './configs/codex/oauth.json',
+            email: 'identity@example.com',
+            accountId: 'acct-1',
             isHealthy: false,
             isDisabled: true,
             usageCount: 12,
@@ -226,7 +231,9 @@ describe('provider-storage-mapper', () => {
                 {
                     provider_id: 'prov_b',
                     file_path: 'configs/codex/oauth.json',
-                    credential_asset_id: 'cred_b'
+                    credential_asset_id: 'cred_b',
+                    email: 'codex@example.com',
+                    account_id: 'acct-codex'
                 }
             ]
         );
@@ -242,8 +249,25 @@ describe('provider-storage-mapper', () => {
             uuid: 'uuid-b',
             customName: 'Codex B',
             CODEX_OAUTH_CREDS_FILE_PATH: './configs/codex/oauth.json',
+            email: 'codex@example.com',
+            accountId: 'acct-codex',
             isHealthy: false
         });
+    });
+
+    test('should keep stable provider id when derived identity metadata appears in snapshot payload', () => {
+        const baseProvider = {
+            uuid: 'codex-1',
+            customName: 'Codex One',
+            CODEX_OAUTH_CREDS_FILE_PATH: './configs/codex/account.json',
+            CODEX_BASE_URL: 'https://api.example.com'
+        };
+
+        expect(buildStableProviderId('openai-codex-oauth', {
+            ...baseProvider,
+            email: 'identity@example.com',
+            accountId: 'acct-1'
+        })).toBe(buildStableProviderId('openai-codex-oauth', baseProvider));
     });
 
     test('should expose credential path and secret field helpers', () => {

@@ -31,6 +31,11 @@ const TRANSIENT_RUNTIME_FIELDS = new Set([
     'needsRefresh'
 ]);
 
+const DERIVED_PROVIDER_METADATA_FIELDS = new Set([
+    'email',
+    'accountId'
+]);
+
 function sortObject(value) {
     if (Array.isArray(value)) {
         return value.map((item) => sortObject(item));
@@ -448,6 +453,9 @@ function buildStableProviderIdentitySource(providerConfig = {}) {
         if (key.startsWith('__')) {
             continue;
         }
+        if (DERIVED_PROVIDER_METADATA_FIELDS.has(key)) {
+            continue;
+        }
         if (Object.prototype.hasOwnProperty.call(RUNTIME_FIELD_MAP, key)) {
             continue;
         }
@@ -545,6 +553,9 @@ export function splitProviderConfig(providerType, providerConfig = {}) {
         if (key === 'uuid' || key === 'customName' || key === 'checkModelName') {
             continue;
         }
+        if (DERIVED_PROVIDER_METADATA_FIELDS.has(key)) {
+            continue;
+        }
         if (Object.prototype.hasOwnProperty.call(RUNTIME_FIELD_MAP, key)) {
             continue;
         }
@@ -634,6 +645,16 @@ export function mergeProviderRecord({ registration, runtimeState, inlineSecrets 
         config[credentialPathKey] = formatSystemPath(activeBinding.filePath);
     }
 
+    const resolvedEmail = normalizeEmail(activeBinding?.email) || normalizeEmail(config.email);
+    const resolvedAccountId = normalizeNullableString(activeBinding?.accountId || activeBinding?.account_id)
+        || normalizeNullableString(config.accountId || config.account_id);
+    if (resolvedEmail) {
+        config.email = resolvedEmail;
+    }
+    if (resolvedAccountId) {
+        config.accountId = resolvedAccountId;
+    }
+
     const runtimeSource = runtimeState || {};
     config.isHealthy = runtimeSource.is_healthy !== undefined && runtimeSource.is_healthy !== null
         ? Boolean(runtimeSource.is_healthy)
@@ -686,7 +707,9 @@ export function buildProviderPoolsSnapshot(rows = [], secretRows = [], credentia
         }
         credentialsByProvider.get(providerId).push({
             filePath: normalizeStoredPath(credential.file_path || credential.filePath || credential.source_path || credential.sourcePath),
-            credentialAssetId: credential.credential_asset_id || credential.credentialAssetId || null
+            credentialAssetId: credential.credential_asset_id || credential.credentialAssetId || null,
+            email: normalizeEmail(credential.email),
+            accountId: normalizeNullableString(credential.account_id || credential.accountId)
         });
     }
 

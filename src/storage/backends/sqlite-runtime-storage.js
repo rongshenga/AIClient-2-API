@@ -2267,6 +2267,8 @@ SELECT
     b.binding_target_id AS provider_id,
     b.credential_asset_id,
     COALESCE(fi.file_path, a.source_path) AS file_path,
+    a.email,
+    a.account_id,
     a.source_path
 FROM credential_bindings b
 JOIN credential_assets a
@@ -2372,6 +2374,8 @@ SELECT
     b.binding_target_id AS provider_id,
     b.credential_asset_id,
     COALESCE(fi.file_path, a.source_path) AS file_path,
+    a.email,
+    a.account_id,
     a.source_path
 FROM credential_bindings b
 JOIN credential_assets a

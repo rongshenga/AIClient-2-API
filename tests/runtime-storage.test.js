@@ -364,6 +364,46 @@ describe('Runtime storage foundation', () => {
         });
     });
 
+    test('should expose credential identity metadata on auto-linked codex providers', async () => {
+        const tempDir = await createTempDir('runtime-storage-codex-link-');
+        const dbPath = path.join(tempDir, 'runtime.sqlite');
+
+        await fs.mkdir(path.join(tempDir, 'configs', 'codex'), { recursive: true });
+        await fs.writeFile(path.join(tempDir, 'configs', 'codex', 'account.json'), JSON.stringify({
+            access_token: 'access-token',
+            refresh_token: 'refresh-token',
+            email: 'identity@example.com',
+            account_id: 'acct-codex-1'
+        }, null, 2), 'utf8');
+
+        await withWorkingDirectory(tempDir, async () => {
+            const storage = createRuntimeStorage({
+                RUNTIME_STORAGE_BACKEND: 'db',
+                RUNTIME_STORAGE_DB_PATH: dbPath,
+                PROVIDER_POOLS_FILE_PATH: path.join(tempDir, 'provider_pools.json')
+            });
+
+            await storage.initialize();
+            const result = await storage.linkCredentialFiles([
+                'configs/codex/account.json'
+            ]);
+
+            expect(result.totalNewProviders).toBe(1);
+            expect(result.providerPools['openai-codex-oauth']).toHaveLength(1);
+            expect(result.providerPools['openai-codex-oauth'][0]).toMatchObject({
+                CODEX_OAUTH_CREDS_FILE_PATH: './configs/codex/account.json',
+                email: 'identity@example.com',
+                accountId: 'acct-codex-1'
+            });
+
+            const exportedSnapshot = await storage.exportProviderPoolsSnapshot();
+            expect(exportedSnapshot['openai-codex-oauth'][0]).toMatchObject({
+                email: 'identity@example.com',
+                accountId: 'acct-codex-1'
+            });
+        });
+    });
+
     test('should keep stable provider id when uuid and runtime fields change', () => {
         const baseProvider = {
             uuid: 'grok-1',
