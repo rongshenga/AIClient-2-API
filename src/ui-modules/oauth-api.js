@@ -1,5 +1,7 @@
 import { getRequestBody } from '../utils/common.js';
 import logger from '../utils/logger.js';
+import fs from 'fs';
+import path from 'path';
 import {
     handleGeminiCliOAuth,
     handleGeminiAntigravityOAuth,
@@ -394,6 +396,7 @@ export async function handleBatchImportCodexTokens(req, res) {
         const body = await getRequestBody(req);
         const {
             tokens,
+            rawTokens,
             skipDuplicateCheck,
             concurrency,
             refreshAfterImport,
@@ -450,6 +453,7 @@ export async function handleBatchImportCodexTokens(req, res) {
                 concurrency,
                 refreshAfterImport: refreshAfterImport === true,
                 refreshConcurrency,
+                rawTokens,
                 includeDetails: false
             },
             (progress) => {
@@ -510,6 +514,86 @@ export async function handleBatchImportCodexTokens(req, res) {
                 error: error.message
             }));
         }
+        return true;
+    }
+}
+
+/**
+ * 导出 Codex 凭据（优先导出原始导入内容，确保格式一致）
+ */
+export async function handleExportCodexToken(req, res) {
+    try {
+        const requestUrl = new URL(req.url, 'http://127.0.0.1');
+        const requestedPath = requestUrl.searchParams.get('path');
+
+        if (!requestedPath) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: false,
+                error: 'path is required'
+            }));
+            return true;
+        }
+
+        const normalizedRequestedPath = String(requestedPath).replace(/\\/g, '/');
+        if (normalizedRequestedPath.startsWith('/') || normalizedRequestedPath.includes('\0')) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: false,
+                error: 'invalid path'
+            }));
+            return true;
+        }
+
+        const projectDir = process.cwd();
+        const codexDir = path.resolve(projectDir, 'configs', 'codex');
+        const resolvedCredPath = path.resolve(projectDir, normalizedRequestedPath);
+
+        const withinCodexDir = resolvedCredPath === codexDir
+            || resolvedCredPath.startsWith(codexDir + path.sep);
+        if (!withinCodexDir || !resolvedCredPath.endsWith('.json')) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: false,
+                error: 'forbidden'
+            }));
+            return true;
+        }
+
+        const filename = path.basename(resolvedCredPath).replace(/"/g, '_');
+
+        let payloadPath = resolvedCredPath;
+        const candidateSourcePaths = [
+            `${resolvedCredPath}.raw`,
+            path.resolve(projectDir, 'configs', 'codex-sources', filename), // legacy intermediate path
+            path.join(codexDir, 'sources', filename) // legacy path
+        ];
+
+        for (const candidate of candidateSourcePaths) {
+            try {
+                await fs.promises.access(candidate, fs.constants.R_OK);
+                payloadPath = candidate;
+                break;
+            } catch {
+                // continue
+            }
+        }
+
+        const content = await fs.promises.readFile(payloadPath);
+        res.writeHead(200, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Content-Disposition': `attachment; filename="${filename}"`,
+            'Cache-Control': 'no-store'
+        });
+        res.end(content);
+        return true;
+    } catch (error) {
+        logger.error('[Codex Export] Error:', error);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: false,
+            error: error.message
+        }));
         return true;
     }
 }

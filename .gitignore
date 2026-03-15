@@ -4,6 +4,7 @@ node_modules
 CLAUDE.md
 .DS_Store
 **/.DS_Store
+.vscode/
 config.json
 provider_pools.json
 plugins.json
@@ -28,5 +29,6 @@ tls-sidecar/tls-sidecar.exe
 
 configs/config.json
 configs/runtime/
+configs/_backup/
 openspec/
 .gemini-clipboard/

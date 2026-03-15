@@ -829,17 +829,20 @@ function extractCodexCredentialPayload(rawToken) {
  */
 function normalizeImportedCodexToken(rawToken) {
     if (!rawToken || typeof rawToken !== 'object' || Array.isArray(rawToken)) {
-        throw new Error('Token 必须是 JSON 对象');
+        throw new Error('Token must be a JSON object');
     }
 
     const payload = extractCodexCredentialPayload(rawToken);
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw new Error('Token payload must be a JSON object');
+    }
 
     const idToken = payload.id_token || rawToken.id_token || '';
     const accessToken = payload.access_token || rawToken.access_token || '';
     const refreshToken = payload.refresh_token || rawToken.refresh_token || '';
 
     if (!accessToken) {
-        throw new Error('Token 缺少必需字段 access_token');
+        throw new Error('Token missing required field: access_token');
     }
 
     const idClaims = parseJwtPayloadSafe(idToken);
@@ -882,17 +885,38 @@ function normalizeImportedCodexToken(rawToken) {
         || toExpiryIsoString(idClaims?.exp)
         || new Date(Date.now() + 3600 * 1000).toISOString();
 
-    return {
-        id_token: idToken,
-        access_token: accessToken,
-        refresh_token: refreshToken || undefined,
-        account_id: accountId || undefined,
-        last_refresh: payload.last_refresh || rawToken.last_refresh || new Date().toISOString(),
-        email: email || undefined,
-        type: 'codex',
-        expired,
-        session_id: payload.session_id || rawToken.session_id || undefined
-    };
+    // 以 rawToken 为基础，完整保留导入 JSON 的所有字段；仅补齐/规范化运行所需字段
+    const normalized = { ...rawToken };
+
+    if (typeof normalized.id_token !== 'string' || normalized.id_token.length === 0) {
+        normalized.id_token = idToken;
+    }
+    if (typeof normalized.access_token !== 'string' || normalized.access_token.length === 0) {
+        normalized.access_token = accessToken;
+    }
+    if (refreshToken && (typeof normalized.refresh_token !== 'string' || normalized.refresh_token.length === 0)) {
+        normalized.refresh_token = refreshToken;
+    }
+    if ((!normalized.account_id || typeof normalized.account_id !== 'string') && accountId) {
+        normalized.account_id = accountId;
+    }
+    if ((!normalized.email || typeof normalized.email !== 'string') && email) {
+        normalized.email = email;
+    }
+    if (!normalized.expired && expired) {
+        normalized.expired = expired;
+    }
+    if (!normalized.last_refresh) {
+        normalized.last_refresh = payload.last_refresh || rawToken.last_refresh || new Date().toISOString();
+    }
+    if (!normalized.type) {
+        normalized.type = 'codex';
+    }
+    if (!normalized.session_id) {
+        normalized.session_id = payload.session_id || rawToken.session_id || undefined;
+    }
+
+    return normalized;
 }
 
 /**
@@ -1086,6 +1110,7 @@ export async function batchImportCodexTokensStream(tokens, options = {}, onProgr
         MAX_CODEX_REFRESH_CONCURRENCY
     );
     const includeDetails = options.includeDetails !== false;
+    const rawTokens = Array.isArray(options.rawTokens) ? options.rawTokens : null;
 
     const targetDir = path.join(process.cwd(), 'configs', 'codex');
     await fs.promises.mkdir(targetDir, { recursive: true });
@@ -1133,6 +1158,7 @@ export async function batchImportCodexTokensStream(tokens, options = {}, onProgr
 
     await runWithConcurrency(tokens.length, importConcurrency, async (index) => {
         const rawToken = tokens[index];
+        const rawSource = rawTokens?.[index];
         let reservedRefreshHash = null;
         let reservedIdentityKey = null;
 
@@ -1243,6 +1269,9 @@ export async function batchImportCodexTokensStream(tokens, options = {}, onProgr
             const filename = `${Date.now()}_${index}_${crypto.randomBytes(3).toString('hex')}_codex-${safeEmail}.json`;
             const credPath = path.join(targetDir, filename);
             await fs.promises.writeFile(credPath, JSON.stringify(normalized, null, 2), { mode: 0o600 });
+            if (typeof rawSource === 'string' && rawSource.length > 0) {
+                await fs.promises.writeFile(`${credPath}.raw`, rawSource, { mode: 0o600 });
+            }
 
             const relativePath = path.relative(process.cwd(), credPath);
             importedCredPaths.push(relativePath);

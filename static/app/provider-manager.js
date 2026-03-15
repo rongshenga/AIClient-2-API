@@ -1564,6 +1564,7 @@ function showCodexBatchImportModal(providerType = 'openai-codex-oauth') {
 
     let currentMode = 'json';
     let folderTokens = [];
+    let folderRawTokens = [];
     let selectedFiles = [];
     let submitActsAsClose = false;
     const CODEX_PROGRESS_UPDATE_STEP = 20;
@@ -1629,6 +1630,7 @@ function showCodexBatchImportModal(providerType = 'openai-codex-oauth') {
         const files = Array.from(fileList || []).filter(file => file.name.toLowerCase().endsWith('.json'));
         if (files.length === 0) {
             folderTokens = [];
+            folderRawTokens = [];
             selectedFiles = [];
             renderSelectedFiles();
             if (currentMode === 'folder') updateStats(0);
@@ -1637,6 +1639,7 @@ function showCodexBatchImportModal(providerType = 'openai-codex-oauth') {
         }
 
         const parsedTokens = [];
+        const parsedRawTokens = [];
         const parsedFiles = [];
         const parseErrors = [];
         const parseConcurrency = 20;
@@ -1654,6 +1657,7 @@ function showCodexBatchImportModal(providerType = 'openai-codex-oauth') {
                     return {
                         success: true,
                         tokens: objects,
+                        raw: objects.length === 1 && data && typeof data === 'object' && !Array.isArray(data) ? fileContent : null,
                         path: file.webkitRelativePath || file.name
                     };
                 } catch (error) {
@@ -1668,6 +1672,9 @@ function showCodexBatchImportModal(providerType = 'openai-codex-oauth') {
             for (const item of batchResults) {
                 if (item.success) {
                     parsedTokens.push(...item.tokens);
+                    for (let i = 0; i < item.tokens.length; i++) {
+                        parsedRawTokens.push(i === 0 ? item.raw : null);
+                    }
                     parsedFiles.push({
                         path: item.path,
                         tokenCount: item.tokens.length
@@ -1685,6 +1692,7 @@ function showCodexBatchImportModal(providerType = 'openai-codex-oauth') {
         }
 
         folderTokens = parsedTokens;
+        folderRawTokens = parsedRawTokens;
         selectedFiles = parsedFiles;
         renderSelectedFiles();
         if (currentMode === 'folder') {
@@ -1770,6 +1778,7 @@ function showCodexBatchImportModal(providerType = 'openai-codex-oauth') {
 
     clearFilesBtn.addEventListener('click', () => {
         folderTokens = [];
+        folderRawTokens = [];
         selectedFiles = [];
         folderInput.value = '';
         renderSelectedFiles();
@@ -1793,8 +1802,22 @@ function showCodexBatchImportModal(providerType = 'openai-codex-oauth') {
         }
 
         let tokens = [];
+        let rawTokens = null;
         try {
-            tokens = currentMode === 'folder' ? folderTokens : parseTokensFromTextarea();
+            if (currentMode === 'folder') {
+                tokens = folderTokens;
+                rawTokens = folderRawTokens;
+            } else {
+                tokens = parseTokensFromTextarea();
+                const rawText = textarea.value;
+                const hasRawText = typeof rawText === 'string' && rawText.trim().length > 0;
+                if (hasRawText && tokens.length === 1) {
+                    const parsed = JSON.parse(rawText);
+                    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                        rawTokens = [rawText];
+                    }
+                }
+            }
         } catch (error) {
             showToast(t('common.error'), error.message, 'error');
             return;
@@ -1870,15 +1893,75 @@ function showCodexBatchImportModal(providerType = 'openai-codex-oauth') {
             resultsList.style.display = 'none';
         }
 
+        const parseContentDispositionFilename = (headerValue) => {
+            if (!headerValue || typeof headerValue !== 'string') return null;
+            const matchStar = headerValue.match(/filename\\*=UTF-8''([^;]+)/i);
+            if (matchStar && matchStar[1]) {
+                try {
+                    return decodeURIComponent(matchStar[1].trim());
+                } catch {
+                    return matchStar[1].trim();
+                }
+            }
+            const match = headerValue.match(/filename=\"?([^\";]+)\"?/i);
+            return match && match[1] ? match[1].trim() : null;
+        };
+
+        const downloadCodexCredential = async (credPath) => {
+            if (!credPath) return;
+            const response = await fetch(`/api/codex/export-token?path=${encodeURIComponent(credPath)}`, {
+                headers: window.apiClient ? window.apiClient.getAuthHeaders() : undefined
+            });
+            if (!response.ok) {
+                const text = await response.text();
+                throw new Error(text || `HTTP ${response.status}`);
+            }
+            const blob = await response.blob();
+            const disposition = response.headers.get('Content-Disposition') || response.headers.get('content-disposition');
+            const filenameFromHeader = parseContentDispositionFilename(disposition);
+            const fallbackName = (credPath.split('/').pop() || 'codex-credential.json').replace(/\\s+/g, '_');
+            const downloadName = filenameFromHeader || fallbackName;
+
+            const url = URL.createObjectURL(blob);
+            try {
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = downloadName;
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+            } finally {
+                URL.revokeObjectURL(url);
+            }
+        };
+
         const appendResultItem = (current) => {
             if (!enableDetailedRows || !current) return;
             const item = document.createElement('div');
             item.style.cssText = 'padding: 4px 0; border-bottom: 1px solid rgba(0,0,0,0.08);';
             if (current.success) {
                 const refreshInfo = current.refresh?.attempted
-                    ? (current.refresh.success ? ' (refresh ok)' : ` (refresh failed: ${current.refresh.message || 'unknown'})`)
+                    ? (current.refresh.success ? ' (refresh ok)' : ` (refresh failed: ${escapeHtml(current.refresh.message || 'unknown')})`)
                     : (current.refresh?.skipped ? ' (refresh skipped)' : '');
                 item.innerHTML = `#${current.index}: <span style="color:#166534;">✓ ${escapeHtml(current.path || '')}</span>${refreshInfo}`;
+                if (current.path) {
+                    const exportBtn = document.createElement('button');
+                    exportBtn.type = 'button';
+                    exportBtn.textContent = 'Export';
+                    exportBtn.title = 'Export original JSON';
+                    exportBtn.style.cssText = 'margin-left: 8px; padding: 2px 8px; font-size: 11px; border-radius: 6px; border: 1px solid #93c5fd; background: #eff6ff; color: #1d4ed8; cursor: pointer;';
+                    exportBtn.addEventListener('click', async (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        try {
+                            await downloadCodexCredential(current.path);
+                        } catch (error) {
+                            console.error('Codex export failed:', error);
+                            showToast(t('common.error'), `Export failed: ${error.message}`, 'error');
+                        }
+                    });
+                    item.appendChild(exportBtn);
+                }
             } else if (current.error === 'duplicate') {
                 item.innerHTML = `#${current.index}: <span style="color:#b45309;">⚠ duplicate (${escapeHtml(current.reason || 'matched')})</span>
                     ${current.existingPath ? `<span style="color:#6b7280;">(${escapeHtml(current.existingPath)})</span>` : ''}`;
@@ -1905,6 +1988,7 @@ function showCodexBatchImportModal(providerType = 'openai-codex-oauth') {
                 body: JSON.stringify({
                     providerType,
                     tokens,
+                    rawTokens,
                     skipDuplicateCheck: skipDuplicateCheckInput.checked,
                     refreshAfterImport: refreshAfterImportInput.checked,
                     concurrency: effectiveImportConcurrency,

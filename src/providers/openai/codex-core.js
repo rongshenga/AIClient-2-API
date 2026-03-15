@@ -178,6 +178,9 @@ export class CodexApiService {
 
             return this.parseNonStreamResponse(response.data);
         } catch (error) {
+            if (error.response?.status === 429) {
+                await this._handle429Cooldown(error, 'non-stream');
+            }
             if (error.response?.status === 401) {
                 logger.info('[Codex] Received 401. Triggering background refresh via PoolManager...');
 
@@ -252,6 +255,9 @@ export class CodexApiService {
 
             yield* this.parseSSEStream(response.data);
         } catch (error) {
+            if (error.response?.status === 429) {
+                await this._handle429Cooldown(error, 'stream');
+            }
             if (error.response?.status === 401) {
                 logger.info('[Codex] Received 401 during stream. Triggering background refresh via PoolManager...');
 
@@ -273,6 +279,492 @@ export class CodexApiService {
                 await this.logUpstreamRequestError('streaming', error, { url, model, body, headers });
                 throw error;
             }
+        }
+    }
+
+    _getProvider429QuotaCooldownMs() {
+        const rawCooldownMs = this.config?.PROVIDER_429_QUOTA_COOLDOWN_MS;
+        const parsedCooldownMs = Number.parseInt(rawCooldownMs, 10);
+        if (Number.isFinite(parsedCooldownMs)) {
+            // 允许配置 1 分钟 ~ 30 天，避免误配导致无限冷却或疯狂重试
+            return Math.max(60_000, Math.min(parsedCooldownMs, 30 * 24 * 60 * 60 * 1000));
+        }
+        // 默认：6 小时；适合“额度用光/充值后恢复”的冷却探测
+        return 6 * 60 * 60 * 1000;
+    }
+
+    _getProvider429RateLimitCooldownMs() {
+        const rawCooldownMs = this.config?.PROVIDER_429_RATE_LIMIT_COOLDOWN_MS;
+        const parsedCooldownMs = Number.parseInt(rawCooldownMs, 10);
+        if (Number.isFinite(parsedCooldownMs)) {
+            // 允许配置 1 秒 ~ 10 分钟
+            return Math.max(1_000, Math.min(parsedCooldownMs, 10 * 60 * 1000));
+        }
+        // 默认：30 秒（避免短期 429 直接把节点打成长期不可用）
+        return 30_000;
+    }
+
+    _classify429Type(bodyText = '', fallbackMessage = '') {
+        const merged = `${String(bodyText || '')}\n${String(fallbackMessage || '')}`.toLowerCase();
+        if (!merged.trim()) {
+            return { isQuotaExhausted: false, isRateLimited: false };
+        }
+
+        let isQuotaExhausted = false;
+        let isRateLimited = false;
+
+        // OpenAI 常见字段/码：insufficient_quota
+        if (merged.includes('insufficient_quota')) {
+            isQuotaExhausted = true;
+        }
+
+        // 兼容一些变体：quota_exceeded / quota exceeded
+        if (merged.includes('quota_exceeded') || merged.includes('quota exceeded')) {
+            isQuotaExhausted = true;
+        }
+
+        // 更宽松的语义匹配：出现 quota 且伴随 credits/billing/plan/exceeded 等关键字
+        if (!isQuotaExhausted && merged.includes('quota')) {
+            const keywords = ['credit', 'billing', 'plan', 'exceed', 'exceeded', 'limit', 'payment'];
+            if (keywords.some((keyword) => merged.includes(keyword))) {
+                isQuotaExhausted = true;
+            }
+        }
+
+        isRateLimited = (
+            merged.includes('rate limit')
+            || merged.includes('ratelimit')
+            || merged.includes('too many requests')
+            || merged.includes('slow_down')
+            || merged.includes('slow down')
+        );
+
+        return { isQuotaExhausted, isRateLimited };
+    }
+
+    _looksLikeQuotaExhausted429(bodyText = '', fallbackMessage = '') {
+        return this._classify429Type(bodyText, fallbackMessage).isQuotaExhausted;
+    }
+
+    _looksLikeRateLimit429(bodyText = '', fallbackMessage = '') {
+        return this._classify429Type(bodyText, fallbackMessage).isRateLimited;
+    }
+
+    _parseRetryAfterMs(headers = {}) {
+        if (!headers || typeof headers !== 'object') {
+            return null;
+        }
+
+        const raw = headers['retry-after'] || headers['Retry-After'] || null;
+        if (!raw) {
+            return null;
+        }
+
+        const asNumber = Number.parseFloat(String(raw));
+        if (Number.isFinite(asNumber)) {
+            // retry-after 以秒为单位
+            return Math.max(0, Math.floor(asNumber * 1000));
+        }
+
+        // 也可能是 HTTP-date
+        const asDate = new Date(String(raw));
+        if (!Number.isNaN(asDate.getTime())) {
+            return Math.max(0, asDate.getTime() - Date.now());
+        }
+
+        return null;
+    }
+
+    _parseTimeValue(value, { numericMode = 'epoch_or_seconds', preferDateFirst = false } = {}) {
+        const parseNumber = (numeric) => {
+            if (!Number.isFinite(numeric)) {
+                return null;
+            }
+
+            if (numericMode === 'milliseconds') {
+                return Math.max(0, Math.floor(numeric));
+            }
+
+            if (numericMode === 'seconds') {
+                return Math.max(0, Math.floor(numeric * 1000));
+            }
+
+            // epoch_or_seconds：尝试识别 epoch（秒/毫秒），否则按“秒”处理
+            if (numeric > 1e12) {
+                return Math.max(0, Math.floor(numeric - Date.now()));
+            }
+            if (numeric > 1e9) {
+                return Math.max(0, Math.floor(numeric * 1000 - Date.now()));
+            }
+            return Math.max(0, Math.floor(numeric * 1000));
+        };
+
+        if (value === undefined || value === null) {
+            return null;
+        }
+
+        if (typeof value === 'number') {
+            return parseNumber(value);
+        }
+
+        const text = String(value).trim();
+        if (!text) {
+            return null;
+        }
+
+        // 纯数字
+        if (/^-?\d+(?:\.\d+)?$/.test(text)) {
+            const numeric = Number.parseFloat(text);
+            return parseNumber(numeric);
+        }
+
+        // 特定上下文（例如 *_at / until / expires）优先尝试日期解析
+        if (preferDateFirst) {
+            const asDate = new Date(text);
+            if (!Number.isNaN(asDate.getTime())) {
+                return Math.max(0, asDate.getTime() - Date.now());
+            }
+        }
+
+        // Go duration / OpenAI rate limit reset 常见格式：1s / 6m0s / 200ms / 1h2m3s
+        const durationRegex = /(\d+(?:\.\d+)?)(ms|s|m|h|d)/g;
+        let match;
+        let totalMs = 0;
+        let matched = false;
+        while ((match = durationRegex.exec(text)) !== null) {
+            matched = true;
+            const amount = Number.parseFloat(match[1]);
+            if (!Number.isFinite(amount)) {
+                continue;
+            }
+            const unit = match[2];
+            const factor = unit === 'ms'
+                ? 1
+                : unit === 's'
+                    ? 1000
+                    : unit === 'm'
+                        ? 60_000
+                        : unit === 'h'
+                            ? 3_600_000
+                            : 86_400_000;
+            totalMs += amount * factor;
+        }
+        if (matched) {
+            return Math.max(0, Math.floor(totalMs));
+        }
+
+        // HTTP-date / ISO timestamp
+        if (!preferDateFirst) {
+            const asDate = new Date(text);
+            if (!Number.isNaN(asDate.getTime())) {
+                return Math.max(0, asDate.getTime() - Date.now());
+            }
+        }
+
+        return null;
+    }
+
+    _parseDurationOrDateMs(value) {
+        return this._parseTimeValue(value, { numericMode: 'epoch_or_seconds' });
+    }
+
+    _pushCooldownCandidate(candidates, ms, source) {
+        if (!Array.isArray(candidates)) {
+            return;
+        }
+        if (!Number.isFinite(ms) || ms === null || ms === undefined) {
+            return;
+        }
+        const normalized = Math.max(0, Math.floor(ms));
+        candidates.push({ ms: normalized, source });
+    }
+
+    _pickMaxCooldownCandidate(candidates) {
+        if (!Array.isArray(candidates) || candidates.length === 0) {
+            return null;
+        }
+        return candidates.reduce((best, current) => current.ms > best.ms ? current : best, candidates[0]);
+    }
+
+    _extract429CooldownFromHeaders(headers = {}) {
+        if (!headers || typeof headers !== 'object') {
+            return null;
+        }
+
+        const candidates = [];
+
+        const retryAfterMs = this._parseRetryAfterMs(headers);
+        if (retryAfterMs !== null) {
+            this._pushCooldownCandidate(candidates, retryAfterMs, 'header.retry-after');
+        }
+
+        const headerEntries = Object.entries(headers);
+        for (const [rawKey, rawValue] of headerEntries) {
+            const key = String(rawKey || '').toLowerCase();
+            if (!key) {
+                continue;
+            }
+
+            // IETF RateLimit headers / OpenAI 私有头：ratelimit-reset / x-ratelimit-reset-*
+            const isResetHeader = key === 'ratelimit-reset'
+                || key === 'x-ratelimit-reset'
+                || key.startsWith('x-ratelimit-reset-');
+            if (!isResetHeader) {
+                continue;
+            }
+
+            const parsedMs = this._parseDurationOrDateMs(rawValue);
+            if (parsedMs !== null) {
+                this._pushCooldownCandidate(candidates, parsedMs, `header.${key}`);
+            }
+        }
+
+        return this._pickMaxCooldownCandidate(candidates);
+    }
+
+    _pick429DiagnosticsHeaders(headers = {}) {
+        if (!headers || typeof headers !== 'object') {
+            return {};
+        }
+
+        const picked = {};
+        const entries = Object.entries(headers);
+        for (const [rawKey, rawValue] of entries) {
+            const key = String(rawKey || '');
+            const keyLower = key.toLowerCase();
+
+            const shouldInclude = keyLower === 'retry-after'
+                || keyLower === 'ratelimit-reset'
+                || keyLower === 'x-ratelimit-reset'
+                || keyLower.startsWith('x-ratelimit-')
+                || keyLower.startsWith('ratelimit-')
+                || keyLower === 'x-request-id'
+                || keyLower === 'request-id'
+                || keyLower === 'content-type';
+
+            if (!shouldInclude) {
+                continue;
+            }
+
+            picked[keyLower] = rawValue;
+        }
+
+        return picked;
+    }
+
+    _parseCooldownMsFromText(text = '') {
+        const raw = String(text || '');
+        if (!raw.trim()) {
+            return null;
+        }
+
+        const patterns = [
+            /(?:try again in|please try again in)\s*(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hours?|d|days?)\b/i,
+            /(?:retry(?:\s*after)?|retry-after)\s*(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hours?|d|days?)\b/i,
+            /(?:please wait|wait)\s*(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hours?|d|days?)\b/i
+        ];
+
+        for (const pattern of patterns) {
+            const match = raw.match(pattern);
+            if (!match) continue;
+
+            const amount = Number.parseFloat(match[1]);
+            if (!Number.isFinite(amount)) continue;
+
+            const unit = match[2].toLowerCase();
+            const factor = unit.startsWith('ms')
+                ? 1
+                : unit.startsWith('s')
+                    ? 1000
+                    : unit.startsWith('m')
+                        ? 60_000
+                        : unit.startsWith('h')
+                            ? 3_600_000
+                            : 86_400_000;
+            return Math.max(0, Math.floor(amount * factor));
+        }
+
+        // 兼容 "try again in 6m0s" 这种 Go duration 的写法
+        const durationMatch = raw.match(/(?:try again in|please try again in|retry(?:\s*after)?)\s*(\d+(?:\.\d+)?(?:ms|s|m|h|d)(?:\d+(?:\.\d+)?(?:ms|s|m|h|d))*)/i);
+        if (durationMatch?.[1]) {
+            const parsed = this._parseDurationOrDateMs(durationMatch[1]);
+            if (parsed !== null) {
+                return parsed;
+            }
+        }
+
+        return null;
+    }
+
+    _parseCooldownMsFromKeyValue(key = '', value) {
+        const normalizedKey = String(key || '').toLowerCase();
+        if (!normalizedKey) {
+            return null;
+        }
+
+        if (value === undefined || value === null) {
+            return null;
+        }
+
+        const treatAsMilliseconds = normalizedKey.includes('ms');
+        const looksLikeAbsoluteTime = normalizedKey.includes('reset_at')
+            || normalizedKey.includes('retry_at')
+            || normalizedKey.includes('available_at')
+            || normalizedKey.includes('next_allowed')
+            || normalizedKey.endsWith('_at')
+            || normalizedKey.includes('until')
+            || normalizedKey.includes('expires');
+
+        const numericMode = treatAsMilliseconds
+            ? 'milliseconds'
+            : (looksLikeAbsoluteTime ? 'epoch_or_seconds' : 'seconds');
+
+        return this._parseTimeValue(value, { numericMode, preferDateFirst: looksLikeAbsoluteTime });
+    }
+
+    _extract429CooldownFromBody(responseData, bodyText = '', fallbackMessage = '') {
+        const candidates = [];
+
+        const parseJsonStringIfPossible = (text) => {
+            const trimmed = String(text || '').trim();
+            if (!trimmed) return null;
+            if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null;
+            try {
+                return JSON.parse(trimmed);
+            } catch {
+                return null;
+            }
+        };
+
+        const root = (() => {
+            if (responseData && typeof responseData === 'object' && !Buffer.isBuffer(responseData)) {
+                return responseData;
+            }
+            if (typeof responseData === 'string') {
+                return parseJsonStringIfPossible(responseData);
+            }
+            return parseJsonStringIfPossible(bodyText);
+        })();
+
+        const visited = new WeakSet();
+        const walk = (node, depth = 0) => {
+            if (!node || depth > 6) return;
+            if (typeof node !== 'object') return;
+
+            if (visited.has(node)) return;
+            visited.add(node);
+
+            if (Array.isArray(node)) {
+                // 限制遍历长度，避免极端响应导致过度开销
+                const slice = node.slice(0, 50);
+                for (const item of slice) {
+                    walk(item, depth + 1);
+                }
+                return;
+            }
+
+            for (const [rawKey, rawValue] of Object.entries(node)) {
+                const key = String(rawKey || '');
+                const keyLower = key.toLowerCase();
+
+                const keyHints = ['retry', 'reset', 'cooldown', 'wait', 'available', 'next', 'until', 'expires'];
+                if (keyHints.some((hint) => keyLower.includes(hint))) {
+                    const parsed = this._parseCooldownMsFromKeyValue(keyLower, rawValue);
+                    if (parsed !== null) {
+                        this._pushCooldownCandidate(candidates, parsed, `body.${keyLower}`);
+                    }
+                }
+
+                if (typeof rawValue === 'string' && keyLower.includes('message')) {
+                    const parsedFromMessage = this._parseCooldownMsFromText(rawValue);
+                    if (parsedFromMessage !== null) {
+                        this._pushCooldownCandidate(candidates, parsedFromMessage, 'body.message');
+                    }
+                }
+
+                walk(rawValue, depth + 1);
+            }
+        };
+
+        if (root) {
+            walk(root, 0);
+        }
+
+        const combinedText = `${String(bodyText || '')}\n${String(fallbackMessage || '')}`;
+        const fromText = this._parseCooldownMsFromText(combinedText);
+        if (fromText !== null) {
+            this._pushCooldownCandidate(candidates, fromText, 'body.text');
+        }
+
+        return this._pickMaxCooldownCandidate(candidates);
+    }
+
+    async _handle429Cooldown(error, context = 'unknown') {
+        try {
+            const bodyText = await this.readUpstreamErrorBody(error.response?.data, 8000);
+            const headerCooldown = this._extract429CooldownFromHeaders(error.response?.headers);
+            const bodyCooldown = this._extract429CooldownFromBody(error.response?.data, bodyText, error.message);
+            const upstreamCooldown = (() => {
+                if (headerCooldown && bodyCooldown) {
+                    return headerCooldown.ms >= bodyCooldown.ms ? headerCooldown : bodyCooldown;
+                }
+                return headerCooldown || bodyCooldown || null;
+            })();
+
+            const classified = this._classify429Type(bodyText, error.message);
+            const isQuotaExhausted = classified.isQuotaExhausted;
+            const isRateLimited = classified.isRateLimited || (upstreamCooldown?.ms !== null && upstreamCooldown?.ms > 0);
+
+            // 429 默认进入冷却：
+            // - 能识别 quota 时走长冷却（额度用光/充值后恢复）
+            // - 能识别 rate limit 时走短冷却（含 Retry-After）
+            // - 都识别不了时，保守按 quota 处理（避免“额度用光”账号被无限快速重试刷屏）
+            const cooldownReason = isQuotaExhausted ? 'quota' : (isRateLimited ? 'rate_limit' : 'quota_unknown');
+            const maxUpstreamCooldownMs = 30 * 24 * 60 * 60 * 1000; // 30 天上限，防止异常头导致永久冷却
+            const hasUpstreamCooldown = Number.isFinite(upstreamCooldown?.ms) && upstreamCooldown.ms > 0;
+            const cooldownSource = hasUpstreamCooldown ? upstreamCooldown.source : null;
+            const cooldownMs = hasUpstreamCooldown
+                ? Math.max(1_000, Math.min(upstreamCooldown.ms, maxUpstreamCooldownMs))
+                : (isQuotaExhausted
+                    ? this._getProvider429QuotaCooldownMs()
+                    : (isRateLimited
+                        ? this._getProvider429RateLimitCooldownMs()
+                        : this._getProvider429QuotaCooldownMs()));
+            const recoveryTime = new Date(Date.now() + cooldownMs);
+
+            // 429 冷却“识别失败”时，仅打印上游 body 以便补齐解析（按你的要求：不做限流，刷屏提醒需要更新）
+            if (!hasUpstreamCooldown) {
+                try {
+                    logger.warn(
+                        `[Codex] 429 cooldown parse failed (${context}). Please update 429 parser. Fallback cooldownMs=${cooldownMs}, reason=${cooldownReason}. Upstream body: ${this.truncateForLog(bodyText, 8000)}`
+                    );
+                } catch {
+                    // ignore diagnostics failure
+                }
+            }
+
+            logger.warn(
+                `[Codex] Received 429 in ${context}. Cooling down credential ${this.uuid || 'unknown'} until ${recoveryTime.toISOString()} (reason=${cooldownReason}, cooldownMs=${cooldownMs}${cooldownSource ? `, source=${cooldownSource}` : ''})`
+            );
+
+            const poolManager = getProviderPoolManager();
+            if (poolManager && this.uuid) {
+                poolManager.markProviderUnhealthyWithRecoveryTime(
+                    MODEL_PROVIDER.CODEX_API,
+                    { uuid: this.uuid },
+                    `429 Cooldown (${cooldownReason}, ${context}${cooldownSource ? `, ${cooldownSource}` : ''})`,
+                    recoveryTime
+                );
+                error.credentialMarkedUnhealthy = true;
+            }
+
+            // 触发上层切换凭证，并避免重复累计错误次数
+            error.shouldSwitchCredential = true;
+            error.skipErrorCount = true;
+            return true;
+        } catch (handlerError) {
+            logger.warn(`[Codex] Failed to apply 429 quota cooldown in ${context}: ${handlerError.message}`);
+            return false;
         }
     }
 
@@ -361,6 +853,24 @@ export class CodexApiService {
         if (typeof masked.authorization === 'string' && masked.authorization.length > 0) {
             masked.authorization = this.maskToken(masked.authorization);
         }
+        return masked;
+    }
+
+    maskSensitiveResponseHeaders(headers = {}) {
+        if (!headers || typeof headers !== 'object') {
+            return {};
+        }
+
+        const masked = { ...headers };
+        for (const key of Object.keys(masked)) {
+            const normalizedKey = String(key || '').toLowerCase();
+            if (!normalizedKey) continue;
+
+            if (normalizedKey === 'set-cookie' || normalizedKey === 'cookie') {
+                masked[key] = '[REDACTED]';
+            }
+        }
+
         return masked;
     }
 
